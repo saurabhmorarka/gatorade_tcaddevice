@@ -37,6 +37,11 @@ def _densities(psi, phin, phip, ni_arr, Vt):
     return n, p
 
 
+def _semi_frac(mesh):
+    cv_semi = getattr(mesh, "cv_area_semi", None)
+    return np.ones(len(mesh.cv_area)) if cv_semi is None else cv_semi / mesh.cv_area
+
+
 def _residual(psi, mesh, Vt, Cdop, ni_arr, phin, phip, is_contact, psi_bc, poisson_scale):
     n, p = _densities(psi, phin, phip, ni_arr, Vt)
     N = len(psi)
@@ -46,7 +51,11 @@ def _residual(psi, mesh, Vt, Cdop, ni_arr, phin, phip, is_contact, psi_bc, poiss
     np.add.at(div_psi, ii, mesh.edge_g * (psi[jj] - psi[ii]))
     np.add.at(div_psi, jj, mesh.edge_g * (psi[ii] - psi[jj]))
 
-    Rpsi = (div_psi / mesh.cv_area - Q * (n - p - Cdop)) / poisson_scale
+    # Charge lives only in the semiconductor part of each control volume
+    # (an interface node's oxide half-cell holds none) - see
+    # newton_solver_qf_2d.py::_mesh_semi_geometry.
+    semi_frac = _semi_frac(mesh)
+    Rpsi = (div_psi / mesh.cv_area - Q * (n - p - Cdop) * semi_frac) / poisson_scale
     Rpsi[is_contact] = psi[is_contact] - psi_bc[is_contact]
     return Rpsi
 
@@ -61,7 +70,11 @@ def _residual_and_jacobian(psi, mesh, Vt, Cdop, ni_arr, phin, phip, is_contact, 
     np.add.at(div_psi, ii, g_e * (psi[jj] - psi[ii]))
     np.add.at(div_psi, jj, g_e * (psi[ii] - psi[jj]))
 
-    Rpsi = (div_psi / mesh.cv_area - Q * (n - p - Cdop)) / poisson_scale
+    # Charge lives only in the semiconductor part of each control volume
+    # (an interface node's oxide half-cell holds none) - see
+    # newton_solver_qf_2d.py::_mesh_semi_geometry.
+    semi_frac = _semi_frac(mesh)
+    Rpsi = (div_psi / mesh.cv_area - Q * (n - p - Cdop) * semi_frac) / poisson_scale
     Rpsi[is_contact] = psi[is_contact] - psi_bc[is_contact]
 
     dn_dpsi = n / Vt
@@ -83,7 +96,7 @@ def _residual_and_jacobian(psi, mesh, Vt, Cdop, ni_arr, phin, phip, is_contact, 
 
     node = np.arange(N)
     free = node[~is_contact]
-    add(free, free, -Q * (dn_dpsi[free] - dp_dpsi[free]) / poisson_scale)
+    add(free, free, -Q * (dn_dpsi[free] - dp_dpsi[free]) * semi_frac[free] / poisson_scale)
 
     interior_rows = np.concatenate(rows)
     interior_cols = np.concatenate(cols)

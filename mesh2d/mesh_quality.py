@@ -51,6 +51,9 @@ import warnings
 import numpy as np
 
 
+OBTUSE_TOL_DEG = 1e-6
+
+
 def _triangle_angles_deg(points, simplex):
     a, b, c = points[simplex[0]], points[simplex[1]], points[simplex[2]]
     angles = []
@@ -67,7 +70,10 @@ def mesh_quality_report(points, triangles):
     all_angles = np.array([_triangle_angles_deg(points, s) for s in triangles])
     max_angles = all_angles.max(axis=1)
     min_angles = all_angles.min(axis=1)
-    n_obtuse = int(np.sum(max_angles > 90.0))
+    # A right angle computed in floating point comes out as 90 +- ~1e-11
+    # deg; a quadtree mesh is ALL right/45-degree angles, so without a
+    # tolerance every other triangle would be miscounted as obtuse.
+    n_obtuse = int(np.sum(max_angles > 90.0 + OBTUSE_TOL_DEG))
     return {
         "n_triangles": len(triangles),
         "n_obtuse": n_obtuse,
@@ -77,12 +83,21 @@ def mesh_quality_report(points, triangles):
     }
 
 
-def check_mesh_quality(points, triangles, min_angle_floor_deg=15.0):
+def check_mesh_quality(points, triangles, min_angle_floor_deg=15.0, forbid_obtuse=False):
     """Mandatory pre-flight gate - raises if the mesh violates the one
     thing that IS a real bug (a triangle far below `triangle`'s own
     quality target), warns (every run, not just when something looks
-    wrong) about the informational obtuse-fraction residual."""
+    wrong) about the informational obtuse-fraction residual.
+
+    forbid_obtuse=True (used for the quadtree mesh style, which is non-
+    obtuse by construction - see mesh2d/quadtree.py) turns any obtuse
+    triangle into a hard error instead of a warning."""
     report = mesh_quality_report(points, triangles)
+    if forbid_obtuse and report["n_obtuse"]:
+        raise RuntimeError(
+            f"mesh2d: {report['n_obtuse']} obtuse triangle(s) (worst angle "
+            f"{report['worst_max_angle_deg']:.4f} deg) in a mesh style that must be non-obtuse "
+            "by construction - a mesh-generation bug.")
     if report["worst_min_angle_deg"] < min_angle_floor_deg:
         raise RuntimeError(
             f"mesh2d: a triangle with minimum angle {report['worst_min_angle_deg']:.1f} deg "

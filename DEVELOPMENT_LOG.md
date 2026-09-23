@@ -3375,3 +3375,97 @@ share the same contact/oxide-corner geometry issue (not yet checked, and
 that example is deliberately Poisson-only/no channel current by design,
 so may not be affected); the deferred velocity-saturation Ids-Vds work;
 DIBL/short-channel effects.
+
+## 29. Session 19: square-quadtree mesh, material-split box method, fast
+## robust Newton, velocity saturation - full Id-Vg/Id-Vd in ~20s
+
+**Mesh (`mesh2d/quadtree.py`, `mesh_style: quadtree`).** A balanced square
+quadtree: coarse `h_max` background, refined inside user `refine_boxes`
+(x/y range + h), graded from `interface_h` at oxide/Si interfaces and
+`junction_h` at metallurgical junctions. A cell without hanging nodes is
+cut along one diagonal; a cell with any (2:1 balance => at most one per
+side) gets a center fan - every triangle is 45-45-90, so the mesh is
+non-obtuse BY CONSTRUCTION (the quality gate now hard-fails on any obtuse
+triangle for this style). Squares matter: the earlier rectangular-cell
+attempt's center fans were ~15% obtuse. Exact alignment to every region/
+contact/mesa coordinate is done in integer units of a base length `u`
+(largest divisor of all feature spacings <= the finest h) with the
+quadtree origin chosen among feature coordinates to maximize their dyadic
+alignment; a cell splits only where a feature cuts it, so refinement stays
+local (no global X/Y lines). MOSFET: 4680 points, 0.05s to build. S/D
+contacts inset to [0,0.25]/[0.85,1.1] um (off the gate-oxide corner).
+
+**Box-method bugs found by the right-angle mesh (`mesh2d/fvgeometry.py`).**
+(1) Domain-boundary edges carried no flux at all; a convex corner node on
+a diagonal-cut square then had zero coupling -> singular Jacobian. Facets
+are now sums of signed per-triangle half-facets (edge midpoint ->
+circumcenter), boundary edges included. (2) No material split: at an
+oxide/Si interface node the carrier/doping charge used the WHOLE control
+volume (half of it oxide) and interface-parallel current used the oxide
+half-facet too. New `facet_length_semi`/`cv_area_semi` (semiconductor
+triangles only) are used for current, charge and recombination
+(`newton_solver_qf_2d.py::_mesh_semi_geometry`, `current.py`,
+`poisson2d_mos.py`). An edge wholly in the oxide gets facet_semi=0, which
+IS the no-flux interface BC - the spurious leak into oxide nodes (pinned
+phi=0) that sessions 17/18 fought is gone at the source, no edge mask.
+FD Jacobian check: 3.6e-10. Equilibrium now converges in 8-11 Newton
+iterations (was 83).
+
+**The Vds=1V near-Vt wall was the interface discretization, not Newton.**
+With (2) fixed, the Vds=1V sweep went straight through Vgs=0.1-0.3V in
+6-11 iterations per point. What remained was slow, stalling Newton above
+threshold: continuity rows are normalized by one global Q*Dn*ni/h^2, so an
+n+ node's residual is ~1e9x a channel node's for the same relative error;
+a quadratically convergent step (|F| 1.3 -> 1.4e5, growing exactly as t^2)
+was cut to ~1e-3 by the max-norm line search. Fixes: backtracking on the
+L2 norm of the ROW-SCALED residual (each row / its largest Jacobian
+entry), and update-based convergence (|dpsi| < 1e-9 V and |F| < 1e-4 -
+the n+ rows have a ~1e-5 round-off floor that f_tol=1e-9 burned ~20
+iterations on). Result: 5-6 iterations per warm step.
+
+**Speed (`main2d_mosfet_sweep.py` rewritten).** Linear solve dominates
+(SuperLU ~60ms/iteration at 14k unknowns; COLAMD already beats every other
+scipy ordering). So: fewer solves - secant (two-point) predictor, adaptive
+continuation (halve on failure, double after a <=4-iteration step, first
+step 0.1V), no cold starts at high bias (equilibrium anchor -> Vds ramp at
+Vgs=0 -> Vgs sweep; Id-Vd: Vgs ramp at Vds=0 -> Vds sweep), and every
+curve in its own process. 2 Id-Vg curves (37 pts) + 4 Id-Vd curves (16
+pts): all 138 points converge, ~19s wall-clock.
+
+**Scharfetter-Gummel flux in quasi-Fermi unknowns.** Letting boundary
+edges carry flux exposed a ~500x-too-large 2D diode current (and an ohmic-
+looking leak near 0 V): the anode contact ends exactly at the p-well edge,
+so the boundary edge from its end node to the n-type surface neighbor
+crosses the junction, and the plain-gradient current's arithmetic mean
+p_avg ~ p_p+/2 made it a hole shunt (interior junction edges carry the
+same error, milder). Replaced by SG written directly in the existing
+unknowns - In = Q*mu*Vt*facet/L*(n_j*B(d) - n_i*B(-d)), d = dpsi/Vt, with
+n,p from psi/phin/phip - one shared `edge_currents()` for residual,
+Jacobian and `current.py`. (Session 9's 1D failures were SG paired with
+density/log-density UNKNOWNS; the QF unknowns are kept.) FD check 4e-10.
+2D diode now tracks 1D across forward bias (was ~500x off at 0.5V on
+main); MOSFET metrics unchanged, fewer Newton iterations.
+
+**Velocity saturation.** Caughey-Thomas (vsat_n=1e7 cm/s, beta_n=2) on
+top of the doping-dependent mobility, driven by the electrostatic field
+PROJECTED ON EACH EDGE (Eparallel). Not the node |E| (includes the
+current-free vertical gate field - the earlier "collapse at high Vgs");
+not the quasi-Fermi gradient (tried first: phin is undetermined where
+n~0, and Newton turned erratic ramping Vds past 0.5V at Vgs=0 - the
+low-density problem commercial tools document for GradQuasiFermi).
+Exact Jacobian (FD 9e-11). `physics: velocity_saturation: true` in the
+YAML. Id at Vgs=Vds=1.5V drops 388 -> 212 uA/um; subthreshold unchanged.
+
+**Metrics (`solver2d/mosfet_metrics.py`), Lg=0.5um, tox=5nm, Na=1e16:**
+SS = 68.3 / 71.0 mV/dec (Vds 0.05 / 1V), Vt,cc = 0.785 -> 0.746 V,
+DIBL = 41 mV/V, Vt,lin(max gm) = 0.886 V, Ion = 202 uA/um, Ioff = 7.3e-14
+A/um (the flat floor below Vgs~0.2V is drain-body SRH generation leakage,
+growing with Vds - real physics). SS is the minimum of dVgs/dlog10(Id);
+the old untracked main2d_mosfet_dibl.py (fit over the lowest-Vgs points,
+i.e. over the leakage floor) was removed.
+
+Full run (6 curves, 138 points, velocity saturation on): ~18s wall-clock.
+Regression: testsuite 37/37 OK; 2D diode 21/21 converged; MOS capacitor
+31/31 (C-V within ~3% of before - the interface-charge fix). Not done: `solver2d/arclength_continuation.py`/`mosfet_arclength.py`
+(previous session, untracked) are no longer needed for this device and
+were left out of the commit.
