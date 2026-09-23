@@ -47,8 +47,34 @@ from core.params import Q, Material
 from core.jacobian_scaling import equilibrated_spsolve
 from core.physics import equilibrium_bulk_potential_arr
 from core.solver import contact_values
+from core.bank_rose_damping import bank_rose_solve
 
 MAX_QF_STEP = 5.0
+MAX_PSI_STEP = 1.0
+PSI_UPDATE_TOL = 1e-9   # V - converged once the potential update is this small...
+RES_ACCEPT = 1e-4       # ...and |F|_inf is below this (see _run_newton)
+
+
+def _uniform_clip(delta, N):
+    """Same uniform-RESCALE convention as
+    avalanche/newton_solver_avalanche.py's own `_clip` helper (see that
+    module's long docstring for the full rationale): cap the step's
+    WORST-OFFENDING component (psi against MAX_PSI_STEP, phin/phip against
+    MAX_QF_STEP) by rescaling the ENTIRE delta vector by one global scalar,
+    not by clipping each component independently - only a uniform rescale
+    preserves J(U)*delta=-F(U)'s guarantee that delta is a descent
+    direction for ||F||^2.
+
+    ONLY used by the optional damping="bank_rose" path below (see
+    newton_solve_2d's docstring for why plain backtracking stays the
+    default and does its own, simpler per-component clip inline in
+    _run_newton) - kept here rather than as a lambda so
+    _run_newton's bank_rose branch and any future caller share one
+    implementation."""
+    max_psi = np.max(np.abs(delta[:N])) if N else 0.0
+    max_qf = np.max(np.abs(delta[N:3 * N])) if 2 * N else 0.0
+    scale = max(max_psi / MAX_PSI_STEP, max_qf / MAX_QF_STEP, 1.0)
+    return delta / scale if scale > 1.0 else delta
 
 # Regularization field scale (V/cm) for the Caughey-Thomas |E| -> smooth
 # even function of E: E_reg = sqrt(E^2 + E_SMOOTH^2). This is what makes
@@ -133,6 +159,44 @@ def _mesh_mobility_nodal(mesh, mat):
     return mu_n_node, mu_p_node
 
 
+def edge_mobility(mesh, mat, psi, velocity_saturation=False):
+    """Per-edge (mu_n_e, mu_p_e, dmu_n/d(dpsi_e), dmu_p/d(dpsi_e)).
+
+    mu0 is the doping-dependent (Caughey-Thomas) low-field mobility,
+    averaged to the edge. With velocity_saturation=True it is further
+    reduced by the Caughey-Thomas high-field model (mobility_field) driven
+    by the electrostatic field PROJECTED ON THE EDGE, E_par = dpsi/edge_len
+    (the edge-based form of the "Eparallel" driving force).
+
+    Why this driving force:
+      * Not |E| at a node: that includes the large, current-free vertical
+        gate field across the inversion layer and throttles the channel
+        mobility more and more with Vgs (an earlier attempt's "Id-Vg
+        collapses at high Vgs"). On an edge, the channel's horizontal edges
+        see only the lateral field; the vertical field lives on vertical
+        edges, which carry almost no current.
+      * Not the quasi-Fermi gradient dphi/edge_len ("GradQuasiFermi"): in
+        a depletion region n ~ 0, so phin is numerically undetermined and
+        its gradient arbitrary - tried first, and Newton turned erratic
+        ramping Vds past ~0.5 V at Vgs=0 (the same low-density convergence
+        problem commercial simulators document for that driving force).
+        dpsi is always well defined.
+    In equilibrium the edge current is 0 whatever mu is, so this changes
+    nothing there."""
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
+    mu_n0 = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
+    mu_p0 = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
+    if not velocity_saturation:
+        z = np.zeros_like(mu_n0)
+        return mu_n0, mu_p0, z, z
+    edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
+    E = (psi[jj] - psi[ii]) / edge_len
+    mu_n, dmu_n_dE = mobility_field(E, mu_n0, mat.vsat_n, mat.beta_n)
+    mu_p, dmu_p_dE = mobility_field(E, mu_p0, mat.vsat_p, mat.beta_p)
+    return mu_n, mu_p, dmu_n_dE / edge_len, dmu_p_dE / edge_len
+
+
 def _semiconductor_edge_mask(mesh):
     """Boolean (E,) mask, True on edges where BOTH endpoints are real
     semiconductor (not insulator/oxide) - the physically correct no-flux
@@ -177,6 +241,96 @@ def _mesh_ni_edge_g(mesh, mat):
     return ni_arr, g_e
 
 
+def _mesh_semi_geometry(mesh):
+    """(facet_semi, cv_semi, cv_semi_safe): the semiconductor-only part of
+    each edge's Voronoi facet and each node's control volume (see
+    mesh2d/fvgeometry.py::build_fv_geometry's tri_insulator docstring).
+    Carrier current flows only through facet_semi - an edge wholly inside
+    the oxide has facet_semi=0, which IS the no-flux semiconductor/
+    insulator BC, and an edge along the interface keeps only its silicon
+    half. Carrier/doping charge and recombination live only in cv_semi -
+    an interface node's oxide half-cell holds none. For a homogeneous mesh
+    both equal the plain facet_length/cv_area. cv_semi_safe replaces 0
+    (a pure-oxide node, whose continuity rows are pinned anyway) by the full
+    cv_area so dividing by it is always finite."""
+    facet_semi = mesh.facet_length_semi if getattr(mesh, "facet_length_semi", None) is not None \
+        else mesh.facet_length
+    cv_semi = mesh.cv_area_semi if getattr(mesh, "cv_area_semi", None) is not None else mesh.cv_area
+    cv_semi_safe = np.where(cv_semi > 0.0, cv_semi, mesh.cv_area)
+    return facet_semi, cv_semi, cv_semi_safe
+
+
+def bernoulli(x):
+    """B(x) = x/(exp(x)-1) and B'(x), overflow-safe, Taylor near 0."""
+    x = np.asarray(x, dtype=float)
+    small = np.abs(x) < 1e-4
+    xs = np.where(small, 1.0, np.clip(x, -700.0, 700.0))
+    B = np.where(small, 1.0 - x / 2.0 + x * x / 12.0, xs / np.expm1(xs))
+    dB = np.where(small, -0.5 + x / 6.0, B * (1.0 - B) / xs - B)
+    return B, dB
+
+
+def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, edge_mask=None,
+                  jacobian=False):
+    """Electron/hole current through every edge's (semiconductor) facet,
+    direction i -> j, A per unit depth - the ONE edge-current formula the
+    residual, the Jacobian and solver2d/current.py all share.
+
+    Scharfetter-Gummel, written in this solver's quasi-Fermi unknowns
+    (nodal n, p = ni*exp(...) of psi/phin/phip, so no change of variables):
+        In = Q*mu_n*Vt*facet/L * (n_j*B(d) - n_i*B(-d))
+        Ip = Q*mu_p*Vt*facet/L * (p_i*B(d) - p_j*B(-d)),   d = (psi_j-psi_i)/Vt
+    For d -> 0 this reduces exactly to the plain-gradient -Q*mu*n*dphi/L
+    the solver used before; unlike it, it stays exact when the density
+    varies exponentially along the edge. The arithmetic mean n_avg that
+    form needed is badly wrong there: across a p/n junction p_avg ~
+    p_p+/2, so a junction-crossing edge (the 2D diode's anode-end node to
+    its n-type surface neighbor) became an ohmic hole shunt - found as a
+    ~1e4x excess diode current near 0 V once domain-boundary edges started
+    carrying flux (see mesh2d/fvgeometry.py).
+
+    jacobian=True also returns the 8 partial derivatives
+    (dIn/dpsi_i, dIn/dpsi_j, dIn/dphin_i, dIn/dphin_j,
+     dIp/dpsi_i, dIp/dpsi_j, dIp/dphip_i, dIp/dphip_j)."""
+    Vt = mat.Vt
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
+    facet_semi, _, _ = _mesh_semi_geometry(mesh)
+    mu_n, mu_p, dmu_n, dmu_p = edge_mobility(mesh, mat, psi, velocity_saturation)
+    geo = Q * Vt * facet_semi / edge_len
+    if edge_mask is not None:
+        geo = geo * edge_mask
+    d = (psi[jj] - psi[ii]) / Vt
+    Bp, dBp = bernoulli(d)
+    Bm, dBm = bernoulli(-d)
+    Sn = n[jj] * Bp - n[ii] * Bm
+    Sp = p[ii] * Bp - p[jj] * Bm
+    In = geo * mu_n * Sn
+    Ip = geo * mu_p * Sp
+    if not jacobian:
+        return In, Ip
+    cn, cp = geo * mu_n, geo * mu_p
+    # d/dpsi: through n,p (dn/dpsi = n/Vt, dp/dpsi = -p/Vt), through B(+-d)
+    # (dd/dpsi_j = 1/Vt), and through mu (velocity saturation, dmu/d(dpsi)).
+    dSn_dpsi_j = (n[jj] * Bp + n[jj] * dBp + n[ii] * dBm) / Vt
+    dSn_dpsi_i = -(n[ii] * Bm + n[jj] * dBp + n[ii] * dBm) / Vt
+    dSp_dpsi_j = (p[jj] * Bm + p[ii] * dBp + p[jj] * dBm) / Vt
+    dSp_dpsi_i = -(p[ii] * Bp + p[ii] * dBp + p[jj] * dBm) / Vt
+    vn = geo * Sn * dmu_n
+    vp = geo * Sp * dmu_p
+    dIn_dpsi_i = cn * dSn_dpsi_i - vn
+    dIn_dpsi_j = cn * dSn_dpsi_j + vn
+    dIp_dpsi_i = cp * dSp_dpsi_i - vp
+    dIp_dpsi_j = cp * dSp_dpsi_j + vp
+    # d/dphi: only through n,p (dn/dphin = -n/Vt, dp/dphip = p/Vt).
+    dIn_dphin_i = cn * n[ii] * Bm / Vt
+    dIn_dphin_j = -cn * n[jj] * Bp / Vt
+    dIp_dphip_i = cp * p[ii] * Bp / Vt
+    dIp_dphip_j = -cp * p[jj] * Bm / Vt
+    return In, Ip, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
+                    dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j)
+
+
 def poisson_row_scale(mat: Material, h_typ: float) -> float:
     return mat.eps * mat.Vt / h_typ ** 2
 
@@ -199,7 +353,8 @@ def continuity_row_scale(mat: Material, h_typ: float) -> float:
     return Q * mat.Dn * mat.ni / h_typ ** 2
 
 
-def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale):
+def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
+              edge_mask=None, velocity_saturation=False):
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
     ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
@@ -208,34 +363,10 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
 
-    n_avg = 0.5 * (n[ii] + n[jj])
-    p_avg = 0.5 * (p[ii] + p[jj])
-    # Doping-dependent (NOT field-dependent) mobility: static per-node
-    # arrays averaged to an edge value, same convention as n_avg/p_avg
-    # above - see mobility_doping()'s docstring. The field-dependent
-    # (velocity-saturation) Caughey-Thomas model that used to sit here
-    # (mobility_field(), still defined above for future use) is
-    # deliberately NOT used in this active solve path for now (2026-09-13:
-    # it was making the MOSFET Ids-Vgs transfer curve worse, not better -
-    # collapsing at high Vgs instead of gracefully rolling off - so it was
-    # backed out pending its own separate debugging pass).
-    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
-    mu_n_e = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
-    mu_p_e = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
-    Jn_e = -Q * mu_n_e * n_avg * (phin[jj] - phin[ii]) / edge_len
-    Jp_e = -Q * mu_p_e * p_avg * (phip[jj] - phip[ii]) / edge_len
-    In_e = Jn_e * mesh.facet_length
-    Ip_e = Jp_e * mesh.facet_length
-    # 2026-09-13: the semiconductor/insulator no-flux edge mask
-    # (_semiconductor_edge_mask(), still defined above for a later pass) is
-    # deliberately NOT applied here for now - it is physically correct (see
-    # its own docstring) but made near-threshold/off-state Newton
-    # continuation dramatically slower and less robust across the whole
-    # sweep, not just the corner it targeted. Backed out so the on-state
-    # curve stays fast and clean; the known consequence is the flat
-    # off-state "leakage" floor from the contact/oxide corner edge is back
-    # (tracked as a known, deferred issue - to be solved in the 1D diode
-    # first per the user's own direction, then reapplied here).
+    _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
+    # Semiconductor-only facets already make every oxide edge carry zero
+    # current; edge_mask (optional) can exclude further edges.
+    In_e, Ip_e = edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask)
 
     div_psi = np.zeros(N)
     np.add.at(div_psi, ii, g_e * (psi[jj] - psi[ii]))
@@ -257,9 +388,9 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     denom_safe = np.where(denom > 0.0, denom, 1.0)
     R = np.where(denom > 0.0, (n * p - ni_arr ** 2) / denom_safe, 0.0)
 
-    Rpsi = (div_psi / mesh.cv_area - Q * (n - p - mesh.Cdop)) / poisson_scale
-    Rn = (div_n / mesh.cv_area - Q * R) / cont_scale
-    Rp = (div_p / mesh.cv_area + Q * R) / cont_scale
+    Rpsi = (div_psi - Q * (n - p - mesh.Cdop) * cv_semi) / mesh.cv_area / poisson_scale
+    Rn = (div_n / cv_semi_safe - Q * R) / cont_scale
+    Rp = (div_p / cv_semi_safe + Q * R) / cont_scale
 
     # phin/phip have NO governing equation at a non-contact insulator node
     # (n=p=0 there regardless of their value, since ni_arr=0 - there is no
@@ -284,7 +415,14 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
 
 
 def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
-                            poisson_scale, cont_scale):
+                            poisson_scale, cont_scale, edge_mask=None, velocity_saturation=False):
+    """edge_mask: optional boolean (E,) array - see _residual()'s own
+    (much longer) docstring for the full rationale; None (default, every
+    existing caller) reproduces this function's exact prior behavior
+    unchanged. Applied here by masking cn_e/cp_e (the common per-edge
+    mobility*geometry prefactor every dIn_d*/dIp_d* Jacobian term is built
+    from), plus In_e/Ip_e for F itself - equivalent to zeroing the excluded
+    edges' current (and its derivatives) entirely."""
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
     ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
@@ -294,28 +432,10 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
 
-    n_avg = 0.5 * (n[ii] + n[jj])
-    p_avg = 0.5 * (p[ii] + p[jj])
-    dphin_e = phin[jj] - phin[ii]
-    dphip_e = phip[jj] - phip[ii]
-
-    # Doping-dependent (NOT field-dependent) mobility - see the matching
-    # comment in _residual() above for why the field-dependent
-    # (Caughey-Thomas velocity-saturation) model was backed out of this
-    # active path. Depends only on the fixed mesh.Cdop array, so it needs
-    # NO Jacobian term of its own (no dmu/dpsi contribution below) -
-    # mu_n_e/mu_p_e here are plain constants as far as Newton's linearization
-    # is concerned, exactly like the original scalar mat.mu_n/mat.mu_p case.
-    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
-    mu_n_e = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
-    mu_p_e = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
-    # 2026-09-13: semiconductor/insulator no-flux edge masking backed out
-    # here too - see the matching comment in _residual() above.
-
-    Jn_e = -Q * mu_n_e * n_avg * dphin_e / edge_len
-    Jp_e = -Q * mu_p_e * p_avg * dphip_e / edge_len
-    In_e = Jn_e * mesh.facet_length
-    Ip_e = Jp_e * mesh.facet_length
+    _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
+    In_e, Ip_e, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
+                 dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j) = edge_currents(
+        mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, jacobian=True)
 
     div_psi = np.zeros(N)
     np.add.at(div_psi, ii, g_e * (psi[jj] - psi[ii]))
@@ -336,9 +456,9 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     num = n * p - ni_arr ** 2
     R = np.where(denom > 0.0, num / denom_safe, 0.0)
 
-    Rpsi = (div_psi / mesh.cv_area - Q * (n - p - mesh.Cdop)) / poisson_scale
-    Rn = (div_n / mesh.cv_area - Q * R) / cont_scale
-    Rp = (div_p / mesh.cv_area + Q * R) / cont_scale
+    Rpsi = (div_psi - Q * (n - p - mesh.Cdop) * cv_semi) / mesh.cv_area / poisson_scale
+    Rn = (div_n / cv_semi_safe - Q * R) / cont_scale
+    Rp = (div_p / cv_semi_safe + Q * R) / cont_scale
 
     # See _residual()'s matching comment: phin/phip are pinned to 0 (not
     # solved via the normal continuity equation) at every non-contact
@@ -363,30 +483,6 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     dR_dn = np.where(denom > 0.0, (p * denom - num * mat.tau_p) / denom_safe ** 2, 0.0)
     dR_dp = np.where(denom > 0.0, (n * denom - num * mat.tau_n) / denom_safe ** 2, 0.0)
 
-    # base_{n,p}_e are the mobility-FREE prefactors (Q*facet_length/edge_len);
-    # cn_e/cp_e fold in the (now doping-dependent, psi-INDEPENDENT) mu_n_e/
-    # mu_p_e per edge.
-    base_n_e = Q * mesh.facet_length / edge_len
-    base_p_e = Q * mesh.facet_length / edge_len
-    cn_e = mu_n_e * base_n_e
-    cp_e = mu_p_e * base_p_e
-
-    # dphin/dphip derivatives - identical in form to the original constant-
-    # mobility case (mu depends only on fixed doping, not phin/phip).
-    dIn_dphin_i = -cn_e * ((dn_dphin[ii] / 2.0) * dphin_e - n_avg)
-    dIn_dphin_j = -cn_e * ((dn_dphin[jj] / 2.0) * dphin_e + n_avg)
-    dIp_dphip_i = -cp_e * ((dp_dphip[ii] / 2.0) * dphip_e - p_avg)
-    dIp_dphip_j = -cp_e * ((dp_dphip[jj] / 2.0) * dphip_e + p_avg)
-
-    # dpsi derivatives: back to the SINGLE contribution from n_avg/p_avg's
-    # own psi dependence (mu is fixed w.r.t. psi now, so there is no
-    # product-rule mobility term here anymore - see this module's Task-1
-    # backout comment near mu_n_e/mu_p_e's definition above).
-    dIn_dpsi_i = -cn_e * (dn_dpsi[ii] / 2.0) * dphin_e
-    dIn_dpsi_j = -cn_e * (dn_dpsi[jj] / 2.0) * dphin_e
-    dIp_dpsi_i = -cp_e * (dp_dpsi[ii] / 2.0) * dphip_e
-    dIp_dpsi_j = -cp_e * (dp_dpsi[jj] / 2.0) * dphip_e
-
     rows_list, cols_list, data_list = [], [], []
 
     def add(rows, cols, vals):
@@ -398,6 +494,8 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     active_i = ~is_contact[ii]
     active_j = ~is_contact[jj]
     cv_i, cv_j = mesh.cv_area[ii], mesh.cv_area[jj]
+    semi_frac = cv_semi / mesh.cv_area     # charge lives only in the semiconductor part
+    cvs_i, cvs_j = cv_semi_safe[ii], cv_semi_safe[jj]
 
     # Electron/hole continuity rows additionally exclude is_oxide_free
     # nodes (pinned to phin=0/phip=0 above, not assembled normally here).
@@ -414,21 +512,21 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     node = np.arange(N)
     free = node[~is_contact]
     add(free, free,
-        (-Q * (dn_dpsi[free] - dp_dpsi[free]) / poisson_scale))
-    add(free, N + free, (-Q * dn_dphin[free] / poisson_scale))
-    add(free, 2 * N + free, (Q * dp_dphip[free] / poisson_scale))
+        (-Q * (dn_dpsi[free] - dp_dpsi[free]) * semi_frac[free] / poisson_scale))
+    add(free, N + free, (-Q * dn_dphin[free] * semi_frac[free] / poisson_scale))
+    add(free, 2 * N + free, (Q * dp_dphip[free] * semi_frac[free] / poisson_scale))
 
     # --- Electron continuity: per-edge current derivative ---
     r_n_i, r_n_j = N + ii, N + jj
-    add(r_n_i[cont_active_i], ii[cont_active_i], (dIn_dpsi_i / cv_i / cont_scale)[cont_active_i])
-    add(r_n_i[cont_active_i], jj[cont_active_i], (dIn_dpsi_j / cv_i / cont_scale)[cont_active_i])
-    add(r_n_i[cont_active_i], N + ii[cont_active_i], (dIn_dphin_i / cv_i / cont_scale)[cont_active_i])
-    add(r_n_i[cont_active_i], N + jj[cont_active_i], (dIn_dphin_j / cv_i / cont_scale)[cont_active_i])
+    add(r_n_i[cont_active_i], ii[cont_active_i], (dIn_dpsi_i / cvs_i / cont_scale)[cont_active_i])
+    add(r_n_i[cont_active_i], jj[cont_active_i], (dIn_dpsi_j / cvs_i / cont_scale)[cont_active_i])
+    add(r_n_i[cont_active_i], N + ii[cont_active_i], (dIn_dphin_i / cvs_i / cont_scale)[cont_active_i])
+    add(r_n_i[cont_active_i], N + jj[cont_active_i], (dIn_dphin_j / cvs_i / cont_scale)[cont_active_i])
 
-    add(r_n_j[cont_active_j], ii[cont_active_j], (-dIn_dpsi_i / cv_j / cont_scale)[cont_active_j])
-    add(r_n_j[cont_active_j], jj[cont_active_j], (-dIn_dpsi_j / cv_j / cont_scale)[cont_active_j])
-    add(r_n_j[cont_active_j], N + ii[cont_active_j], (-dIn_dphin_i / cv_j / cont_scale)[cont_active_j])
-    add(r_n_j[cont_active_j], N + jj[cont_active_j], (-dIn_dphin_j / cv_j / cont_scale)[cont_active_j])
+    add(r_n_j[cont_active_j], ii[cont_active_j], (-dIn_dpsi_i / cvs_j / cont_scale)[cont_active_j])
+    add(r_n_j[cont_active_j], jj[cont_active_j], (-dIn_dpsi_j / cvs_j / cont_scale)[cont_active_j])
+    add(r_n_j[cont_active_j], N + ii[cont_active_j], (-dIn_dphin_i / cvs_j / cont_scale)[cont_active_j])
+    add(r_n_j[cont_active_j], N + jj[cont_active_j], (-dIn_dphin_j / cvs_j / cont_scale)[cont_active_j])
 
     # --- Electron continuity: per-node recombination derivative ---
     free_np = node[~is_np_fixed]
@@ -439,15 +537,15 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
 
     # --- Hole continuity: per-edge current derivative ---
     r_p_i, r_p_j = 2 * N + ii, 2 * N + jj
-    add(r_p_i[cont_active_i], ii[cont_active_i], (dIp_dpsi_i / cv_i / cont_scale)[cont_active_i])
-    add(r_p_i[cont_active_i], jj[cont_active_i], (dIp_dpsi_j / cv_i / cont_scale)[cont_active_i])
-    add(r_p_i[cont_active_i], 2 * N + ii[cont_active_i], (dIp_dphip_i / cv_i / cont_scale)[cont_active_i])
-    add(r_p_i[cont_active_i], 2 * N + jj[cont_active_i], (dIp_dphip_j / cv_i / cont_scale)[cont_active_i])
+    add(r_p_i[cont_active_i], ii[cont_active_i], (dIp_dpsi_i / cvs_i / cont_scale)[cont_active_i])
+    add(r_p_i[cont_active_i], jj[cont_active_i], (dIp_dpsi_j / cvs_i / cont_scale)[cont_active_i])
+    add(r_p_i[cont_active_i], 2 * N + ii[cont_active_i], (dIp_dphip_i / cvs_i / cont_scale)[cont_active_i])
+    add(r_p_i[cont_active_i], 2 * N + jj[cont_active_i], (dIp_dphip_j / cvs_i / cont_scale)[cont_active_i])
 
-    add(r_p_j[cont_active_j], ii[cont_active_j], (-dIp_dpsi_i / cv_j / cont_scale)[cont_active_j])
-    add(r_p_j[cont_active_j], jj[cont_active_j], (-dIp_dpsi_j / cv_j / cont_scale)[cont_active_j])
-    add(r_p_j[cont_active_j], 2 * N + ii[cont_active_j], (-dIp_dphip_i / cv_j / cont_scale)[cont_active_j])
-    add(r_p_j[cont_active_j], 2 * N + jj[cont_active_j], (-dIp_dphip_j / cv_j / cont_scale)[cont_active_j])
+    add(r_p_j[cont_active_j], ii[cont_active_j], (-dIp_dpsi_i / cvs_j / cont_scale)[cont_active_j])
+    add(r_p_j[cont_active_j], jj[cont_active_j], (-dIp_dpsi_j / cvs_j / cont_scale)[cont_active_j])
+    add(r_p_j[cont_active_j], 2 * N + ii[cont_active_j], (-dIp_dphip_i / cvs_j / cont_scale)[cont_active_j])
+    add(r_p_j[cont_active_j], 2 * N + jj[cont_active_j], (-dIp_dphip_j / cvs_j / cont_scale)[cont_active_j])
 
     # --- Hole continuity: per-node recombination derivative ---
     r_p_free = 2 * N + free_np
@@ -472,16 +570,12 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     # that column) so equilibration/pivoting never dilutes it). ---
     contact_idx = node[is_contact]
     dirichlet_idx = np.concatenate([contact_idx, N + contact_idx, 2 * N + contact_idx])
-    dirichlet_rows, dirichlet_cols, dirichlet_data = [], [], []
-    for i in dirichlet_idx:
-        col_mask = interior_cols == i
-        local_max = np.max(np.abs(interior_data[col_mask])) if np.any(col_mask) else 0.0
-        dirichlet_rows.append(i)
-        dirichlet_cols.append(i)
-        dirichlet_data.append(max(1.0, local_max))
+    col_max = np.zeros(3 * N)
+    np.maximum.at(col_max, interior_cols, np.abs(interior_data))
+    dirichlet_data = np.maximum(1.0, col_max[dirichlet_idx])
 
-    rows = np.concatenate([interior_rows, dirichlet_rows])
-    cols = np.concatenate([interior_cols, dirichlet_cols])
+    rows = np.concatenate([interior_rows, dirichlet_idx])
+    cols = np.concatenate([interior_cols, dirichlet_idx])
     data = np.concatenate([interior_data, dirichlet_data])
     J = sp.coo_matrix((data, (rows, cols)), shape=(3 * N, 3 * N)).tocsc()
     return F, J
@@ -489,7 +583,8 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
 
 def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50, verbose=False,
                      psi_init=None, phin_init=None, phip_init=None,
-                     psi_bc_override=None, phin_bc_override=None, phip_bc_override=None):
+                     psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
+                     damping="line_search", cold_retry=True, velocity_saturation=False):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -508,6 +603,42 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     compute the gate's psi_bc itself (mos.mos_analytic.flatband_voltage,
     same as the MOS capacitor) and pass it through here.
 
+    damping: "line_search" (default) - the plain backtracking line search
+    below, unchanged since this module's first version. "bank_rose" -
+    Bank & Rose (1981) Algorithm Global (core/bank_rose_damping.py),
+    ported from avalanche/newton_solver_avalanche.py's own use of it,
+    available for a caller that wants to try it on a SPECIFIC hard
+    continuation step (e.g. a warm-started point deep in subthreshold at
+    high Vds) rather than as a blanket replacement.
+
+    "bank_rose" is NOT a safe drop-in replacement for "line_search" here
+    and must not be made the default - confirmed via direct instrumentation
+    (2026-09-20 session) on the Vgs=0V, Vds=1.0V cold-start point (which
+    "line_search" converges cleanly, 83 iterations, res_norm~1e-5): Algorithm
+    Global's eq-3.1 acceptance test compares the norm of the CLIPPED next
+    Newton correction at two candidate damping levels, not ||F|| itself. From
+    a cold start this far from the target bias, the raw (unclipped)
+    correction is large enough that step_clip_fn (_uniform_clip above)
+    saturates at its ceiling on EVERY trial, not rarely as the clip's own
+    docstring assumes - and a trial whose clipped-correction norm happens to
+    land under the ceiling can pass the test and get ACCEPTED even when its
+    actual ||F|| is objectively worse than a REJECTED, less-damped trial's
+    (directly measured: t=1 (K=0) gave |F|=1.76e10, smaller/better than the
+    t=0.056 (K=10) trial that was accepted at |F|=3.57e10 - the accepted
+    trial was the worse one). K then ratchets to its ceiling within a
+    handful of further iterations (each subsequent trial only marginally
+    worse, which still fails the test and keeps growing K), freezing t~0 and
+    stalling with a huge, unimproving residual - reproduced with
+    MAX_QF_STEP/MAX_PSI_STEP shrunk all the way from 5.0/1.0 down to
+    0.1/0.1, so this is NOT a step-cap tuning issue: it is a structural
+    mismatch between step_clip_fn's saturation and what Algorithm Global's
+    global sufficient-decrease test assumes about g_k's meaning, triggered
+    whenever clipping engages on essentially every trial rather than as a
+    rare safety net (as it does starting a Vds=1.0V solve cold, but
+    should NOT if this is instead invoked on an already-close warm start).
+    Use only on warm-started continuation steps close to a known-good
+    neighbor, never as the cold-start solver.
+
     psi_init/phin_init/phip_init, if given, warm-start Newton from a
     previous bias point's converged solution (see main2d_sweep.py) instead
     of the fresh charge-neutral-plus-tiny-perturbation guess - the same
@@ -517,7 +648,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     is otherwise the mild, first-example doping case. If a warm start
     still fails to converge, retry once from the fresh cold start (the one
     piece of core/newton_solver_qf.py's fuller Gummel-restart robustness
-    layer ported here - a full 2D Gummel solver is still deferred)."""
+    layer ported here - a full 2D Gummel solver is still deferred).
+    cold_retry=False skips that retry (and the non-convergence warning) -
+    for a continuation driver that handles a failed step itself by
+    shrinking the bias step, where a cold restart only wastes time."""
     N = len(mesh.points)
     Vt = mat.Vt
     ni_arr, _ = _mesh_ni_edge_g(mesh, mat)
@@ -593,6 +727,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     h_typ = mesh.h_min_cm
     poisson_scale = poisson_row_scale(mat, h_typ)
     cont_scale = continuity_row_scale(mat, h_typ)
+    edge_mask = None
 
     def _run_newton(psi0, phin0, phip0):
         psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
@@ -601,47 +736,102 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         phip0[contact_point_idx] = phip_bc
         U = np.concatenate([psi0, phin0, phip0])
 
+        if damping == "bank_rose":
+            # See newton_solve_2d's own docstring for why this path is
+            # opt-in only (not the default) and should only be used on an
+            # already-close warm start, never a cold start.
+            F_fn = lambda U_: _residual(U_, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
+                                         poisson_scale, cont_scale)
+            FJ_fn = lambda U_: _residual_and_jacobian(U_, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
+                                                        poisson_scale, cont_scale)
+            U, res_norm, it, _K = bank_rose_solve(U, FJ_fn, F_fn, f_tol=f_tol, maxiter=maxiter,
+                                                   step_clip_fn=lambda d: _uniform_clip(d, N),
+                                                   verbose=verbose)
+            return U, res_norm, it
+
+        if damping != "line_search":
+            raise ValueError(f"damping must be 'line_search' or 'bank_rose', got {damping!r}")
+
         F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                       poisson_scale, cont_scale)
+                                       poisson_scale, cont_scale, edge_mask, velocity_saturation)
         res_norm = np.max(np.abs(F))
 
+        # Step control: each Newton direction is scaled uniformly so no
+        # potential moves by more than MAX_PSI_STEP, then backtracked on a
+        # ROW-SCALED residual merit (see below) rather than the raw
+        # max-norm |F|_inf this solver originally used.
+        #
+        # Why: continuity rows are normalized by one global Q*Dn*ni/h^2,
+        # so at an n+ node (n~1e19-1e20) the same relative current
+        # imbalance shows up ~1e9x larger than in the channel. A
+        # quadratically convergent Newton step's O(delta^2) error at such a
+        # node (measured: a step moving no potential by more than 0.54*Vt
+        # raised |F|_inf from 1.3 to 1.4e5, growing exactly as t^2 in the
+        # step length t) made the raw max-norm backtracking cut every step
+        # to ~1e-3 - ~100-200 crawling iterations and stalls at high
+        # Vgs/Vds - while the same full steps converged in 5 iterations.
         it = 0
         tiny_step_streak = 0
+        best_U, best_res = U, res_norm
         for it in range(1, maxiter + 1):
             if res_norm < f_tol:
                 break
             delta = equilibrated_spsolve(J, -F)
             delta[N:3 * N] = np.clip(delta[N:3 * N], -MAX_QF_STEP, MAX_QF_STEP)
+            max_dpsi = np.max(np.abs(delta[:N]))
+            if max_dpsi > MAX_PSI_STEP:
+                delta = delta * (MAX_PSI_STEP / max_dpsi)
+                max_dpsi = MAX_PSI_STEP
 
+            # Merit = L2 norm of the ROW-SCALED residual, each row divided
+            # by its own largest Jacobian entry at the current iterate (held
+            # fixed across the trial steps) - roughly "how many volts is
+            # this node's equation from satisfied", comparable across an
+            # n+ node and a depleted channel node alike.
+            row_scale = 1.0 / np.maximum(abs(J).max(axis=1).toarray().ravel(), 1e-300)
+            merit = np.linalg.norm(row_scale * F)
             step = 1.0
             for _ in range(20):
                 U_try = U + step * delta
                 F_try = _residual(U_try, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                   poisson_scale, cont_scale)
-                res_try = np.max(np.abs(F_try))
-                if np.isfinite(res_try) and res_try < res_norm * (1 - 1e-4 * step):
+                                   poisson_scale, cont_scale, edge_mask, velocity_saturation)
+                merit_try = np.linalg.norm(row_scale * F_try)
+                if np.isfinite(merit_try) and merit_try < merit * (1 - 1e-4 * step):
                     break
                 step *= 0.5
             else:
-                U_try, res_try = U, res_norm
+                U_try = U
 
             U = U_try
             F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                           poisson_scale, cont_scale)
+                                           poisson_scale, cont_scale, edge_mask, velocity_saturation)
             res_norm = np.max(np.abs(F))
+            if res_norm < best_res:
+                best_U, best_res = U, res_norm
             if verbose:
-                print(f"  Newton(QF,2D) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}")
+                print(f"  Newton(QF,2D) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}  "
+                      f"max|dpsi|={step * max_dpsi:.2e}")
 
+            # Update-based convergence (the usual device-simulator test):
+            # once Newton is in its quadratic regime the potential update
+            # collapses (5e-9 V -> 1e-15 V in consecutive iterations) while
+            # |F|_inf can sit on a ~1e-5 round-off floor set by the n+
+            # rows' global ni normalization - f_tol=1e-9 alone then burns
+            # ~20 more iterations that change nothing.
+            if step * max_dpsi < PSI_UPDATE_TOL and res_norm < RES_ACCEPT:
+                break
             tiny_step_streak = tiny_step_streak + 1 if step < 1e-4 else 0
             if tiny_step_streak >= 2:
                 break
+        if best_res < res_norm:
+            U, res_norm = best_U, best_res
         return U, res_norm, it
 
     if psi_init is None:
         U, res_norm, it = _run_newton(*_cold_start())
     else:
         U, res_norm, it = _run_newton(psi_init, phin_init, phip_init)
-        if res_norm > 1.0:
+        if res_norm > 1.0 and cold_retry:
             # A warm start can inherit a bad basin from its source point
             # (mirroring core/newton_solver_qf.py's own Gummel-restart
             # rationale) - retry from the fresh cold start rather than
@@ -650,7 +840,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             if res_retry < res_norm:
                 U, res_norm, it = U_retry, res_retry, it_retry
 
-    if res_norm > 1.0:
+    if res_norm > 1.0 and cold_retry:
         warnings.warn(
             f"Newton(QF,2D) solve did not converge at bias_by_contact={bias_by_contact} "
             f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a cold-start retry.")
@@ -658,4 +848,4 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     psi, phin, phip = unpack_qf(U, N)
     n, p = _densities(psi, phin, phip, ni_arr, Vt)
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
-            "iters": it, "res_norm": res_norm}
+            "iters": it, "res_norm": res_norm, "velocity_saturation": velocity_saturation}

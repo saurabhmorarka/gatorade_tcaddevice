@@ -40,13 +40,16 @@ geometry:
       height_um: 0.005
 
 contacts:
+  # Source/drain contacts are inset 0.05um from the gate edge: a real
+  # contact/silicide never runs flush up to the gate, and it keeps the
+  # contact edge off the mesa/gate-oxide corner.
   - name: source
     surface: top
-    x_range_um: [0.0, 0.3]
+    x_range_um: [0.0, 0.25]
     bias_role: source
   - name: drain
     surface: top
-    x_range_um: [0.8, 1.1]
+    x_range_um: [0.85, 1.1]
     bias_role: drain
   - name: gate
     surface: top
@@ -62,30 +65,46 @@ material:
   # eps_r: 11.7
   # ni_cm3: 1.0e10
 
+physics:
+  # Caughey-Thomas high-field mobility (vsat_n=1e7 cm/s, beta_n=2 - see
+  # core/params.py), driven by the electrostatic field along each mesh
+  # edge (solver2d/newton_solver_qf_2d.py::edge_mobility).
+  velocity_saturation: true
+
 gate:
   workfunction_eV: null   # null = ideal MOS (V_FB=0), same as the MOS capacitor
 
 mesh:
-  # h_min applies at the oxide/substrate interface AND the source/drain
-  # junctions (domain.junction_segments() picks up both automatically);
-  # h_max in the bulk substrate far from any of them.
-  h_min_um: 0.002
+  # Balanced square quadtree (mesh2d/quadtree.py): a coarse h_max grid,
+  # refined inside each refine_box, graded from interface_h at the
+  # oxide/silicon interface and from junction_h at the S/D junctions.
+  # Every triangle is 45-45-90 (no obtuse angles, checked on every build).
+  # h_min is the finest spacing anywhere (also the solver's scaling length).
+  style: quadtree
+  h_min_um: 0.0025
   h_max_um: 0.05
   growth: 1.3
-  min_angle_deg: 25
+  interface_h_um: 0.0025
+  junction_h_um: 0.005
+  refine_boxes:
+    - name: channel          # inversion layer + drain pinch-off region
+      x_range_um: [0.2, 0.9]
+      y_range_um: [0.0, 0.04]
+      h_um: 0.01
 
 bias:
-  # Ids-Vgs (transfer curve): fixed Vds, sweep Vgs.
-  vgs_start_V: -0.5
-  vgs_stop_V: 2.0
-  vgs_points: 26
-  vds_for_transfer_V: 0.05    # linear-region convention
+  # Id-Vg (transfer): one curve per vds_transfer_V entry (low Vds first,
+  # high Vds last - DIBL/SS/Vt are extracted from those two).
+  vgs_start_V: -0.3
+  vgs_stop_V: 1.5
+  vgs_step_V: 0.05
+  vds_transfer_V: [0.05, 1.0]
 
-  # Ids-Vds (output curves): a family of fixed Vgs, sweep Vds.
+  # Id-Vd (output): one curve per vgs_for_output_V entry.
   vds_start_V: 0.0
-  vds_stop_V: 2.0
-  vds_points: 21
-  vgs_for_output_V: [1.0, 1.5, 2.0]
+  vds_stop_V: 1.5
+  vds_step_V: 0.1
+  vgs_for_output_V: [0.9, 1.1, 1.3, 1.5]
 
 output:
   structure_file: mosfet2d_structure.json

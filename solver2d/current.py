@@ -17,8 +17,8 @@ from core.params import Q
 def contact_current(mesh, mat, result, contact_name):
     """Total current (A/cm) flowing OUT of the named contact into the
     device, summed over every mesh edge connecting a contact point to a
-    non-contact neighbor. Uses the SAME plain-gradient edge-current formula
-    the solver's own residual assembly uses (solver2d/newton_solver_qf_2d.py),
+    non-contact neighbor. Uses the SAME edge-current formula the solver's
+    own residual assembly uses (solver2d/newton_solver_qf_2d.py::edge_currents),
     evaluated at the converged (psi, n, p, phin, phip) - not a separate,
     possibly-inconsistent post-processing formula."""
     import numpy as np
@@ -32,45 +32,16 @@ def contact_current(mesh, mat, result, contact_name):
     is_contact = np.zeros(N, dtype=bool)
     is_contact[contact_point_idx] = True
 
-    n, p, phin, phip = result["n"], result["p"], result["phin"], result["phip"]
+    # The SAME edge-current formula (Scharfetter-Gummel, semiconductor-only
+    # facets, same mobility model) the solver's residual used.
+    from solver2d.newton_solver_qf_2d import edge_currents
+    In_e, Ip_e = edge_currents(mesh, mat, result["psi"], result["n"], result["p"], result["phin"],
+                               result["phip"], result.get("velocity_saturation", False))
+    I_e = In_e + Ip_e  # A/cm, direction i -> j
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
-    edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
-    n_avg = 0.5 * (n[ii] + n[jj])
-    p_avg = 0.5 * (p[ii] + p[jj])
-    # Must use the SAME per-edge mobility the solver's own residual
-    # assembly used (solver2d/newton_solver_qf_2d.py::_mesh_mobility_nodal)
-    # - a plain scalar mat.mu_n/mat.mu_p here would silently mismatch the
-    # doping-dependent mobility actually driving the converged (n,p,phin,
-    # phip) state, giving an inconsistent post-processed current.
-    from solver2d.newton_solver_qf_2d import _mesh_mobility_nodal
-    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
-    mu_n_e = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
-    mu_p_e = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
-    Jn_e = -Q * mu_n_e * n_avg * (phin[jj] - phin[ii]) / edge_len
-    Jp_e = -Q * mu_p_e * p_avg * (phip[jj] - phip[ii]) / edge_len
-    I_e = (Jn_e + Jp_e) * mesh.facet_length  # A/cm, direction i -> j
 
-    # 2026-09-13: exclude any edge whose non-contact endpoint is an
-    # insulator node from this sum. Those edges' phin/phip on the oxide
-    # side are an arbitrary pinned placeholder (0), not a real potential
-    # (see newton_solver_qf_2d.py's is_oxide_free comments) - a contact
-    # sitting right at an oxide/mesa corner (as this project's first
-    # MOSFET geometry does) picks up one such edge whose "current" is
-    # driven entirely by that placeholder and the contact's own fixed
-    # bias, completely independent of Vgs. That single edge was found to
-    # account for ~99.995% of the entire off-state terminal current,
-    # flooring what should be an exponentially falling subthreshold
-    # diffusion current. This exclusion only changes THIS post-processing
-    # sum, not the Newton solver's own residual/Jacobian (those rows are
-    # already overwritten by the Dirichlet/oxide-pin logic regardless of
-    # this edge, so masking it here has no effect on convergence) - unlike
-    # the broader _semiconductor_edge_mask() masking tried and reverted in
-    # the solver itself, which changed real channel-surface nodes' own
-    # continuity equations and made Newton convergence far worse.
-    is_insulator = mesh.is_insulator if mesh.is_insulator is not None \
-        else np.zeros(N, dtype=bool)
-    i_is_contact = is_contact[ii] & ~is_contact[jj] & ~is_insulator[jj]
-    j_is_contact = is_contact[jj] & ~is_contact[ii] & ~is_insulator[ii]
+    i_is_contact = is_contact[ii] & ~is_contact[jj]
+    j_is_contact = is_contact[jj] & ~is_contact[ii]
     return float(np.sum(I_e[i_is_contact]) - np.sum(I_e[j_is_contact]))
 
 

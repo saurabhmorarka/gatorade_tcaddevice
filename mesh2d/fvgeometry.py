@@ -9,13 +9,15 @@ result often called the "box integration method" - see e.g. Fichtner et al.
 For each internal Delaunay edge shared by exactly two triangles with
 circumcenters C1, C2, the segment of the true Voronoi diagram separating
 the two points is exactly the segment C1-C2 (perpendicular to the edge when
-the mesh is well-shaped). The edge's flux weight is |C1-C2| / |edge length|.
-A boundary edge (belonging to only one triangle) has no second point to
-flux against and is excluded from the flux-edge list - which is exactly the
-"default insulating" boundary condition every non-contact boundary point
-needs (see mesh2d/boundary.py): a boundary control volume simply has no
-flux-contributing neighbor across the domain's edge, so no separate Neumann
-assembly code is needed.
+the mesh is well-shaped). The edge's flux weight is |C1-C2| / |edge length|
+- computed as the sum of the two triangles' signed half-facets (edge
+midpoint to circumcenter), which is the same thing for a Delaunay edge and
+extends to an edge on the domain boundary (one triangle, one half-facet:
+flux ALONG the boundary between its two nodes is real). Nothing ever
+crosses the domain's edge itself - there is no node out there to flux
+against - which is exactly the "default insulating" boundary condition
+every non-contact boundary point needs (see mesh2d/boundary.py), so no
+separate Neumann assembly code is needed.
 
 Each point's control-volume area is the sum, over every triangle containing
 it, of the quadrilateral (point, edge midpoint, triangle circumcenter, other
@@ -37,7 +39,7 @@ from scipy.spatial import Delaunay
 class FVGeometry:
     points: np.ndarray            # (N,2) cm
     triangles: np.ndarray         # (M,3) int, CCW-oriented vertex indices
-    edges: np.ndarray             # (E,2) int, internal (2-triangle) edges only
+    edges: np.ndarray             # (E,2) int, every edge (internal and domain-boundary)
     edge_weight: np.ndarray       # (E,) float, Voronoi-facet length / edge length
     facet_length: np.ndarray      # (E,) float, cm - the Voronoi-facet length itself
                                    # (needed separately from edge_weight to turn a current
@@ -49,6 +51,12 @@ class FVGeometry:
                                     # second, independent mesh-quality diagnostic (a point
                                     # can have zero negative sub-areas of its own and still
                                     # end up with a pathologically small total area)
+    facet_length_semi: np.ndarray = None  # (E,) cm, only set when tri_insulator is given -
+                                            # facet length inside semiconductor triangles
+    cv_area_semi: np.ndarray = None       # (N,) cm^2, likewise - control-volume area
+                                            # inside semiconductor triangles
+    n_negative_facets: int = 0            # edges whose summed signed facet was negative
+                                            # (clamped to 0); 0 for a non-obtuse mesh
     edge_g: np.ndarray = None      # (E,) float, only set when eps_tri is given to
                                      # build_fv_geometry - the per-edge conductance
                                      # eps*edge_weight ALREADY split and weighted by each
@@ -79,7 +87,8 @@ def _circumcenter(a, b, c):
     return np.array([ux, uy])
 
 
-def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None, eps_tri=None):
+def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None, eps_tri=None,
+                      tri_insulator=None):
     """triangles, if given (from mesh2d/pointcloud.py's `triangle`-library
     constrained conforming-Delaunay refinement), are used directly instead
     of recomputing a plain scipy.spatial.Delaunay triangulation - the
@@ -113,7 +122,18 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None, eps_tri=Non
     semiconductor interface gets correct D-field continuity in this mesh -
     see solver2d/poisson2d_mos.py). Returned as FVGeometry.edge_g, already
     eps-weighted (unlike the plain geometric edge_weight, which a
-    homogeneous-material solver like the diode's still uses directly)."""
+    homogeneous-material solver like the diode's still uses directly).
+
+    tri_insulator: optional (M,) bool, True for a triangle inside an
+    insulator. When given, the box method is split by material, as a
+    control volume straddling a semiconductor/insulator interface must
+    be: facet_length_semi is the part of each edge's facet lying in
+    semiconductor triangles (carrier current flows only there - an edge
+    wholly inside the oxide gets 0, which IS the no-flux interface BC,
+    and an edge lying along the interface keeps only its silicon half),
+    and cv_area_semi is the part of each node's control volume lying in
+    semiconductor (where its carrier/doping charge and recombination
+    live - an interface node's oxide half-cell holds none)."""
     points = np.asarray(points_cm, dtype=float)
     if triangles is not None:
         simplices = np.asarray(triangles, dtype=int)
@@ -139,27 +159,55 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None, eps_tri=Non
             key = (a, b) if a < b else (b, a)
             edge_tris.setdefault(key, []).append(t)
 
-    edges, edge_weight, facet_length, edge_g = [], [], [], []
+    semi_tri = None if tri_insulator is None else ~np.asarray(tri_insulator, dtype=bool)
+
+    def half_facet(t, i, j):
+        """Signed distance from edge (i,j)'s midpoint to triangle t's
+        circumcenter, positive toward t's own third vertex - the piece of
+        the edge's Voronoi facet that lies inside t (negative only when t
+        is obtuse at the vertex opposite this edge)."""
+        a, b = points[i], points[j]
+        mid = 0.5 * (a + b)
+        third = [v for v in oriented[t] if v != i and v != j][0]
+        e = b - a
+        nrm = np.array([-e[1], e[0]])
+        if np.dot(points[third] - mid, nrm) < 0.0:
+            nrm = -nrm
+        return float(np.dot(circumcenters[t] - mid, nrm / np.linalg.norm(nrm)))
+
+    # Every edge, internal OR on the domain boundary, carries flux through
+    # its facet = sum over its adjacent triangles of that triangle's own
+    # half-facet. A boundary edge (one triangle) is a real flux path along
+    # the boundary between its two nodes - excluding it (as this module
+    # used to) leaves a convex-corner node of a right-angle mesh with no
+    # flux coupling at all, a singular continuity row.
+    edges, edge_weight, facet_length, edge_g, facet_semi = [], [], [], [], []
     boundary_edges = set()
+    n_negative_facets = 0
     for (i, j), tris in edge_tris.items():
-        if len(tris) == 2:
-            c1, c2 = circumcenters[tris[0]], circumcenters[tris[1]]
-            edge_len = np.linalg.norm(points[i] - points[j])
-            facet_len = np.linalg.norm(c1 - c2)
-            edges.append((i, j))
-            edge_weight.append(facet_len / edge_len)
-            facet_length.append(facet_len)
-            if eps_tri is not None:
-                mid = 0.5 * (points[i] + points[j])
-                d1 = np.linalg.norm(mid - c1)
-                d2 = np.linalg.norm(mid - c2)
-                edge_g.append(eps_tri[tris[0]] * d1 / edge_len + eps_tri[tris[1]] * d2 / edge_len)
-        else:
+        if len(tris) == 1:
             boundary_edges.add((i, j))
+        edge_len = np.linalg.norm(points[i] - points[j])
+        halves = [half_facet(t, i, j) for t in tris]
+        facet_len = sum(halves)
+        if facet_len < 0.0:
+            n_negative_facets += 1
+            halves = [max(h, 0.0) for h in halves]
+            facet_len = sum(halves)
+        edges.append((i, j))
+        edge_weight.append(facet_len / edge_len)
+        facet_length.append(facet_len)
+        if eps_tri is not None:
+            edge_g.append(sum(eps_tri[t] * max(h, 0.0) for t, h in zip(tris, halves)) / edge_len)
+        if semi_tri is not None:
+            facet_semi.append(sum(max(h, 0.0) for t, h in zip(tris, halves) if semi_tri[t]))
 
     n = len(points)
     cv_area = np.zeros(n)
+    cv_semi = np.zeros(n)
     n_negative = 0
+    area_scale = np.max(np.abs([_signed_area2(points[i], points[j], points[k])
+                                  for (i, j, k) in oriented])) if len(oriented) else 1.0
     for t, (i, j, k) in enumerate(oriented):
         C = circumcenters[t]
         for (a, b, c) in ((i, j, k), (j, k, i), (k, i, j)):
@@ -170,19 +218,25 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None, eps_tri=Non
             # above: a negative signed area means the circumcenter fell
             # outside this triangle's corner at vertex a (an obtuse angle at
             # a) - the box-method pitfall this function exists to catch.
+            # (A right triangle's degenerate zero-area pieces come out as
+            # +-1e-16-relative rounding noise, not counted.)
             signed = 0.5 * sum(
                 quad[m][0] * quad[(m + 1) % 4][1] - quad[(m + 1) % 4][0] * quad[m][1]
                 for m in range(4)
             )
-            if signed < 0.0:
+            if signed < -1e-10 * area_scale:
                 n_negative += 1
             cv_area[a] += abs(signed)
+            if semi_tri is not None and semi_tri[t]:
+                cv_semi[a] += abs(signed)
 
     n_floored = 0
     if cv_area_floor is not None:
         below = cv_area < cv_area_floor
         n_floored = int(np.sum(below))
         cv_area = np.where(below, cv_area_floor, cv_area)
+        if semi_tri is not None:
+            cv_semi = np.where((cv_semi > 0.0) & (cv_semi < cv_area_floor), cv_area_floor, cv_semi)
 
     return FVGeometry(
         points=points,
@@ -195,4 +249,7 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None, eps_tri=Non
         n_negative_subareas=n_negative,
         n_floored=n_floored,
         edge_g=np.array(edge_g, dtype=float) if eps_tri is not None else None,
+        facet_length_semi=np.array(facet_semi, dtype=float) if semi_tri is not None else None,
+        cv_area_semi=cv_semi if semi_tri is not None else None,
+        n_negative_facets=n_negative_facets,
     )

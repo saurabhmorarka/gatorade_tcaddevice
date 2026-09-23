@@ -18,6 +18,7 @@ from mesh2d.boundary import tag_boundary_points
 from mesh2d.fvgeometry import build_fv_geometry
 from mesh2d.mesh_quality import check_mesh_quality
 from mesh2d.pointcloud import build_point_cloud
+from mesh2d.quadtree import build_quadtree_mesh, interface_and_junction_segments
 
 
 @dataclass
@@ -52,9 +53,15 @@ class Mesh2D:
                                      # concentration per point, 0 at an insulator point
                                      # (no mobile carriers there at all).
     is_insulator: np.ndarray = None  # (N,) bool, only set when `mat` is passed.
+    facet_length_semi: np.ndarray = None  # (E,) cm - facet length inside semiconductor
+                                            # triangles only (carrier current), see
+                                            # fvgeometry.py; == facet_length without `mat`
+    cv_area_semi: np.ndarray = None       # (N,) cm^2 - control volume inside semiconductor
+                                            # (carrier/doping charge, recombination)
 
 
-def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, max_passes=3):
+def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, tri_insulator=None,
+                           max_passes=3):
     """A rectangle corner's triangle can occasionally end up with its only
     non-boundary edge not shared by any neighboring triangle - a point with
     ZERO internal edges gets no Poisson/continuity coupling to the rest of
@@ -68,7 +75,8 @@ def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, max_pa
     eps_tri, if given, is dropped/reindexed in lockstep with `triangles` so
     a later fv rebuild's per-triangle permittivity array stays aligned."""
     for _ in range(max_passes):
-        fv = build_fv_geometry(points, triangles=triangles, cv_area_floor=cv_area_floor, eps_tri=eps_tri)
+        fv = build_fv_geometry(points, triangles=triangles, cv_area_floor=cv_area_floor, eps_tri=eps_tri,
+                               tri_insulator=tri_insulator)
         deg = np.zeros(len(points), dtype=int)
         np.add.at(deg, fv.edges[:, 0], 1)
         np.add.at(deg, fv.edges[:, 1], 1)
@@ -82,6 +90,8 @@ def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, max_pa
         triangles = new_index[triangles[tri_keep]]
         if eps_tri is not None:
             eps_tri = eps_tri[tri_keep]
+        if tri_insulator is not None:
+            tri_insulator = tri_insulator[tri_keep]
     raise RuntimeError(
         f"mesh2d: {np.sum(isolated)} isolated point(s) remained after {max_passes} "
         "drop-and-rebuild passes - a persistent degeneracy, not a one-off corner quirk; "
@@ -89,7 +99,9 @@ def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, max_pa
 
 
 def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.1,
-                  min_angle_deg=32, interface_segments=None, mat=None):
+                  min_angle_deg=32, interface_segments=None, mat=None,
+                  mesh_style="unstructured", refine_boxes=(), interface_h_cm=None,
+                  junction_h_cm=None):
     """Build a Mesh2D for any Domain2D (blocky regions/contacts) - the
     single entry point every 2D device driver should go through, so the
     mandatory quality gate (mesh2d/mesh_quality.py) and FV-robustness
@@ -112,21 +124,42 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
     Mesh2D.ni_arr/is_insulator (0/True at an insulator point). Omitting it
     (the default) reproduces today's homogeneous-silicon diode mesh
     byte-for-bit - solvers for a single-material device keep using
-    mat.eps * mesh.edge_weight directly, unaffected by this parameter."""
-    points, triangles = build_point_cloud(
-        domain, h_min_cm, h_max_cm, growth=growth, min_angle_deg=min_angle_deg,
-        interface_segments=interface_segments)
+    mat.eps * mesh.edge_weight directly, unaffected by this parameter.
 
-    quality_report = check_mesh_quality(points, triangles)
+    mesh_style="quadtree" (see mesh2d/quadtree.py) builds a balanced
+    square-quadtree mesh instead: a coarse h_max_cm background, refined to
+    h inside each (x0, x1, y0, y1, h) entry of `refine_boxes`, and graded
+    from interface_h_cm at every semiconductor/insulator interface and
+    from junction_h_cm at every metallurgical junction (each defaults to
+    h_min_cm). Every triangle is 45-45-90, so here an obtuse triangle is a
+    hard error rather than a warning. `interface_segments`/`min_angle_deg`
+    only apply to the unstructured style."""
+    if mesh_style == "quadtree":
+        iface, junc = interface_and_junction_segments(domain)
+        graded = []
+        if iface:
+            graded.append((iface, interface_h_cm or h_min_cm))
+        if junc:
+            graded.append((junc, junction_h_cm or h_min_cm))
+        points, triangles, _info = build_quadtree_mesh(
+            domain, h_max_cm, refine_boxes=refine_boxes, graded_segments=graded, growth=growth)
+        quality_report = check_mesh_quality(points, triangles, forbid_obtuse=True)
+    elif mesh_style == "unstructured":
+        points, triangles = build_point_cloud(
+            domain, h_min_cm, h_max_cm, growth=growth, min_angle_deg=min_angle_deg,
+            interface_segments=interface_segments)
+        quality_report = check_mesh_quality(points, triangles)
+    else:
+        raise ValueError(f"mesh_style must be 'unstructured' or 'quadtree', got {mesh_style!r}")
 
-    eps_tri = None
+    eps_tri = tri_insulator = None
     if mat is not None:
         centroids = points[triangles].mean(axis=1)
-        _, eps_r_tri = domain.material_props_at(centroids[:, 0], centroids[:, 1], mat)
+        tri_insulator, eps_r_tri = domain.material_props_at(centroids[:, 0], centroids[:, 1], mat)
         eps_tri = eps_r_tri * EPS0
 
     fv = _drop_isolated_points(points, triangles, cv_area_floor=cv_area_floor_factor * h_min_cm ** 2,
-                                eps_tri=eps_tri)
+                                eps_tri=eps_tri, tri_insulator=tri_insulator)
     Cdop = domain.doping_at(fv.points[:, 0], fv.points[:, 1])
     tags = tag_boundary_points(fv.points, domain)
 
@@ -154,6 +187,8 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
         edge_g=fv.edge_g,
         ni_arr=ni_arr,
         is_insulator=is_insulator,
+        facet_length_semi=fv.facet_length_semi if fv.facet_length_semi is not None else fv.facet_length,
+        cv_area_semi=fv.cv_area_semi if fv.cv_area_semi is not None else fv.cv_area,
     )
 
 
