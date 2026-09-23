@@ -443,7 +443,7 @@ def interactive_field_viewer(doc):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Standalone plotter for tcad1d 2D structure+mesh JSON files.")
+        description="Standalone plotter for gatorade_tcaddevice 2D structure+mesh JSON files.")
     parser.add_argument("structure_path", help="Path to a *_structure.json file (dim=2)")
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--interactive", action="store_true",

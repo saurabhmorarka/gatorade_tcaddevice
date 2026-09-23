@@ -73,7 +73,7 @@ def sweep_2d(mesh, mat, Va_list, contact_bias_role="anode", verbose=True):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="tcad1d 2D bias-sweep driver")
+    parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D bias-sweep driver")
     parser.add_argument("config", nargs="?", default=config2d.DEFAULT_PATH)
     parser.add_argument("--plot-bias", default="-1.0,-0.5,0.0,0.5,1.0",
                          help="Comma-separated bias values (nearest swept match) to save static field-map PNGs for")

@@ -1,4 +1,7 @@
-# Development Log: 1D Diode TCAD Solver
+# Development Log: gatorade_tcaddevice (formerly tcad1d)
+
+> Project renamed from `tcad1d` (GitHub `1D-TCAD`) to `gatorade_tcaddevice`
+> after the move to 2D (3D planned). Older sessions below keep the old name.
 
 This is a narrative record of how this simulator was designed, built, and
 debugged, session by session, so that anyone (human or AI) can understand

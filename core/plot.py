@@ -282,7 +282,7 @@ def _interactive_show(axes):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Standalone plotter for tcad1d structure+fields JSON files "
+        description="Standalone plotter for gatorade_tcaddevice structure+fields JSON files "
                      "(see structure_io.py for the file format).")
     parser.add_argument("structure_path", help="Path to a *_structure.json file")
     parser.add_argument("--which", default="structure,bands,charge",

@@ -1,4 +1,4 @@
-# tcad1d test suite
+# gatorade_tcaddevice test suite
 
 A small regression suite so a future change to the numerics can be checked
 against known-good numbers instead of guessing whether it broke something.

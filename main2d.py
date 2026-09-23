@@ -60,7 +60,7 @@ def build_structure_doc(domain, mesh, material):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="tcad1d 2D structure/mesh driver (phase 1: no solver yet)")
+    parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D structure/mesh driver (phase 1: no solver yet)")
     parser.add_argument("config", nargs="?", default=config2d.DEFAULT_PATH)
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
