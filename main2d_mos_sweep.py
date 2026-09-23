@@ -74,7 +74,7 @@ def build_from_config(cfg):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="tcad1d 2D MOS capacitor C-V driver")
+    parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D MOS capacitor C-V driver")
     parser.add_argument("config", nargs="?", default=DEFAULT_PATH)
     parser.add_argument("--plot-bias", default="-1.0,0.0,0.6,1.2,2.0",
                          help="Comma-separated VG values (nearest swept match) to save field-map PNGs for")

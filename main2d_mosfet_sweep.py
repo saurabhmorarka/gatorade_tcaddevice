@@ -323,7 +323,7 @@ def _grid(start, stop, step):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="tcad1d 2D planar NMOS driver")
+    parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D planar NMOS driver")
     parser.add_argument("config", nargs="?", default=DEFAULT_PATH)
     parser.add_argument("--workers", type=int, default=6)
     args = parser.parse_args()

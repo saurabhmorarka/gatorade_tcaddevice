@@ -179,7 +179,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>tcad1d 2D viewer</title>
+<title>gatorade_tcaddevice 2D viewer</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
   body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 0; display: flex; height: 100vh; }
@@ -200,7 +200,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
 </head>
 <body>
 <div id="controls">
-  <h3>tcad1d 2D viewer</h3>
+  <h3>gatorade_tcaddevice 2D viewer</h3>
   <label for="fieldSelect">field</label>
   <select id="fieldSelect"></select>
 

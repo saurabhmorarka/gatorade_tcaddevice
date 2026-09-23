@@ -12,7 +12,7 @@ Domain convention: x in [0, width_cm], y in [0, height_cm] with y=0 the top
 right (x=width_cm) are always the `symmetry` boundary - see the module
 docstring in mesh2d/boundary.py for why a side is never a contact surface.
 Shape vocabulary is rectangles-only for now; tapered/other shapes are
-explicitly future work (see the tcad1d 2D/3D plan).
+explicitly future work (see the project's 2D/3D plan).
 
 `TopMesa` generalizes the domain's outer boundary beyond a plain rectangle:
 a mesa is a protrusion (e.g. a MOS capacitor's oxide+gate stack) that

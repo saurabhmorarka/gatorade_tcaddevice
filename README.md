@@ -1,13 +1,39 @@
-# 1D TCAD: Diode and MOS Capacitor
+# gatorade_tcaddevice
 
-1D TCAD-style semiconductor device simulators, built from scratch in
-Python/NumPy/SciPy: a p-n junction diode (drift-diffusion, I-V) and a MOS
-capacitor (equilibrium Poisson, C-V). They share the same core Poisson/
-Scharfetter-Gummel machinery (`physics.py`).
+TCAD-style semiconductor device simulators, built from scratch in
+Python/NumPy/SciPy - started in 1D (formerly `tcad1d` / `1D-TCAD`), now 2D,
+with 3D planned:
+
+- **1D:** p-n junction diode (drift-diffusion, I-V, avalanche, TAT/BTBT
+  leakage) and MOS capacitor (C-V).
+- **2D:** diode, MOS capacitor and a planar NMOS transistor on a balanced
+  square-quadtree mesh (non-obtuse by construction, refinement boxes,
+  graded interface/junction refinement), solved with a coupled Newton
+  box-method drift-diffusion solver (quasi-Fermi unknowns,
+  Scharfetter-Gummel flux, velocity saturation).
 
 <p align="center">
   <img src="out/diode/03_iv_curve.png" alt="Diode I-V curve" width="49%">
   <img src="out/mos/01_cv_curve.png" alt="MOS capacitor C-V curve" width="49%">
+</p>
+
+## 2D NMOS (`main2d_mosfet_sweep.py`, `configs/input_mosfet_2d.yaml`)
+
+```bash
+python3 main2d_mosfet_sweep.py      # Id-Vg at Vds=0.05/1 V + Id-Vd family, ~20 s
+```
+
+Runs every curve as an independent continuation in its own process and
+extracts SS, Vt (constant-current and max-gm), DIBL and Ion/Ioff
+(`solver2d/mosfet_metrics.py`). Mesh refinement boxes, interface/junction
+spacing and `physics: velocity_saturation` are set in the YAML.
+
+<p align="center">
+  <img src="out/input_mosfet_2d/ids_vgs.png" alt="2D NMOS Id-Vg, linear and log" width="98%">
+</p>
+<p align="center">
+  <img src="out/input_mosfet_2d/ids_vds.png" alt="2D NMOS Id-Vd" width="49%">
+  <img src="out/input_mosfet_2d/ids_vds_vsat_compare.png" alt="Id-Vd with and without velocity saturation" width="49%">
 </p>
 
 ## Setup
