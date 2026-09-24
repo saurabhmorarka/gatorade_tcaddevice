@@ -3472,3 +3472,108 @@ Regression: testsuite 37/37 OK; 2D diode 21/21 converged; MOS capacitor
 31/31 (C-V within ~3% of before - the interface-charge fix). Not done: `solver2d/arclength_continuation.py`/`mosfet_arclength.py`
 (previous session, untracked) are no longer needed for this device and
 were left out of the commit.
+
+## 30. Session 20: 2D band-to-band / trap-assisted tunneling - GIDL and
+## drain-body junction leakage, local vs nonlocal (field-line) models
+
+**Goal.** Turn on the tunneling leakage models in the 2D NMOS and separate
+the two band-to-band components at Vds = 1 V: GIDL (Id-Vg, gate-controlled,
+at the drain surface under the gate edge) and drain-body junction tunneling
+(Id-Vsub at Vg = 0, gate-independent). Also: how does the 1D local model
+behave in 2D? New package `btbt/`; driver `python3 -m btbt.main_btbt2d_sweep`.
+
+**Device (`configs/input_mosfet_2d_btbt.yaml`; the shipped example is
+untouched).** At the shipped 1e16 substrate the junction field at Vdb = 1 V is
+about 8e4 V/cm, where Kane's exp(-B/F) is about exp(-270), and the gate has no
+overlap with the drain, so neither component can exist. New device: uniform
+p 1e18 substrate, n+ poly gate on 3 nm oxide (Vt about 0.45 V), and the
+drain/source extended 40 nm under the gate as a two-step lateral grade: an
+n 3e18 tip, then the n+ 1e20 body. The tip has to be lighter than 1e20
+(surface bending of Eg needs Vdg of about 7 V at 1e20, about 2 V at 3e18). It
+also has to span the FULL junction depth: a 30 nm-deep tip was tried first
+and was fully depleted between the gate and the p body (n about 1e5-1e10
+instead of 3e18), so the drain potential never reached the gate edge and
+there was no GIDL at all.
+
+**Models.**
+- *Local* (`btbt/local2d.py`): the 1D tat/ models unchanged (Kane
+  `btbt_generation` and Hurkx `hurkx_gamma`). The node field is the
+  semiconductor-triangle area-weighted |grad psi| (oxide triangles are
+  excluded, since their field is 3x the silicon's). Fully Newton-coupled,
+  with an exact Jacobian (FD-checked; the only mismatches are at |E| ~ 0,
+  where dG/dF = 0).
+- *Nonlocal* (`btbt/kernel.py`, `btbt/paths2d.py`, `btbt/geom2d.py`): paths
+  are traced along **electric field lines** (RK2 on the recovered nodal
+  gradient, exact P1 potential for the energy, adaptive steps). Kane: from
+  each start node, uphill until psi has risen by Eg (valence band at the
+  start aligned with conduction band at the end). F_eff = Eg/l goes into
+  the SAME Kane A, B, P, so in a uniform field it equals the local model to
+  5e-14. A field line that ends on the oxide or the free surface before
+  gaining Eg means no tunneling. Holes are generated at the path start,
+  electrons at the path end (barycentric split). The occupation factor
+  D = 1 - exp(-(phin_end - phip_start)/Vt) is 0 in equilibrium. Hurkx: Gamma_n
+  and Gamma_p use the field averaged along the half-gap (Eg/2) paths, uphill
+  for electrons and downhill for holes. Paths are frozen during each Newton
+  solve (the Jacobian would be dense) and updated in a lagged outer
+  iteration. The trap rate's local n, p dependence stays implicit.
+- Solver hook: `newton_solve_2d(..., generation=)` (Gn, Gp, and N x 3N
+  derivative matrices). With None the results are byte-identical: the
+  shipped MOSFET outputs are unchanged. `tat/newton_solver_tat.py` got the
+  1D equivalent `G_ext=`.
+
+**1D first (`btbt/main_btbt_1d.py`).** p 1e18 / n+ 1e20 diode. The local Kane
+model carries a spurious -1.7e-7 A/cm^2 at Va = 0 (and BTBT opposing forward
+current); the nonlocal model carries 0. The nonlocal onset is delayed until
+the bands can support a short path, and it sits 2-5x below uncapped local
+at high bias (a triangular field averages below its peak). The F_sat =
+9e5 V/cm cap flattens the 1D local curve above about 1 V reverse. The outer
+loop needs 2 passes; the two contact currents agree (pair conservation).
+
+**Bug fixed in `tat/tat.py::hurkx_gamma`.** The closed form
+Delta*exp(Delta)*E1(Delta) tends to 1, capping trap-assisted enhancement
+at 2x SRH at any field. It is replaced by Hurkx's integral itself,
+int_0^{dE/kT} exp(u - K u^1.5) du, by 96-point Gauss-Legendre, with dGamma/dF
+from the same quadrature (FD-exact). It matches 2 sqrt(3 pi)(F/F_G)exp((F/F_G)^2)
+at moderate field and saturates near exp(dE/kT) at high field. The shipped
+1D TAT example's leakage enhancement went from 1.2-1.4x to 2.6-7.5x. The
+`diode_tat` golden was recaptured (the only testsuite change; 37/37 OK).
+The user's standing point: in silicon, band-to-band leakage is mostly
+trap-assisted; direct tunneling dominates only in narrow-gap materials.
+
+**Results (Vds = 1 V; `out/btbt/input_mosfet_2d_btbt/`).**
+- *Id-Vg:* the nonlocal model has a flat floor of about 4e-13 A/um below Vt
+  (bulk-junction trap-assisted), then GIDL turns on below Vg of about
+  -1.2 V: trap-assisted at the surface first, then direct Kane, which
+  dominates by Vg = -2 V (4e-11 A/um). `gidl_fields_bands.png` shows why:
+  along a cut through the overlap, the surface band bending is 1.05 V (< Eg,
+  no paths) at Vg = -1, 1.33 V (15 nm paths) at -1.4, and 1.74 V (9 nm paths)
+  at -2. The uncapped local model overstates GIDL about 100x at moderate Vg,
+  firing at the gate-corner field spike without any band-bending check. The
+  capped local model barely rises at all.
+- *Id-Vsub:* the nonlocal model is dominated by bulk-junction tunneling
+  along the n+ bottom junction: trap-assisted near Vsub = 0, direct Kane
+  beyond about -1 V (3.4e-8 A/um at -3 V; paths 12 -> 9.6 nm;
+  `junction_fields_bands.png`). The gate-edge surface components stay 1e3x
+  smaller, so the two sweeps isolate the two components as intended. The
+  capped local model saturates at 1.5e-10.
+- *Local-model artifact:* where local Kane generates pairs at a node that
+  also has a huge Hurkx Gamma (about 1e7), the trap immediately recombines
+  most of them. The integrated trap term is NEGATIVE (-1.4e-7 A/um at
+  Vsub = -3, drawn with x markers), and the terminal current is about 10x
+  below its own Kane generation. The nonlocal model avoids this by
+  separating the electron from the hole by the tunneling length.
+- *Convergence and speed:* all 128 points converge (4 models x 2 sweeps x 16
+  points). The local models need a strength turn-on at equilibrium
+  (10^-9 -> 1), because a cold start fails at the very first bias step.
+  Nonlocal: 1-2 outer passes per point, with paths traced on the secant
+  predictor. Wall time is about 80 s for all 8 curves in parallel, above the
+  one-minute target; it is mostly linear solves on the 9.7k-point mesh
+  under 8-way CPU contention (single-process about 0.2 s per Newton
+  iteration). Already applied: 0.2 V steps, a lighter mesh, a vectorized
+  tracer, and skipping the outer re-solve when the retraced generation is
+  within 1%.
+
+**Not done:** a faster linear solver (petsc4py, still pending);
+Gaussian/graded doping profiles (the tip is piecewise constant); Schenk
+trap-assisted tunneling in 2D; per-carrier Hurkx masses; tunneling-path
+refinement near the gate corner.

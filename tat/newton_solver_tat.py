@@ -167,8 +167,19 @@ def _edge_quantities(psi, phin, phip, n, p, x, mat):
     return h, n_avg, p_avg, Jn, Jp
 
 
+def _add_fixed_generation(Rn, Rp, G_ext, cont_scale):
+    """G_ext = (Gn, Gp): per-node generation rates (cm^-3 s^-1) held FIXED
+    during this Newton solve - a nonlocal BTBT source (btbt/paths1d.py)
+    whose electrons and holes are generated at different nodes, lagged by
+    the caller's outer iteration (btbt/main_btbt_1d.py). Constant w.r.t.
+    U, so no Jacobian term."""
+    Gn, Gp = G_ext
+    Rn[1:-1] += Q * Gn[1:-1] / cont_scale
+    Rp[1:-1] -= Q * Gp[1:-1] / cont_scale
+
+
 def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
-                    kane_model, trap_model, trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN):
+                    kane_model, trap_model, trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN, G_ext=None):
     N = len(x)
     psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
@@ -195,12 +206,14 @@ def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, con
     Reff, *_ = _reff_and_derivs(n, p, psi, x, mat, kane_model, trap_model, trap_generation_fn)
     Rn[1:-1] = ((Jn[1:] - Jn[:-1]) / cvol_i - Q * Reff) / cont_scale
     Rp[1:-1] = ((Jp[1:] - Jp[:-1]) / cvol_i + Q * Reff) / cont_scale
+    if G_ext is not None:
+        _add_fixed_generation(Rn, Rp, G_ext, cont_scale)
 
     return np.concatenate([Rpsi, Rn, Rp])
 
 
 def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
-                            kane_model, trap_model, trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN):
+                            kane_model, trap_model, trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN, G_ext=None):
     N = len(x)
     psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
@@ -249,6 +262,8 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
 
     Rn[1:-1] = ((Jn[1:] - Jn[:-1]) / cvol_i - Q * Reff) / cont_scale
     Rp[1:-1] = ((Jp[1:] - Jp[:-1]) / cvol_i + Q * Reff) / cont_scale
+    if G_ext is not None:
+        _add_fixed_generation(Rn, Rp, G_ext, cont_scale)
     F = np.concatenate([Rpsi, Rn, Rp])
 
     idx = np.arange(1, N - 1)
@@ -324,7 +339,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                          psi_init=None, phin_init=None, phip_init=None,
                          kane_model=None, trap_model=None,
                          trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN,
-                         f_tol=1e-9, maxiter=50, verbose=False):
+                         f_tol=1e-9, maxiter=50, verbose=False, G_ext=None):
     """Same signature/return shape as newton_solver_qf.newton_gummel_solve,
     plus optional kane_model/trap_model (default to the standard Si
     constructors in tat/tat.py if not given) and trap_generation_fn -
@@ -335,7 +350,10 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
     mat may be a plain scalar Material (today's exact behavior) or a
     core.materials.MaterialField (heterojunction) - normalized once here
     (`mf`); see newton_solver_qf.newton_gummel_solve's own docstring for
-    the same pattern this mirrors."""
+    the same pattern this mirrors.
+
+    G_ext: optional (Gn, Gp) fixed per-node generation arrays (see
+    _add_fixed_generation) - None (default) leaves the solve unchanged."""
     kane_model = kane_model or KaneBTBTModel.si_kane_quadratic()
     if trap_model is None:
         trap_model = HurkxTATModel() if trap_generation_fn is _DEFAULT_TRAP_GENERATION_FN else trap_model
@@ -377,7 +395,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
 
         U = np.concatenate([psi0, phin0, phip0])
         F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
-                                       poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn)
+                                       poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn, G_ext)
         res_norm = np.max(np.abs(F))
 
         it = 0
@@ -406,7 +424,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             for _ in range(20):
                 U_try = U + step * delta
                 F_try = _residual_only(U_try, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
-                                        poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn)
+                                        poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn, G_ext)
                 res_try = np.max(np.abs(F_try))
                 if np.isfinite(res_try) and res_try < res_norm * (1 - 1e-4 * step):
                     break
@@ -416,7 +434,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
 
             U = U_try
             F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
-                                           poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn)
+                                           poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn, G_ext)
             res_norm = np.max(np.abs(F))
             if verbose:
                 print(f"  Newton(TAT) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}")
