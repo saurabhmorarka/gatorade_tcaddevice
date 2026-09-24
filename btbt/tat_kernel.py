@@ -25,23 +25,6 @@ solver's SRH.
 import numpy as np
 
 
-def trap_generation(n, p, ni, tau_n, tau_p, Gam_n, Gam_p):
-    """Full field-enhanced trap generation G = -R (not just the enhancement)
-    and dG/dn, dG/dp, with R = (np - ni^2) / (tau_p/(1+Gp)(n+ni) +
-    tau_n/(1+Gn)(p+ni)). With tau = 1/s (s: surface recombination velocity,
-    cm/s) this is a SURFACE rate in cm^-2 s^-1 - the interface-trap term of
-    btbt/paths2d.py. Zero wherever ni == 0."""
-    ok = ni > 0
-    num = n * p - ni ** 2
-    tpe, tne = tau_p / (1.0 + Gam_p), tau_n / (1.0 + Gam_n)
-    den = np.where(ok, tpe * (n + ni) + tne * (p + ni), 1.0)
-    G = -num / den
-    d_dn = -(p * den - num * tpe) / den ** 2
-    d_dp = -(n * den - num * tne) / den ** 2
-    z = lambda a: np.where(ok, a, 0.0)
-    return z(G), z(d_dn), z(d_dp)
-
-
 def hurkx_enhancement(n, p, ni, tau_n, tau_p, Gam_n, Gam_p):
     """(dG, d/dn, d/dp, d/dGam_n, d/dGam_p) of (1). Zero wherever ni == 0
     (insulator nodes)."""

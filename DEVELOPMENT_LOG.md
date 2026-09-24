@@ -3681,16 +3681,19 @@ consistent with the simulated onset near Vg = -1.4 V at Vds = 1 V.
   `grading_nm_per_decade: [gx, gy]`): full concentration inside the box,
   one decade of fall-off per gx/gy outside it, ADDED to the net doping
   (compensation) instead of replacing it.
-- Interface-trap trap-assisted tunneling in `btbt/paths2d.py`
-  (`interface_traps: {Nit_cm2, sigma_cm2, vth_cm_s}` under `btbt:`): surface
-  SRH at the Si/SiO2 interface nodes, with s0 = sigma*vth*Nit and each
-  carrier's capture enhanced by the same nonlocal Hurkx Gamma as the bulk
-  traps (`btbt/tat_kernel.py::trap_generation`, interface length per node
-  in `TriGeom.if_len`). The Jacobian is FD-checked. It is reported as
-  component `it_surface`.
+- Interface-trap trap-assisted tunneling was prototyped as a fifth step
+  (surface SRH at Si/SiO2 interface nodes, with s0 = sigma*vth*Nit and
+  capture enhanced by the nonlocal Hurkx Gamma; Jacobian FD-checked). It
+  was **then removed** at the user's request: at Nit = 5e11 cm^-2 it had
+  no visible effect (about 2e-14 A/um of surface generation, against a
+  4e-12 floor set by the bulk tau = 1 ns traps). It is a planned future
+  feature, not a rejected one. The working prototype is in commit
+  `22250f9`: `btbt/tat_kernel.py::trap_generation`, `TriGeom.if_len`, and
+  the `interface_traps` option / `it_rate` in `btbt/paths2d.py`. When it
+  comes back, pair it with a realistic (about 1 us) bulk lifetime.
 - `btbt/gidl_ablation.py` writes cumulative variant configs to
   `out/btbt/gidl_ablation/` and runs them in parallel (about 90 s for all
-  five). No halo, per the user (rare in FinFET/nanosheet devices).
+  four). No halo, per the user (rare in FinFET/nanosheet devices).
 
 **Results (NMOS Id-Vg, Vds = 1 V; onset = Vg where |Id| reaches 10x its
 minimum):**
@@ -3701,17 +3704,12 @@ minimum):**
 | 1 + EOT 1 nm (3 nm layer, k = 11.7) | -0.92 V | 1.4e-11 |
 | 2 + metal gate 4.3 eV | -0.67 V | 6.4e-10 |
 | 3 + graded S/D (3 nm/dec, ~10 nm overlap) | -0.22 V | 8.0e-6 |
-| 4 + interface traps, Nit = 5e11 cm^-2 | -0.22 V | 8.0e-6 (no change) |
 
 - EOT is the largest single shift (about 0.9 V). The metal gate adds the
-  expected ~0.25 V.
+  expected ~0.25 V. (The interface-trap step added nothing; see above.)
 - The graded drain moves onset to just below threshold: the gate edge now
   sees the 1e19-1e20 part of the gradient, where Kane paths are short.
-- With bulk tau = 1 ns (project default), the interface traps at
-  5e11 cm^-2 are invisible (about 2e-14 A/um of surface generation, against
-  a 4e-12 floor); with realistic bulk lifetimes they would matter relatively
-  more.
-- Magnitude caveat: variants 3-4 reach 1.9e-4 A/um at Vg = -2 V. That is
+- Magnitude caveat: variant 3 reaches 1.9e-4 A/um at Vg = -2 V. That is
   Vdg = 3 V across EOT 1 nm (about 30 MV/cm, beyond breakdown), outside any
   real operating range. Around Vdg = 1.5-1.8 V the values are 1e-9-1e-7
   A/um. Absolute GIDL also depends on the Kane A/B calibration (the FLOOXS
