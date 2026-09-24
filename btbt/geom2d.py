@@ -42,6 +42,15 @@ class TriGeom:
         safe = np.where(node_area > 0, node_area, 1.0)
         self.W = sp.csr_matrix((w / safe[rows], (rows, cols)), shape=(N, M))
 
+        # band structure per node (energies in eV, the solver's reference:
+        # Ei = -(psi + dEi), Ec = Ei + ec_off, Ev = Ec - Eg). Single-material
+        # meshes built before heterojunction support fall back to mat.
+        self.dEi = mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else np.zeros(N)
+        self.Eg = mesh.Eg_arr if getattr(mesh, "Eg_arr", None) is not None else np.full(N, mat.Eg_eV)
+        self.ec_off = mesh.ec_off_arr if getattr(mesh, "ec_off_arr", None) is not None else \
+            np.full(N, mat.Vt * np.log(mat.Nc / mat.ni))
+        self.Eg_ref = mat.Eg_eV
+
         self.is_semi_node = node_area > 0
         if mesh.ni_arr is not None:
             self.is_semi_node &= mesh.ni_arr > 0

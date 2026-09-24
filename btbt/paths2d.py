@@ -78,18 +78,25 @@ class FieldLineTracer:
         best = cand[np.arange(len(starts)), np.argmax(score, axis=1)]
         return np.where(np.isfinite(score.max(axis=1)), best, -1)
 
-    def trace(self, psi, g_node, starts, target, sign, L_max, record=None):
-        """Trace from each node in `starts`. Returns dict: l (K,) length at
-        which sign*(psi - psi0) reached `target` (inf if never), end (K,2)
-        and end_tri (K,) there, dpsi/s (K,) the potential gain and length
-        reached when the path stopped, and 'poly' (list of polylines) for
-        the indices in `record`."""
+    def trace(self, psi, g_node, starts, target, sign, L_max, record=None, level=None):
+        """Trace from each node in `starts` along the field lines of psi.
+        The energy test uses `level` (a nodal band-edge energy, default psi;
+        e.g. -Ec so a heterojunction band offset counts): the path is
+        complete when sign*(level - level(start)) reaches `target` (scalar
+        or per start). Returns dict: l (K,) length at completion (inf if
+        never), end (K,2) and end_tri (K,) there, dpsi/s (K,) the energy
+        gain and length reached when the path stopped, eg_int (K,) the
+        integral of the local bandgap along the path, and 'poly' (list of
+        polylines) for the indices in `record`."""
         g = self.geom
         K = len(starts)
+        lev = psi if level is None else level
+        target = np.array(np.broadcast_to(np.asarray(target, dtype=float), (K,)))
+        eg_int = np.zeros(K)
         gm = np.hypot(g_node[starts, 0], g_node[starts, 1])
         pos = g.points[starts].copy()
         tri = self._first_triangle(starts, sign * g_node[starts] / np.maximum(gm, 1e-30)[:, None])
-        psi0 = psi[starts]
+        psi0 = lev[starts]
         dpsi = np.zeros(K)
         s = np.zeros(K)
         l = np.full(K, np.inf)
@@ -119,11 +126,12 @@ class FieldLineTracer:
             bad |= tn < 0
             tn = np.where(tn < 0, tm, tn)
             bad |= ~g.tri_semi[tn]
-            dnew = sign * (g.interp(psi, new, tn) - psi0[a])
+            dnew = sign * (g.interp(lev, new, tn) - psi0[a])
             dold = dpsi[a]
-            done = ~bad & (dnew >= target)
+            tg = target[a]
+            done = ~bad & (dnew >= tg)
             stall = ~bad & (dnew < dold - 1e-12)
-            frac = np.where(done, (target - dold) / np.maximum(dnew - dold, 1e-30), 0.0)
+            frac = np.where(done, (tg - dold) / np.maximum(dnew - dold, 1e-30), 0.0)
             ok = ~bad & ~stall
             i_done = a[done]
             l[i_done] = s[i_done] + frac[done] * ds[done]
@@ -133,17 +141,18 @@ class FieldLineTracer:
             step_len = np.where(done, frac * ds, ds)
             upd = a[ok]
             s[upd] += step_len[ok]
-            dpsi[upd] = np.where(done[ok], target, dnew[ok])
+            eg_int[upd] += step_len[ok] * g.interp(g.Eg, mid[ok], tm[ok])
+            dpsi[upd] = np.where(done[ok], tg[ok], dnew[ok])
             pos[upd] = new[ok]
             tri[upd] = tn[ok]
             if rec is not None:
                 for j, k in enumerate(a):
                     if int(k) in rec and ok[j]:
                         rec[int(k)].append(end[k].copy() if done[j] else new[j].copy())
-            stop = done | bad | stall | (s[a] > L_max)
+            stop = done | bad | stall | (s[a] > (L_max[a] if np.ndim(L_max) else L_max))
             alive[a[stop]] = False
 
-        out = dict(l=l, end=end, end_tri=end_tri, dpsi=dpsi, s=s)
+        out = dict(l=l, end=end, end_tri=end_tri, dpsi=dpsi, s=s, eg_int=eg_int)
         if rec is not None:
             out["poly"] = [np.array(rec[int(k)]) for k in record]
         return out
@@ -180,10 +189,16 @@ class NonlocalTunneling2D:
         gm = np.hypot(g_node[:, 0], g_node[:, 1])
         N = len(psi)
         polys = None
+        # band edges (eV, solver reference): -Ec and -Ev as nodal "levels";
+        # for one material these are psi + constants, i.e. the old psi test
+        lev_c = psi + g.dEi - g.ec_off
+        lev_v = lev_c + g.Eg
         if self.kane is not None:
             st = np.flatnonzero(self.free & (gm > F_START_KANE))
             rec = None if record is None else np.flatnonzero(np.isin(st, record))
-            tr = self.tracer.trace(psi, g_node, st, self.Eg, +1, self.Eg / F_EFF_MIN, record=rec)
+            # complete when Ec(end) = Ev(start): -Ec rises by Eg(start)
+            tr = self.tracer.trace(psi, g_node, st, g.Eg[st], +1, g.Eg[st] / F_EFF_MIN, record=rec,
+                                   level=lev_c)
             polys = tr.get("poly")
             self.Gn_k, self.Gp_k, self.kane_info = self._kane_deposit(st, tr, phin, phip)
             if polys is not None:
@@ -192,19 +207,24 @@ class NonlocalTunneling2D:
         if self.hurkx is not None:
             st = np.flatnonzero(self.free & (gm > F_START_TAT))
             F_loc = g.W @ np.hypot(*g.tri_grad(psi).T)               # same node field as local2d
-            Gam_loc = np.where(self.free, hurkx_gamma(F_loc, self.T, self.hurkx)[0], 0.0)
-            Gn = Gam_loc.copy()
-            Gp = Gam_loc.copy()
-            for sign, G_out in ((+1, Gn), (-1, Gp)):
-                tr = self.tracer.trace(psi, g_node, st, 0.5 * self.Eg, sign, L_MAX_TAT)
+            # midgap trap at Ei: electron tunnels Et -> Ec (depth Ec-Ei = ec_off,
+            # uphill in -Ec), hole Et -> Ev (depth Ei-Ev = Eg-ec_off, downhill in -Ev)
+            dE_n, dE_p = g.ec_off, g.Eg - g.ec_off
+            Gn = np.where(self.free, hurkx_gamma(F_loc, self.T, self.hurkx, dE_eV=dE_n)[0], 0.0)
+            Gp = np.where(self.free, hurkx_gamma(F_loc, self.T, self.hurkx, dE_eV=dE_p)[0], 0.0)
+            for sign, lev, dE, G_out in ((+1, lev_c, dE_n, Gn), (-1, lev_v, dE_p, Gp)):
+                tr = self.tracer.trace(psi, g_node, st, dE[st], sign, L_MAX_TAT, level=lev)
                 F_eff = np.where(tr["s"] > 0, tr["dpsi"] / np.maximum(tr["s"], 1e-30), 0.0)
-                G_out[st] = hurkx_gamma(F_eff, self.T, self.hurkx)[0]
+                G_out[st] = hurkx_gamma(F_eff, self.T, self.hurkx, dE_eV=dE[st])[0]
             self.Gam_n, self.Gam_p = Gn, Gp
 
     def _kane_deposit(self, st, tr, phin, phip):
         g = self.geom
         N = len(phin)
-        G, F_eff = path_rate(tr["l"], self.Eg, self.kane)
+        # gap averaged along each path (Eg of a Si-only path = Eg_Si exactly)
+        Eg_path = np.where(np.isfinite(tr["l"]) & (tr["s"] > 0), tr["eg_int"] / np.maximum(tr["s"], 1e-30),
+                           g.Eg[st])
+        G, F_eff = path_rate(tr["l"], Eg_path, self.kane, Eg_ref_eV=g.Eg_ref)
         ok = G > 0
         st, l, G, F_eff = st[ok], tr["l"][ok], G[ok], F_eff[ok]
         end, et = tr["end"][ok], tr["end_tri"][ok]
@@ -229,8 +249,8 @@ class NonlocalTunneling2D:
 
     # --- Newton hook ---
     def _np(self, psi, phin, phip):
-        Vt = self.Vt
-        return self.ni * np.exp((psi - phin) / Vt), self.ni * np.exp((phip - psi) / Vt)
+        Vt, dEi = self.Vt, self.geom.dEi
+        return self.ni * np.exp((psi + dEi - phin) / Vt), self.ni * np.exp((phip - psi - dEi) / Vt)
 
     def tat_rate(self, psi, phin, phip):
         n, p = self._np(psi, phin, phip)

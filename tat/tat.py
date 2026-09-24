@@ -170,7 +170,8 @@ def hurkx_gamma(F_abs, T, model: HurkxTATModel, dE_eV=None):
         F_Gamma = sqrt(24 m_t (kT)^3) / (q hbar),
 
     where dE is the trap depth measured from the band edge (default
-    Eg/2 - |Et - Ei|). At moderate field the integrand peaks inside the
+    Eg/2 - |Et - Ei|; may be an array broadcasting against F, e.g. a
+    per-node Ec - Et at a heterojunction). At moderate field the integrand peaks inside the
     range and Gamma ~ 2 sqrt(3 pi) (F/F_Gamma) exp((F/F_Gamma)^2), which is
     the usual Hurkx closed form. At very high field the peak runs into the
     upper limit and Gamma saturates near exp(dE/kT) (~1e9 for a midgap Si
@@ -188,15 +189,15 @@ def hurkx_gamma(F_abs, T, model: HurkxTATModel, dE_eV=None):
     F_Gamma = np.sqrt(24.0 * m_t * kT ** 3) / (_Q_SI * _HBAR) / 100.0   # V/cm
     if dE_eV is None:
         dE_eV = 0.5 * model.Eg_eV - abs(model.Et_minus_Ei_eV)
-    umax = dE_eV * _Q_SI / kT
+    umax = np.asarray(dE_eV, dtype=float)[..., None] * _Q_SI / kT     # per point allowed
     u = 0.5 * umax * (_GL_X + 1.0)
     w = 0.5 * umax * _GL_W
     F_safe = np.where(F > 0, F, 1.0)
     K = (4.0 / (3.0 * np.sqrt(12.0))) * F_Gamma / F_safe
     u15 = u ** 1.5
     E = np.exp(u - K[..., None] * u15)
-    Gamma = E @ w
-    dGamma_dF = (E * u15) @ w * K / F_safe
+    Gamma = np.sum(E * w, axis=-1)
+    dGamma_dF = np.sum(E * u15 * w, axis=-1) * K / F_safe
     zero = F <= 0
     return np.where(zero, 0.0, Gamma), np.where(zero, 0.0, dGamma_dF)
 

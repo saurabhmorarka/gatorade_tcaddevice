@@ -141,10 +141,36 @@ def mobility_field(E, mu0, vsat, beta):
     return mu, dmu_dE
 
 
-def _densities(psi, phin, phip, ni_arr, Vt):
-    n = ni_arr * np.exp((psi - phin) / Vt)
-    p = ni_arr * np.exp((phip - psi) / Vt)
+def _densities(psi, phin, phip, ni_arr, Vt, dEi=0.0):
+    """dEi: per-node heterojunction band shift (mesh.dEi_arr, see
+    _mesh_dEi) - 0 for a single-material device."""
+    n = ni_arr * np.exp((psi + dEi - phin) / Vt)
+    p = ni_arr * np.exp((phip - psi - dEi) / Vt)
     return n, p
+
+
+def _mesh_dEi(mesh):
+    return mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else 0.0
+
+
+def _sg_shifts(mesh, ii, jj, Vt):
+    """Per-edge additions to the Scharfetter-Gummel argument d =
+    (psi_j - psi_i)/Vt at a heterojunction (the 2D form of core/physics.py's
+    _sg_potential_n/_sg_potential_p): with u_n = (psi+dEi)/Vt + ln(ni) and
+    u_p = (psi+dEi)/Vt - ln(ni), equilibrium n = exp(u_n)*const and
+    p = exp(-u_p)*const, so SG on d_n = u_n,j - u_n,i (d_p likewise) carries
+    exactly zero current in equilibrium across a material step. The plain
+    d leaves a spurious current wherever ni or dEi jumps. Both shifts are
+    0 on a single-material mesh, and on edges touching an insulator node
+    (those edges carry no carrier flux anyway)."""
+    dEi = getattr(mesh, "dEi_arr", None)
+    if dEi is None or mesh.ni_arr is None:
+        return 0.0, 0.0
+    ni = mesh.ni_arr
+    ok = (ni[ii] > 0) & (ni[jj] > 0)
+    lr = np.where(ok, np.log(np.where(ok, ni[jj], 1.0) / np.where(ok, ni[ii], 1.0)), 0.0)
+    de = np.where(ok, (dEi[jj] - dEi[ii]) / Vt, 0.0)
+    return de + lr, de - lr
 
 
 def _mesh_mobility_nodal(mesh, mat):
@@ -301,10 +327,13 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     if edge_mask is not None:
         geo = geo * edge_mask
     d = (psi[jj] - psi[ii]) / Vt
-    Bp, dBp = bernoulli(d)
-    Bm, dBm = bernoulli(-d)
+    sn, sp_ = _sg_shifts(mesh, ii, jj, Vt)
+    Bp, dBp = bernoulli(d + sn)
+    Bm, dBm = bernoulli(-(d + sn))
+    Bpp, dBpp = bernoulli(d + sp_)
+    Bmp, dBmp = bernoulli(-(d + sp_))
     Sn = n[jj] * Bp - n[ii] * Bm
-    Sp = p[ii] * Bp - p[jj] * Bm
+    Sp = p[ii] * Bpp - p[jj] * Bmp
     In = geo * mu_n * Sn
     Ip = geo * mu_p * Sp
     if not jacobian:
@@ -314,8 +343,8 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     # (dd/dpsi_j = 1/Vt), and through mu (velocity saturation, dmu/d(dpsi)).
     dSn_dpsi_j = (n[jj] * Bp + n[jj] * dBp + n[ii] * dBm) / Vt
     dSn_dpsi_i = -(n[ii] * Bm + n[jj] * dBp + n[ii] * dBm) / Vt
-    dSp_dpsi_j = (p[jj] * Bm + p[ii] * dBp + p[jj] * dBm) / Vt
-    dSp_dpsi_i = -(p[ii] * Bp + p[ii] * dBp + p[jj] * dBm) / Vt
+    dSp_dpsi_j = (p[jj] * Bmp + p[ii] * dBpp + p[jj] * dBmp) / Vt
+    dSp_dpsi_i = -(p[ii] * Bpp + p[ii] * dBpp + p[jj] * dBmp) / Vt
     vn = geo * Sn * dmu_n
     vp = geo * Sp * dmu_p
     dIn_dpsi_i = cn * dSn_dpsi_i - vn
@@ -325,8 +354,8 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     # d/dphi: only through n,p (dn/dphin = -n/Vt, dp/dphip = p/Vt).
     dIn_dphin_i = cn * n[ii] * Bm / Vt
     dIn_dphin_j = -cn * n[jj] * Bp / Vt
-    dIp_dphip_i = cp * p[ii] * Bp / Vt
-    dIp_dphip_j = -cp * p[jj] * Bm / Vt
+    dIp_dphip_i = cp * p[ii] * Bpp / Vt
+    dIp_dphip_j = -cp * p[jj] * Bmp / Vt
     return In, Ip, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
                     dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j)
 
@@ -358,7 +387,7 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
     ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
-    n, p = _densities(psi, phin, phip, ni_arr, mat.Vt)
+    n, p = _densities(psi, phin, phip, ni_arr, mat.Vt, _mesh_dEi(mesh))
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
@@ -434,7 +463,7 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     psi, phin, phip = unpack_qf(U, N)
     ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
     Vt = mat.Vt
-    n, p = _densities(psi, phin, phip, ni_arr, Vt)
+    n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
@@ -709,7 +738,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     # doesn't poison the cold-start guess with a NaN.
     is_insulator = mesh.is_insulator if mesh.is_insulator is not None else np.zeros(N, dtype=bool)
     ni_safe_eq = np.where(is_insulator, 1.0, ni_arr)
-    psi_eq = np.where(is_insulator, 0.0, equilibrium_bulk_potential_arr(Vt, ni_safe_eq, mesh.Cdop))
+    dEi_eq = mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else None
+    psi_eq = np.where(is_insulator, 0.0,
+                      equilibrium_bulk_potential_arr(Vt, ni_safe_eq, mesh.Cdop, delta_Ei_arr=dEi_eq))
 
     psi_bc = np.empty(len(contact_point_idx))
     phin_bc = np.empty(len(contact_point_idx))
@@ -723,8 +754,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         else:
             n_bc, p_bc = contact_values(mat, mesh.Cdop[pt], ni=ni_arr[pt])
             psi_bc[k] = psi_eq[pt] + v_applied
-            phin_bc[k] = psi_bc[k] - Vt * np.log(n_bc / ni_arr[pt])
-            phip_bc[k] = psi_bc[k] + Vt * np.log(p_bc / ni_arr[pt])
+            dEi_pt = dEi_eq[pt] if dEi_eq is not None else 0.0
+            phin_bc[k] = psi_bc[k] + dEi_pt - Vt * np.log(n_bc / ni_arr[pt])
+            phip_bc[k] = psi_bc[k] + dEi_pt + Vt * np.log(p_bc / ni_arr[pt])
 
     def _cold_start():
         # phin0=phip0=0 EXACTLY everywhere (the natural equilibrium guess)
@@ -881,6 +913,6 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a cold-start retry.")
 
     psi, phin, phip = unpack_qf(U, N)
-    n, p = _densities(psi, phin, phip, ni_arr, Vt)
+    n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
             "iters": it, "res_norm": res_norm, "velocity_saturation": velocity_saturation}

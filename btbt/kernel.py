@@ -57,16 +57,26 @@ import numpy as np
 D_MIN = -1.0
 
 
-def path_rate(l_cm, Eg_eV, model):
+def path_rate(l_cm, Eg_eV, model, Eg_ref_eV=None):
     """G (cm^-3 s^-1) for tunneling paths of length l_cm (array; np.inf or
     nan = no path -> 0), from (2)-(3). `model` is a tat.tat.KaneBTBTModel;
     its F_sat_V_cm cap is NOT applied - the cap exists to stop the local
     model extrapolating F^P exp(-B/F) past validated fields, while here the
-    path length itself bounds F_eff physically (see module docstring)."""
+    path length itself bounds F_eff physically (see module docstring).
+
+    Heterojunctions / other materials: Eg_eV may be an array - the gap
+    averaged along each path - and Eg_ref_eV the gap the Kane (A, B) fit
+    belongs to (Si). Kane's exponent is the WKB integral through a
+    triangular barrier of height Eg, B/F with B ~ sqrt(m_r) Eg^1.5, so
+    B is scaled by (Eg/Eg_ref)^1.5 (the reduced tunneling mass is kept at
+    silicon's; the prefactor A, which varies only weakly, is kept too).
+    With Eg == Eg_ref this is exactly the Si expression."""
     l = np.asarray(l_cm, dtype=float)
     ok = np.isfinite(l) & (l > 0)
-    F = np.where(ok, Eg_eV / np.where(ok, l, 1.0), 1.0)
-    G = model.A * F ** model.P * np.exp(-model.B / F)
+    Eg = np.broadcast_to(np.asarray(Eg_eV, dtype=float), l.shape)
+    F = np.where(ok, Eg / np.where(ok, l, 1.0), 1.0)
+    B = model.B if Eg_ref_eV is None else model.B * (Eg / Eg_ref_eV) ** 1.5
+    G = model.A * F ** model.P * np.exp(-B / F)
     return np.where(ok, G, 0.0), np.where(ok, F, 0.0)
 
 

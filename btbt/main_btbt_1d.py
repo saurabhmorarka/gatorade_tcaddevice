@@ -64,7 +64,7 @@ def uniform_field_check(model, Eg):
     for F in (3e5, 6e5, 1e6, 2e6):
         psi = F * x
         from btbt.paths1d import find_paths_1d
-        l, _, _ = find_paths_1d(x, psi, Eg)
+        l, _, _, _ = find_paths_1d(x, psi, Eg)
         ok = np.isfinite(l)
         G_nl, F_eff = path_rate(l[ok], Eg, model)
         G_loc, _ = btbt_generation(np.full(ok.sum(), F), model)

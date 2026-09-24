@@ -3577,3 +3577,91 @@ trap-assisted; direct tunneling dominates only in narrow-gap materials.
 Gaussian/graded doping profiles (the tip is piecewise constant); Schenk
 trap-assisted tunneling in 2D; per-carrier Hurkx masses; tunneling-path
 refinement near the gate corner.
+
+## 31. Session 21: PMOS tunneling leakage, Si vs strained Si0.6Ge0.4
+## source/drains - 2D heterojunction support
+
+**Devices.** `configs/input_pmos_2d_btbt.yaml` is the Session 20 NMOS with
+every polarity reversed: n 1e18 body, p+ 1e20 S/D with a full-depth p 3e18
+tip 40 nm under the gate, p+ poly gate (5.17 eV), Vds = -1 V, Id-Vg from -1 to
++2 V, and Id-Vsub from 0 to +3 V (reverse body bias).
+`configs/input_pmos_2d_btbt_sige.yaml` is identical, except that the whole
+p-type S/D (tip + body) is compressively strained Si0.6Ge0.4 on Si
+(People & Bean: Eg = 0.824 eV, dEv = 0.296 eV, dEc = 0), so the metallurgical
+junction is also the heterointerface. junction_h is 5 nm (was 10) so the
+valence-band step stays within about one element of the junction.
+
+**2D heterojunction support (new).**
+- `mesh2d/geometry2d.py`: `Region.material` (optional, semiconductor
+  regions), `semiconductor_materials()` and `semiconductor_material_index()`
+  (same last-wins painting and inclusive boundaries as doping, so a
+  junction node that is also a heterointerface node gets the later region's
+  doping AND material). The permittivity per triangle comes from the
+  region's material.
+- `mesh2d/config2d.py`: region `material:` blocks (the same shape as 1D,
+  including alloy/strain). Regions sharing a name share one material.
+- `mesh2d/mesh2d.py`: `dEi_arr` (Xi(node) - Xi(base), core/materials.py),
+  `Eg_arr`, `ec_off_arr` (= Vt ln(Nc/ni) = Ec - Ei), and a per-node `ni_arr`.
+- `solver2d/newton_solver_qf_2d.py`: n = ni exp((psi+dEi-phin)/Vt) and
+  p = ni exp((phip-psi-dEi)/Vt); equilibrium psi and ohmic BCs include dEi.
+  The Scharfetter-Gummel argument gets the per-edge heterojunction shift
+  (`_sg_shifts`, the 2D form of physics.py's `_sg_potential_n/p`), with
+  separate shifts for electrons and holes, so the flux is exactly zero in
+  equilibrium across a material step.
+- Every shift is exactly 0 on a single-material mesh. The shipped MOSFET
+  outputs are byte-identical and the testsuite passes 37/37.
+- Validated on a quasi-1D p+ SiGe 1e20 / n-Si strip against the 1D
+  heterojunction solver:
+  - Equilibrium phin = phip = 0 to 1e-16.
+  - The reverse-bias SiGe/Si current ratio matches 1D to 1%.
+  - Forward injection into the SiGe matches the analytic short-base value
+    with the 2D solver's own mobility (5.64 vs 5.7 A/cm^2 at 0.6 V). 1D's
+    constant Vegard SiGe electron mobility (about 2400 vs about 90 for the
+    2D doping model at 1e20) explains the remaining 1D-vs-2D forward gap.
+
+**Tunneling across a heterojunction.**
+- The paths use band edges, not psi. Kane is complete when
+  Ec(end) = Ev(start): the "level" -Ec = psi + dEi - ec_off rises by
+  Eg(start). Hurkx half paths go from the midgap trap to Ec (depth ec_off)
+  for electrons and to Ev (depth Eg - ec_off) for holes. The tracer still
+  follows the electrostatic field lines.
+- Kane's B scales as (Eg_path/Eg_Si)^1.5, with Eg_path the gap averaged
+  along the path (the WKB exponent of a triangular barrier, B ~
+  sqrt(m) Eg^1.5), and F_eff = Eg_path/l. A Si-only path is exactly the old
+  expression.
+- `hurkx_gamma` takes a per-point trap depth. The local model is updated
+  the same way.
+- `btbt/paths1d.py` got the same band-edge search. On the hetero strip the
+  onset paths are 15.5 nm in 2D and 16.7 nm in 1D. At -2 to -3 V, Si
+  junction BTBT agrees within 3% between 1D and 2D; SiGe agrees within
+  1.5x (the 2D P1 spreading of the Ev step).
+
+**Results (nonlocal Kane + Hurkx, |Vds| = 1 V; `out/btbt/pmos_si_vs_sige.png`
+from `python3 -m btbt.compare_pmos_sige`).**
+- **Si PMOS vs mirrored NMOS:** within 1.2-1.7x everywhere (for example
+  GIDL at |Vg| = 2: 3.6e-11 vs 4.4e-11 A/um; junction at |Vsub| = 3: 5.5e-8 vs
+  3.3e-8). The models are polarity-symmetric, as expected. The small
+  differences are hole vs electron mobility and velocity saturation.
+- **SiGe vs Si S/D:**
+  - GIDL at Vg = +2 V: 1.45e-8 vs 3.6e-11 (400x).
+  - Off-state floor at Vg = 0-1 V: 1.4e-11 vs 4.6e-13 (30x).
+  - Junction leakage at Vsub = +1 V: 1.2e-8 vs 3.3e-11 (360x); at +3 V:
+    3.9e-6 vs 5.5e-8 (70x).
+- **Mechanism shift:** in Si the zero-body-bias junction floor is
+  trap-assisted, and direct Kane takes over only beyond about 0.6 V of body
+  bias. In SiGe, direct Kane at the heterojunction dominates already at
+  Vsub = 0. The valence-band offset shortens the paths (8.5 -> 7.6 nm at
+  Vsub 1.6 -> 3 V; `input_pmos_2d_btbt_sige/junction_fields_bands.png`). GIDL
+  in SiGe is also Kane-dominated. This is the narrow-gap behavior the user
+  pointed out.
+- **Secondary effects:** the SRH-only floor is about 20x higher with SiGe
+  (larger ni). At high body bias the trap-assisted bulk term turns net
+  negative in both devices: tunneling-generated carriers recombine through
+  the traps.
+- **Runtime:** both devices (none + nonlocal, 2 sweeps each) take about
+  95 s together, 4 workers each. All 128 points converge.
+
+**Caveats:** strained-SiGe mobility and DOS are not modeled (Vegard values
+for DOS, Si doping-dependent mobility); Kane A and the reduced mass are kept
+at Si values, and only B is scaled by Eg; the heterointerface in 2D is
+spread over one element in the P1 interpolation used by the path search.

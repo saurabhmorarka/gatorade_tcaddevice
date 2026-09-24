@@ -302,9 +302,13 @@ def run_curve(task):
                                  log=log.append)
         states = {0.0: base, **up, **dn}
     else:
+        up, i1, _ = continuation(at("Vs"), 0.0, base, sorted(v for v in vals if v > 0), log=log.append)
+        holder.pop("frozen", None)
+        if "frozen" in base:
+            holder["frozen"] = base["frozen"]
         dn, i2, _ = continuation(at("Vs"), 0.0, base, sorted((v for v in vals if v < 0), reverse=True),
                                  log=log.append)
-        states = {0.0: base, **dn}
+        states = {0.0: base, **up, **dn}
     wanted = set(map(float, vals)) | {0.0}
     points = {}
     for p, r in sorted(states.items()):
@@ -416,16 +420,26 @@ def plot_maps(ctx, results, out_path):
     fig.savefig(out_path, dpi=140); plt.close(fig)
 
 
+def band_edges(geom, psi):
+    """Nodal Ec, Ev (eV, the solver's reference Ei = -(psi + dEi)) - with
+    the per-node heterojunction band offsets."""
+    Ec = -(psi + geom.dEi) + geom.ec_off
+    return Ec, Ec - geom.Eg
+
+
 def _cut(ctx, mp, x_um, y_um):
-    """psi, phin, phip along a vertical cut x = x_um through the silicon."""
+    """Ec, Ev, Efn, Efp along a vertical cut x = x_um through the
+    semiconductor."""
     g = ctx["geom"]
     pts = np.column_stack([np.full_like(y_um, x_um), y_um]) * 1e-4
     tri = g.locate(pts, np.full(len(pts), -1))
     ok = (tri >= 0)
     ok[ok] &= g.tri_semi[tri[ok]]
-    out = {k: np.full(len(pts), np.nan) for k in ("psi", "phin", "phip")}
-    for k in out:
-        out[k][ok] = g.interp(mp[k], pts[ok], tri[ok])
+    Ec, Ev = band_edges(g, mp["psi"])
+    fields = dict(Ec=Ec, Ev=Ev, Efn=-mp["phin"], Efp=-mp["phip"], psi=mp["psi"])
+    out = {k: np.full(len(pts), np.nan) for k in fields}
+    for k, f in fields.items():
+        out[k][ok] = g.interp(f, pts[ok], tri[ok])
     return out
 
 
@@ -485,12 +499,11 @@ def plot_band_figure(ctx, res, cut_x_um, xlim, ylim, cut_y, title, bias_label, o
         ax3 = row[2]
         yc = np.linspace(*cut_y, 600)
         c = _cut(ctx, mp, cut_x_um, yc)
-        Ec, Ev = -c["psi"] + Eg / 2, -c["psi"] - Eg / 2
         ynm = yc * 1e3
-        ax3.plot(ynm, Ec, "k-", lw=1.6, label="Ec")
-        ax3.plot(ynm, Ev, "k-", lw=1.6, label="Ev")
-        ax3.plot(ynm, -c["phin"], "b--", lw=1, label="Efn")
-        ax3.plot(ynm, -c["phip"], "r--", lw=1, label="Efp")
+        ax3.plot(ynm, c["Ec"], "k-", lw=1.6, label="Ec")
+        ax3.plot(ynm, c["Ev"], "k-", lw=1.6, label="Ev")
+        ax3.plot(ynm, c["Efn"], "b--", lw=1, label="Efn")
+        ax3.plot(ynm, c["Efp"], "r--", lw=1, label="Efp")
         k = gen.get("kane")
         drawn = False
         if k is not None and len(k["pair"]):
@@ -502,7 +515,7 @@ def plot_band_figure(ctx, res, cut_x_um, xlim, ylim, cut_y, title, bias_label, o
             if len(near):
                 j = near[np.argmax(k["pair"][near])]
                 y0, y1 = sy[j], ey[j]
-                E0 = -mp["psi"][k["start"][j]] - Eg / 2
+                E0 = band_edges(g, mp["psi"])[1][k["start"][j]]
                 ax3.annotate("", xy=(y1, E0), xytext=(y0, E0),
                              arrowprops=dict(arrowstyle="->", color="#2f9e44", lw=2.2))
                 ax3.text(0.5 * (y0 + y1), E0 + 0.08, f"band-to-band tunneling\nl = {k['l'][j] * 1e7:.1f} nm",
@@ -510,7 +523,8 @@ def plot_band_figure(ctx, res, cut_x_um, xlim, ylim, cut_y, title, bias_label, o
                 drawn = True
         valid = np.isfinite(c["psi"])
         bend = np.nanmax(c["psi"][valid]) - np.nanmin(c["psi"][valid]) if valid.any() else np.nan
-        ax3.text(0.02, 0.03, f"band bending along cut = {bend:.2f} V (Eg = {Eg:.2f})"
+        ax3.text(0.02, 0.03, f"band bending along cut = {bend:.2f} V (Eg = {np.nanmin(g.Eg):.2f}"
+                 + (f"-{np.nanmax(g.Eg):.2f}" if np.ptp(g.Eg) > 1e-6 else "") + ")"
                  + ("" if drawn else "\nno Kane path near the cut: bands bend < Eg within reach"),
                  transform=ax3.transAxes, fontsize=8.5)
         ax3.set_xlim(cut_y[0] * 1e3, cut_y[1] * 1e3)
@@ -541,14 +555,18 @@ def main():
     vgs = _grid(b.get("vgs_start_V", 1.0), b.get("vgs_stop_V", -2.0), b.get("vgs_step_V", 0.1))
     vsub = _grid(b.get("vsub_start_V", 0.0), b.get("vsub_stop_V", -3.0), b.get("vsub_step_V", 0.1))
     models = args.models.split(",")
-    def maps_at(vals, m):
-        vals = sorted(vals)
+    def maps_at(vals, stop, m):
+        """Figure biases on the leakage side of a sweep (the side of its stop
+        value: negative Vg / Vsub for an NMOS, positive for a PMOS), largest
+        |bias| first."""
+        side = sorted((v for v in vals if v * stop > 0), key=lambda v: -abs(v))
         if m != "nonlocal":
-            return [vals[0]]
-        return sorted({vals[0], vals[len(vals) // 3], vals[len(vals) // 2]})
-    tasks = ([dict(kind="idvg", model=m, Vds=Vds, values=vgs, map_at=maps_at([v for v in vgs if v < 0], m),
+            return side[:1]
+        return sorted({side[0], side[len(side) // 3], side[len(side) // 2]})
+    vg_stop, vs_stop = float(b.get("vgs_stop_V", -2.0)), float(b.get("vsub_stop_V", -3.0))
+    tasks = ([dict(kind="idvg", model=m, Vds=Vds, values=vgs, map_at=maps_at(vgs, vg_stop, m),
                    config=args.config) for m in models] +
-             [dict(kind="idvsub", model=m, Vds=Vds, values=vsub, map_at=maps_at([v for v in vsub if v < 0], m),
+             [dict(kind="idvsub", model=m, Vds=Vds, values=vsub, map_at=maps_at(vsub, vs_stop, m),
                    config=args.config) for m in models])
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
         os.environ[var] = "1"

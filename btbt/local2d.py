@@ -57,16 +57,29 @@ class LocalTunneling2D:
         """Per-node (G_kane, dG_tat, F) - for diagnostics."""
         n, p = self._np(psi, phin, phip)
         F, _ = self.node_field(psi)
-        Gk = np.zeros_like(F) if self.kane is None else btbt_generation(F, self.kane)[0]
+        Gk = np.zeros_like(F) if self.kane is None else btbt_generation(F, self._kane())[0]
         Gt = np.zeros_like(F)
         if self.hurkx is not None:
-            Gam, _ = hurkx_gamma(F, self.T, self.hurkx)
-            Gt = hurkx_enhancement(n, p, self.ni, self.mat.tau_n, self.mat.tau_p, Gam, Gam)[0]
+            Gn_, _, Gp_, _ = self._gammas(F)
+            Gt = hurkx_enhancement(n, p, self.ni, self.mat.tau_n, self.mat.tau_p, Gn_, Gp_)[0]
         return np.where(self.free, Gk, 0.0), np.where(self.free, Gt, 0.0), F
 
     def _np(self, psi, phin, phip):
-        Vt = self.mat.Vt
-        return self.ni * np.exp((psi - phin) / Vt), self.ni * np.exp((phip - psi) / Vt)
+        Vt, dEi = self.mat.Vt, self.geom.dEi
+        return self.ni * np.exp((psi + dEi - phin) / Vt), self.ni * np.exp((phip - psi - dEi) / Vt)
+
+    def _kane(self):
+        """Kane model with B scaled per node by (Eg/Eg_Si)^1.5 (see
+        btbt/kernel.py::path_rate) - the Si model itself on Si nodes."""
+        from types import SimpleNamespace
+        k, g = self.kane, self.geom
+        return SimpleNamespace(A=k.A, P=k.P, F_sat_V_cm=k.F_sat_V_cm, B=k.B * (g.Eg / g.Eg_ref) ** 1.5)
+
+    def _gammas(self, F):
+        g = self.geom
+        Gn, dGn = hurkx_gamma(F, self.T, self.hurkx, dE_eV=g.ec_off)
+        Gp, dGp = hurkx_gamma(F, self.T, self.hurkx, dE_eV=g.Eg - g.ec_off)
+        return Gn, dGn, Gp, dGp
 
     def __call__(self, psi, phin, phip, jacobian=False):
         N = len(psi)
@@ -76,15 +89,16 @@ class LocalTunneling2D:
         dG_dF = np.zeros(N)
         dG_dn = dG_dp = None
         if self.kane is not None:
-            Gk, dGk = btbt_generation(F, self.kane)
+            Gk, dGk = btbt_generation(F, self._kane())
             G += Gk
             dG_dF += dGk
         if self.hurkx is not None:
             n, p = self._np(psi, phin, phip)
-            Gam, dGam = hurkx_gamma(F, self.T, self.hurkx)
-            dGt, d_dn, d_dp, d_dGn, d_dGp = hurkx_enhancement(n, p, self.ni, self.mat.tau_n, self.mat.tau_p, Gam, Gam)
+            Gn_, dGn_, Gp_, dGp_ = self._gammas(F)
+            dGt, d_dn, d_dp, d_dGn, d_dGp = hurkx_enhancement(n, p, self.ni, self.mat.tau_n, self.mat.tau_p,
+                                                              Gn_, Gp_)
             G += dGt
-            dG_dF += (d_dGn + d_dGp) * dGam
+            dG_dF += d_dGn * dGn_ + d_dGp * dGp_
             dG_dn, dG_dp = d_dn, d_dp
         free = self.free
         G = np.where(free, G, 0.0)
