@@ -63,8 +63,7 @@ COLORS = {"none": "#6c757d", "local_1d": "#e8590c", "local": "#d6336c", "nonloca
 COMP_STYLE = {"kane_surface": ("#1f6feb", "-", "Kane BTBT, surface (GIDL)"),
               "tat_surface": ("#1f6feb", "--", "trap-assisted, surface (GIDL)"),
               "kane_bulk": ("#2f9e44", "-", "Kane BTBT, bulk junction"),
-              "tat_bulk": ("#2f9e44", "--", "trap-assisted, bulk junction"),
-              "it_surface": ("#e8590c", "-.", "interface-trap-assisted (GIDL)")}
+              "tat_bulk": ("#2f9e44", "--", "trap-assisted, bulk junction")}
 
 
 def load_config(path):
@@ -109,8 +108,7 @@ def make_model(ctx, name):
         return LocalTunneling2D(ctx["geom"], ctx["mat"], ctx["ni"], kane=kane_uncapped, hurkx=hurkx)
     if name == "nonlocal":
         return NonlocalTunneling2D(ctx["geom"], ctx["mat"], ctx["ni"], ctx["cv"], kane=kane_uncapped, hurkx=hurkx,
-                                   surface_depth_cm=SURFACE_DEPTH, x_mid_cm=ctx["x_mid"],
-                                   interface_traps=(ctx["cfg"].get("btbt") or {}).get("interface_traps"))
+                                   surface_depth_cm=SURFACE_DEPTH, x_mid_cm=ctx["x_mid"])
     raise ValueError(name)
 
 
@@ -212,7 +210,7 @@ def components(ctx, model, r):
     P = g.points
     drain = P[:, 0] > ctx["x_mid"]
     surf = P[:, 1] < SURFACE_DEPTH
-    out = dict(kane_surface=0.0, kane_bulk=0.0, tat_surface=0.0, tat_bulk=0.0, it_surface=0.0)
+    out = dict(kane_surface=0.0, kane_bulk=0.0, tat_surface=0.0, tat_bulk=0.0)
     if model is None:
         return out
     if isinstance(model, LocalTunneling2D):
@@ -229,7 +227,6 @@ def components(ctx, model, r):
             out["kane_surface"] = float(Q * np.sum(info["pair"][ds & info["surface"]]) * 1e-4)
             out["kane_bulk"] = float(Q * np.sum(info["pair"][ds & ~info["surface"]]) * 1e-4)
         Gt = model.tat_rate(r["psi"], r["phin"], r["phip"])
-        out["it_surface"] = integrate(model.it_rate(r["psi"], r["phin"], r["phip"]), cv, drain)
     out["tat_surface"] = integrate(Gt, cv, drain & surf)
     out["tat_bulk"] = integrate(Gt, cv, drain & ~surf)
     return out
@@ -599,11 +596,10 @@ def main():
         rs = [r for r in results if r["task"]["kind"] == kind]
         with open(os.path.join(out_dir, fname + ".csv"), "w", newline="") as f:
             w = csv.writer(f)
-            cols = ["drain", "body", "source", "kane_surface", "kane_bulk", "tat_surface", "tat_bulk", "it_surface",
-                    "iters",
+            cols = ["drain", "body", "source", "kane_surface", "kane_bulk", "tat_surface", "tat_bulk", "iters",
                     "outer", "res_norm"]
             w.writerow(["model", "bias_V"] + [c + ("_A_per_um" if c in ("drain", "body", "source") or
-                                                   c.startswith(("kane", "tat", "it_")) else "") for c in cols])
+                                                   c.startswith(("kane", "tat")) else "") for c in cols])
             for r in rs:
                 for p, d in sorted(r["points"].items()):
                     w.writerow([r["task"]["model"], f"{p:.4f}"] + [f"{d[c]:.6e}" if isinstance(d[c], float) else d[c]

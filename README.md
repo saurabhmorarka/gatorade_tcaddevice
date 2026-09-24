@@ -50,7 +50,7 @@ python3 -m btbt.main_btbt2d_sweep                               # NMOS Id-Vg (GI
 python3 -m btbt.main_btbt2d_sweep configs/input_pmos_2d_btbt.yaml --models none,nonlocal
 python3 -m btbt.main_btbt2d_sweep configs/input_pmos_2d_btbt_sige.yaml --models none,nonlocal
 python3 -m btbt.compare_pmos_sige                               # PMOS Si vs strained SiGe S/D
-python3 -m btbt.gidl_ablation                                   # GIDL onset: EOT, metal gate, graded S/D, interface traps
+python3 -m btbt.gidl_ablation                                   # GIDL onset: EOT, metal gate, graded S/D
 ```
 
 Outputs go to `out/btbt/`, including field-line / band-diagram figures

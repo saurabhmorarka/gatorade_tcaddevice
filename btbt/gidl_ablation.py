@@ -15,9 +15,6 @@ nonlocal tunneling model (btbt/paths2d.py: field-line Kane + Hurkx):
                   junction sits ~10 nm under the gate, and the gate edge
                   sees every doping from 1e20 down to the body's 1e18.
                   No halo (rare in FinFET/nanosheet devices).
-  4 + interface traps  N_it = 5e11 cm^-2 midgap traps at the Si/SiO2
-                  interface, with field-enhanced (Hurkx) capture: trap-
-                  assisted tunneling needing only ~Eg/2 of band bending
 
 All variants share one mesh setup (a 2 nm refine box at the drain gate edge
 is added to every variant). The variant configs are written to
@@ -68,8 +65,6 @@ def variants():
              y_range_um=[0.0, 0.14], grading_nm_per_decade=[3.0, 5.0]),
     ] + oxide
     out.append(("3 + graded S/D (3 nm/dec, ~10 nm overlap), no halo", copy.deepcopy(c)))
-    c.setdefault("btbt", {})["interface_traps"] = dict(Nit_cm2=5e11, sigma_cm2=1e-15, vth_cm_s=1e7)
-    out.append(("4 + interface traps (Nit = 5e11 cm^-2, Hurkx-enhanced)", copy.deepcopy(c)))
     return out
 
 
@@ -113,8 +108,7 @@ def main():
     rows = []
     with open(os.path.join(OUT, "gidl_ablation.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["variant", "Vg_V", "Id_A_per_um", "kane_surface", "tat_surface", "it_surface", "kane_bulk",
-                    "tat_bulk"])
+        w.writerow(["variant", "Vg_V", "Id_A_per_um", "kane_surface", "tat_surface", "kane_bulk", "tat_bulk"])
         for k, ((label, _), res) in enumerate(zip(vs, results)):
             pts = res["points"]
             n_ok = sum(p["res_norm"] < 1e-4 for p in pts.values())
@@ -122,10 +116,9 @@ def main():
             c = {key: np.array([pts[x][key] for x in v]) for key in next(iter(pts.values()))}
             for i, x in enumerate(v):
                 w.writerow([k, f"{x:.3f}"] + [f"{c[key][i]:.6e}" for key in
-                                              ("drain", "kane_surface", "tat_surface", "it_surface", "kane_bulk",
-                                               "tat_bulk")])
+                                              ("drain", "kane_surface", "tat_surface", "kane_bulk", "tat_bulk")])
             vo = onset(v, c["drain"])
-            gate_edge = c["kane_surface"] + c["tat_surface"] + c["it_surface"]
+            gate_edge = c["kane_surface"] + c["tat_surface"]
             rows.append((label, n_ok, len(v), vo, np.interp(-1.0, v, np.abs(c["drain"])),
                          np.interp(-2.0, v, np.abs(c["drain"])), np.min(np.abs(c["drain"]))))
             axes[0].semilogy(v, np.abs(c["drain"]), "o-", ms=3, color=COLORS[k], label=label)
@@ -151,7 +144,7 @@ def main():
     axes[0].set_title("NMOS Id-Vg, Vds = 1 V (nonlocal Kane + Hurkx); dotted = GIDL onset (10x Id,min)")
     axes[0].grid(alpha=0.3, which="both"); axes[0].legend(fontsize=7.5, loc="upper center")
     axes[1].set_xlabel("Vg (V)"); axes[1].set_ylabel("q x gate-edge generation, drain side (A/um)")
-    axes[1].set_title("gate-edge (surface) tunneling: Kane + trap-assisted + interface traps")
+    axes[1].set_title("gate-edge (surface) tunneling: Kane + trap-assisted")
     axes[1].grid(alpha=0.3, which="both"); axes[1].legend(fontsize=7.5)
     axes[2].set_xlabel("depth below the gate oxide (nm)"); axes[2].set_ylabel("energy (eV)")
     axes[2].set_title(f"bands through the strongest GIDL spot, Vg = {MAP_VG:g} V (Ec upper, Ev lower)")

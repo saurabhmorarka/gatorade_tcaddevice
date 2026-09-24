@@ -51,7 +51,7 @@ import scipy.sparse as sp
 
 from tat.tat import hurkx_gamma
 from btbt.kernel import path_rate, occupation_factor
-from btbt.tat_kernel import hurkx_enhancement, trap_generation
+from btbt.tat_kernel import hurkx_enhancement
 
 F_START_KANE = 5.0e4     # V/cm - Kane start threshold
 F_START_TAT = 5.0e4      # V/cm - below this Gamma uses the local field (Gamma <~ 1 there and
@@ -165,13 +165,7 @@ class NonlocalTunneling2D:
     use the object as the Newton solver's generation hook."""
 
     def __init__(self, geom, mat, ni_arr, cv_semi, kane=None, hurkx=None, surface_depth_cm=2.0e-6,
-                 x_mid_cm=None, interface_traps=None):
-        """interface_traps: optional dict (Nit_cm2, sigma_cm2, vth_cm_s) - midgap
-        traps AT the Si/SiO2 interface: surface SRH with s0 = sigma*vth*Nit and
-        each carrier's capture field-enhanced by the same nonlocal Hurkx
-        Gamma_n/Gamma_p as the bulk traps at that node (trap-assisted
-        tunneling through interface traps, which needs only ~Eg/2 of band
-        bending). None = no interface traps."""
+                 x_mid_cm=None):
         self.geom, self.mat, self.ni, self.cv = geom, mat, ni_arr, cv_semi
         self.kane, self.hurkx = kane, hurkx
         self.Eg, self.Vt = mat.Eg_eV, mat.Vt
@@ -187,11 +181,6 @@ class NonlocalTunneling2D:
         self.Gam_n = np.zeros(N)
         self.Gam_p = np.zeros(N)
         self.kane_info = None
-        self.s0 = 0.0
-        if interface_traps:
-            it = interface_traps
-            self.s0 = float(it.get("sigma_cm2", 1e-15)) * float(it.get("vth_cm_s", 1e7)) * float(it["Nit_cm2"])
-        self.if_w = np.where(self.free & (cv_semi > 0), geom.if_len / np.where(cv_semi > 0, cv_semi, 1.0), 0.0)
 
     # --- frozen (lagged) part ---
     def prepare(self, psi, phin, phip, record=None):
@@ -263,15 +252,6 @@ class NonlocalTunneling2D:
         Vt, dEi = self.Vt, self.geom.dEi
         return self.ni * np.exp((psi + dEi - phin) / Vt), self.ni * np.exp((phip - psi - dEi) / Vt)
 
-    def it_rate(self, psi, phin, phip):
-        """Interface-trap generation per unit volume at interface nodes
-        (cm^-3 s^-1, 0 elsewhere or without interface traps)."""
-        if self.s0 <= 0 or self.hurkx is None:
-            return np.zeros(len(psi))
-        n, p = self._np(psi, phin, phip)
-        G, _, _ = trap_generation(n, p, self.ni, 1.0 / self.s0, 1.0 / self.s0, self.Gam_n, self.Gam_p)
-        return G * self.if_w
-
     def tat_rate(self, psi, phin, phip):
         n, p = self._np(psi, phin, phip)
         return np.where(self.free, hurkx_enhancement(n, p, self.ni, self.mat.tau_n, self.mat.tau_p,
@@ -285,11 +265,6 @@ class NonlocalTunneling2D:
         n, p = self._np(psi, phin, phip)
         dG, d_dn, d_dp, _, _ = hurkx_enhancement(n, p, self.ni, self.mat.tau_n, self.mat.tau_p,
                                                  self.Gam_n, self.Gam_p)
-        if self.s0 > 0:
-            Gs, ds_dn, ds_dp = trap_generation(n, p, self.ni, 1.0 / self.s0, 1.0 / self.s0, self.Gam_n, self.Gam_p)
-            dG = dG + Gs * self.if_w
-            d_dn = d_dn + ds_dn * self.if_w
-            d_dp = d_dp + ds_dp * self.if_w
         f = self.free
         dG = np.where(f, dG, 0.0)
         Gn += dG
