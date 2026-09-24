@@ -6,7 +6,8 @@ Reads the CSVs written by btbt/main_btbt2d_sweep.py for
   configs/input_pmos_2d_btbt.yaml        (Si S/D)
   configs/input_pmos_2d_btbt_sige.yaml   (SiGe S/D)
   configs/input_mosfet_2d_btbt.yaml      (NMOS, optional)
-and writes out/btbt/pmos_si_vs_sige.png.
+and writes out/btbt/pmos_si_vs_sige.png (all components, with the NMOS) and
+out/btbt/pmos_leakage_si_vs_sige.png (focused Si vs SiGe comparison).
 
 Usage: python3 -m btbt.compare_pmos_sige
 """
@@ -98,5 +99,67 @@ def main():
                                                         for p, v in zip(pts, vals)))
 
 
+def plot_leakage_comparison(path=os.path.join(OUT, "pmos_leakage_si_vs_sige.png")):
+    """Focused Si vs SiGe S/D figure: |Id| for both sweeps, the SiGe/Si
+    ratio, and the leakage split by mechanism at a few biases."""
+    si, ge = CASES[0], CASES[1]
+    fig, axes = plt.subplots(2, 3, figsize=(19, 10.5))
+    for row, (sweep, xl, marks) in enumerate((("idvg", "Vg (V)", (0.0, 1.0, 1.6, 2.0)),
+                                              ("idvsub", "Vsub (V)", (0.0, 1.0, 2.0, 3.0)))):
+        d_si, d_ge = load(si[0], sweep), load(ge[0], sweep)
+        ax = axes[row, 0]
+        for d, (_, lbl, col, _) in ((d_si, si), (d_ge, ge)):
+            ax.semilogy(d["nonlocal"]["bias_V"], np.abs(d["nonlocal"]["drain_A_per_um"]), "o-", ms=3.5, color=col,
+                        label=f"{lbl}: with tunneling")
+            ax.semilogy(d["none"]["bias_V"], np.abs(d["none"]["drain_A_per_um"]), ":", color=col, lw=1.3,
+                        label=f"{lbl}: SRH only")
+        ax.set_xlabel(xl); ax.set_ylabel("|Id| (A/um)")
+        ax.set_title("Id-Vg, Vds = -1 V, Vsub = 0" if sweep == "idvg" else "Id-Vsub, Vds = -1 V, Vg = 0")
+        ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
+        if sweep == "idvg":
+            ax.axvspan(1.2, 2.05, color="#d6336c", alpha=0.06)
+            ax.text(1.62, ax.get_ylim()[1] / 30, "GIDL", ha="center", color="#d6336c")
+
+        ax = axes[row, 1]
+        v = d_si["nonlocal"]["bias_V"]
+        ratio = np.abs(d_ge["nonlocal"]["drain_A_per_um"]) / np.abs(d_si["nonlocal"]["drain_A_per_um"])
+        ax.semilogy(v, ratio, "o-", ms=3.5, color="#6f42c1")
+        for m in marks:
+            k = np.argmin(np.abs(v - m))
+            ax.annotate(f"{ratio[k]:.0f}x", (v[k], ratio[k]), textcoords="offset points", xytext=(0, 8),
+                        ha="center", fontsize=9)
+        ax.axhline(1, color="k", lw=0.8)
+        ax.set_xlabel(xl); ax.set_ylabel("|Id| SiGe S/D  /  |Id| Si S/D")
+        ax.set_title("leakage increase from SiGe source/drains")
+        ax.grid(alpha=0.3, which="both")
+
+        ax = axes[row, 2]
+        comps = [("kane_surface", "direct BTBT, gate edge (GIDL)", "#1f6feb"),
+                 ("tat_surface", "trap-assisted, gate edge (GIDL)", "#74a9f7"),
+                 ("kane_bulk", "direct BTBT, drain-body junction", "#2f9e44"),
+                 ("tat_bulk", "trap-assisted, drain-body junction", "#8fd19e")]
+        w = 0.1
+        xs = np.arange(len(marks))
+        for j, (k, lbl, col) in enumerate(comps):
+            for off, d, hatch in ((-0.22, d_si, ""), (0.22, d_ge, "//")):
+                c = d["nonlocal"]
+                vals = [c[k + "_A_per_um"][np.argmin(np.abs(c["bias_V"] - m))] for m in marks]
+                ax.bar(xs + off + (j - 1.5) * w, np.maximum(vals, 1e-30), w, color=col, hatch=hatch,
+                       edgecolor="k", lw=0.4, label=lbl if off < 0 else None)
+        ax.set_yscale("log")
+        lo = 1e-16
+        ax.set_ylim(lo, None)
+        ax.set_xticks(xs, [f"{xl.split()[0]} = {m:g} V\nSi   |   SiGe" for m in marks], fontsize=8.5)
+        ax.set_ylabel("q x integrated generation, drain side (A/um)")
+        ax.set_title("which mechanism: plain = Si S/D, hatched = SiGe S/D")
+        ax.grid(alpha=0.3, which="both", axis="y"); ax.legend(fontsize=7.5, loc="upper left")
+    fig.suptitle("PMOS leakage: silicon vs strained Si0.6Ge0.4 source/drains (nonlocal Kane + Hurkx tunneling)",
+                 fontsize=13)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130); plt.close(fig)
+    print("wrote", path)
+
+
 if __name__ == "__main__":
     main()
+    plot_leakage_comparison()
