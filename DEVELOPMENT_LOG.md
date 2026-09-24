@@ -3665,3 +3665,54 @@ from `python3 -m btbt.compare_pmos_sige`).**
 for DOS, Si doping-dependent mobility); Kane A and the reduced mass are kept
 at Si values, and only B is scaled by Eg; the heterointerface in 2D is
 spread over one element in the P1 interpolation used by the path search.
+
+## 32. Session 22: why GIDL turns on so late here - an onset ablation
+
+The user noted that in every nonlocal run GIDL appears only deep in negative
+Vg, while in modern MOSFETs it rises right below threshold. The cause is the
+device, not the model: 3 nm SiO2, an n+ poly gate, and a 40 nm-overlap tip
+of uniform 3e18. The drain surface has to bend by about Eg + 0.3 V before
+paths get short, and with a thick oxide most of Vdg drops across the oxide.
+A 1D MOS estimate for the 3e18 tip gives Vdg of about 2.4 V (3 nm SiO2),
+consistent with the simulated onset near Vg = -1.4 V at Vds = 1 V.
+
+**New code.**
+- Graded doping regions in 2D (`Region.grading_cm_per_decade`, config key
+  `grading_nm_per_decade: [gx, gy]`): full concentration inside the box,
+  one decade of fall-off per gx/gy outside it, ADDED to the net doping
+  (compensation) instead of replacing it.
+- Interface-trap trap-assisted tunneling in `btbt/paths2d.py`
+  (`interface_traps: {Nit_cm2, sigma_cm2, vth_cm_s}` under `btbt:`): surface
+  SRH at the Si/SiO2 interface nodes, with s0 = sigma*vth*Nit and each
+  carrier's capture enhanced by the same nonlocal Hurkx Gamma as the bulk
+  traps (`btbt/tat_kernel.py::trap_generation`, interface length per node
+  in `TriGeom.if_len`). The Jacobian is FD-checked. It is reported as
+  component `it_surface`.
+- `btbt/gidl_ablation.py` writes cumulative variant configs to
+  `out/btbt/gidl_ablation/` and runs them in parallel (about 90 s for all
+  five). No halo, per the user (rare in FinFET/nanosheet devices).
+
+**Results (NMOS Id-Vg, Vds = 1 V; onset = Vg where |Id| reaches 10x its
+minimum):**
+
+| variant (cumulative) | GIDL onset | Id(Vg = -1 V) |
+|---|---|---|
+| 0 baseline: 3 nm SiO2, n+ poly, 40 nm 3e18 tip | -1.78 V | 4.6e-13 |
+| 1 + EOT 1 nm (3 nm layer, k = 11.7) | -0.92 V | 1.4e-11 |
+| 2 + metal gate 4.3 eV | -0.67 V | 6.4e-10 |
+| 3 + graded S/D (3 nm/dec, ~10 nm overlap) | -0.22 V | 8.0e-6 |
+| 4 + interface traps, Nit = 5e11 cm^-2 | -0.22 V | 8.0e-6 (no change) |
+
+- EOT is the largest single shift (about 0.9 V). The metal gate adds the
+  expected ~0.25 V.
+- The graded drain moves onset to just below threshold: the gate edge now
+  sees the 1e19-1e20 part of the gradient, where Kane paths are short.
+- With bulk tau = 1 ns (project default), the interface traps at
+  5e11 cm^-2 are invisible (about 2e-14 A/um of surface generation, against
+  a 4e-12 floor); with realistic bulk lifetimes they would matter relatively
+  more.
+- Magnitude caveat: variants 3-4 reach 1.9e-4 A/um at Vg = -2 V. That is
+  Vdg = 3 V across EOT 1 nm (about 30 MV/cm, beyond breakdown), outside any
+  real operating range. Around Vdg = 1.5-1.8 V the values are 1e-9-1e-7
+  A/um. Absolute GIDL also depends on the Kane A/B calibration (the FLOOXS
+  fit is used here); the onset TRENDS are the robust result.

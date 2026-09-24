@@ -70,6 +70,8 @@ def build_domain_from_config(cfg: dict) -> Domain2D:
             kind=r.get("kind", "semiconductor"),
             eps_r=float(r["eps_r"]) if r.get("eps_r") is not None else None,
             material=_region_material(r.get("material")),
+            grading_cm_per_decade=(tuple(float(v) * 1e-7 for v in r["grading_nm_per_decade"])
+                                   if r.get("grading_nm_per_decade") else None),
         ))
 
     top_mesas = [

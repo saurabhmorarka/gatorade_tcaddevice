@@ -54,6 +54,19 @@ class TriGeom:
         self.is_semi_node = node_area > 0
         if mesh.ni_arr is not None:
             self.is_semi_node &= mesh.ni_arr > 0
+        # Si/SiO2 interface length per semiconductor node (cm): half of every
+        # oxide-triangle edge whose two ends are semiconductor nodes (each
+        # interface edge borders exactly one oxide triangle)
+        if_len = np.zeros(N)
+        for t in np.flatnonzero(~self.tri_semi):
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                i, j = T[t, a], T[t, b]
+                if self.is_semi_node[i] and self.is_semi_node[j]:
+                    L = np.hypot(*(P[i] - P[j]))
+                    if_len[i] += 0.5 * L
+                    if_len[j] += 0.5 * L
+        self.if_len = if_len
+
         bc = np.array(mesh.boundary_bc_type)
         is_contact = np.zeros(N, dtype=bool)
         is_contact[mesh.boundary_point_index[np.char.startswith(bc.astype(str), "contact:")]] = True

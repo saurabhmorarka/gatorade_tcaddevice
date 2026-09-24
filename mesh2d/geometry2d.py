@@ -44,6 +44,12 @@ class Region:
     eps_r: float = None    # relative permittivity override - required when kind="insulator"
                              # (e.g. an oxide's 3.9), ignored for "semiconductor" regions
                              # (those use their material's eps_r).
+    grading_cm_per_decade: tuple = None  # (gx, gy): a GRADED doping region - full
+                             # concentration inside the box, falling off outside it by one
+                             # decade per gx (in x) / gy (in y) cm, and ADDED to the net
+                             # doping painted so far (dopants compensate) instead of replacing
+                             # it. Models a steep implanted/diffused S/D extension tail.
+                             # None = the usual uniform, last-region-wins box.
     material: object = None  # semiconductor regions only: a core.params.Material for a
                              # different semiconductor (e.g. SiGe source/drains -> a 2D
                              # heterojunction, see semiconductor_material_index). None =
@@ -94,9 +100,15 @@ class Domain2D:
                 continue
             x0, x1 = region.x_range_cm
             y0, y1 = region.y_range_cm
+            sign = 1.0 if region.doping_type == "n" else -1.0
+            if region.grading_cm_per_decade is not None:
+                gx, gy = region.grading_cm_per_decade
+                dx = np.maximum(np.maximum(x0 - x, x - x1), 0.0)
+                dy = np.maximum(np.maximum(y0 - y, y - y1), 0.0)
+                net = net + sign * region.concentration_cm3 * 10.0 ** (-(dx / gx + dy / gy))
+                continue
             mask = ((x >= x0 - tol_x) & (x <= x1 + tol_x)
                     & (y >= y0 - tol_y) & (y <= y1 + tol_y))
-            sign = 1.0 if region.doping_type == "n" else -1.0
             net = np.where(mask, sign * region.concentration_cm3, net)
         return net
 
