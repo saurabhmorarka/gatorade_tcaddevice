@@ -36,6 +36,34 @@ spacing and `physics: velocity_saturation` are set in the YAML.
   <img src="out/input_mosfet_2d/ids_vds_vsat_compare.png" alt="Id-Vd with and without velocity saturation" width="49%">
 </p>
 
+## 2D tunneling leakage: GIDL and junction BTBT (`btbt/`)
+
+Band-to-band (Kane) and trap-assisted (Hurkx) tunneling in the 2D MOSFET,
+both as the 1D local-field models and as a **nonlocal** model that traces
+tunneling paths along electric field lines (a path exists only where the
+bands actually bend by Eg; electrons and holes are generated at opposite
+ends). Works across Si/SiGe heterojunctions (band-edge path conditions).
+
+```bash
+python3 -m btbt.main_btbt_1d --Na 1e18                         # 1D validation, local vs nonlocal
+python3 -m btbt.main_btbt2d_sweep                               # NMOS Id-Vg (GIDL) + Id-Vsub (junction), 4 models
+python3 -m btbt.main_btbt2d_sweep configs/input_pmos_2d_btbt.yaml --models none,nonlocal
+python3 -m btbt.main_btbt2d_sweep configs/input_pmos_2d_btbt_sige.yaml --models none,nonlocal
+python3 -m btbt.compare_pmos_sige                               # PMOS Si vs strained SiGe S/D
+python3 -m btbt.gidl_ablation                                   # GIDL onset: EOT, metal gate, graded S/D, interface traps
+```
+
+Outputs go to `out/btbt/`, including field-line / band-diagram figures
+(`gidl_fields_bands.png`, `junction_fields_bands.png`) that show where and
+why tunneling happens.
+
+<p align="center">
+  <img src="out/btbt/gidl_ablation/gidl_ablation.png" alt="GIDL onset ablation" width="98%">
+</p>
+<p align="center">
+  <img src="out/btbt/pmos_leakage_si_vs_sige.png" alt="PMOS leakage, Si vs SiGe source/drains" width="98%">
+</p>
+
 ## Setup
 
 Requires Python 3.9+ (any plain CPython install - no conda needed). Your

@@ -29,12 +29,11 @@ path-search extension):
    lifetime) was recovered from a primary source that reproduces Hurkx,
    Klaassen & Knuvers (IEEE Trans. Electron Devices 39(2), 1992) directly:
    M.S. Carroll et al., Sandia National Laboratories, SAND2007-1497C.
-   Gamma(F) = Delta*exp(Delta)*E1(Delta), Delta=(F/F_Gamma)^2 is the
-   closed form reported consistently across the TCAD/device-physics
-   literature for this model (lower sourcing confidence than the SRH
-   structure above - the finite-difference Jacobian check in
-   newton_solver_tat.py, not this citation, is the actual correctness
-   gate once this is wired into a solver).
+   Gamma(F) is Hurkx's tunneling integral itself (see hurkx_gamma): an
+   earlier closed form used here, Delta*exp(Delta)*E1(Delta), tends to 1 at
+   high field, capping the enhancement at 2x SRH - found while porting this
+   model to 2D (btbt/, DEVELOPMENT_LOG.md), where silicon's trap-assisted
+   leakage should dominate.
 
 Schenk's more microscopic phonon-assisted trap-assisted-tunneling model
 (also present in FLOOXS, TclLib/Device/floods/Generic/B2BTunnel/schenk.tcl)
@@ -44,7 +43,6 @@ validated (see plans/tat_btbt_plan.md) - not implemented in this module yet.
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.special import exp1
 
 
 # ---- 1. Kane band-to-band (Zener) tunneling ----
@@ -154,73 +152,54 @@ class HurkxTATModel:
     carriers absent per-carrier tunneling-mass data."""
     m_t_over_m0: float = 0.25
     Et_minus_Ei_eV: float = 0.0
+    Eg_eV: float = 1.12     # sets the tunneling-energy range, see hurkx_gamma
 
 
-def hurkx_gamma(F_abs, T, model: HurkxTATModel):
-    """Vectorized field-enhancement factor Gamma(F) and dGamma/dF.
+_GL_X, _GL_W = np.polynomial.legendre.leggauss(96)
 
-    Gamma(Delta) = Delta*exp(Delta)*E1(Delta), Delta = (F/F_Gamma)^2,
-    F_Gamma = sqrt(24*m_t*(kB*T)^3) / (q*hbar).
 
-    dGamma/dDelta = (1+Delta)*exp(Delta)*E1(Delta) - 1  (closed form: with
-    g(Delta)=Delta*exp(Delta), h(Delta)=E1(Delta), g'=(1+Delta)*exp(Delta),
-    h'=-exp(-Delta)/Delta, product rule gives
-    g'*h + g*h' = (1+Delta)*exp(Delta)*E1(Delta) - 1, the exp(-Delta)/Delta
-    and Delta*exp(Delta) factors canceling exactly).
-    dDelta/dF = 2*Delta/F (F>0), so dGamma/dF = dGamma/dDelta * 2*Delta/F.
+def hurkx_gamma(F_abs, T, model: HurkxTATModel, dE_eV=None):
+    """Vectorized Hurkx field-enhancement factor Gamma(F) and dGamma/dF.
 
-    At F=0, Delta=0 and Gamma=0 exactly (Delta*exp(Delta)*E1(Delta) -> 0
-    as Delta->0, despite E1(0)=+inf, because Delta*E1(Delta) -> 0
-    log-suppressed) - scipy.special.exp1 is well-behaved for small
-    positive Delta, so this needs no special-cased series expansion there,
-    only guarding the literal F=0 point against 0-division in dDelta/dF.
+    Hurkx, Klaassen & Knuvers (IEEE TED 39(2), 1992), eq. 11: a carrier
+    reaches the trap by tunneling through the triangular barrier at an
+    energy u*kT below the band edge instead of being thermally excited over it,
 
-    At the OTHER extreme, large Delta (reachable not just at genuinely
-    extreme physical fields but transiently at a rejected Newton trial
-    point mid-line-search), np.exp(Delta) overflows to inf long before
-    scipy.special.exp1(Delta)'s compensating decay brings the PRODUCT back
-    down to its true, bounded limit (Gamma -> 1 as Delta -> infinity) -
-    computing exp(Delta) and exp1(Delta) separately then multiplying loses
-    that cancellation numerically. Above Delta=30, switch to the standard
-    asymptotic expansion of x*exp(x)*E1(x) for large x (Abramowitz &
-    Stegun 5.1.51: E1(x) ~ (exp(-x)/x)*sum_k (-1)^k*k!/x^k), which avoids
-    exp(Delta) entirely and is accurate to ~1e-6 relative error at
-    Delta=30 (error shrinks further as Delta grows, i.e. exactly where the
-    exact formula would otherwise overflow):
-        Gamma(Delta)      ~= 1 - 1/D + 2/D^2 - 6/D^3 + 24/D^4 - 120/D^5
-        dGamma/dDelta(D)  ~=  1/D^2 - 4/D^3 + 18/D^4 - 96/D^5 + 600/D^6
+        Gamma = integral_0^{dE/kT} exp(u - K u^(3/2)) du,
+        K = (4/3) sqrt(2 m_t (kT)^3) / (q hbar F) = (4/(3 sqrt 12)) F_Gamma/F,
+        F_Gamma = sqrt(24 m_t (kT)^3) / (q hbar),
+
+    where dE is the trap depth measured from the band edge (default
+    Eg/2 - |Et - Ei|; may be an array broadcasting against F, e.g. a
+    per-node Ec - Et at a heterojunction). At moderate field the integrand peaks inside the
+    range and Gamma ~ 2 sqrt(3 pi) (F/F_Gamma) exp((F/F_Gamma)^2), which is
+    the usual Hurkx closed form. At very high field the peak runs into the
+    upper limit and Gamma saturates near exp(dE/kT) (~1e9 for a midgap Si
+    trap): the carrier then tunnels straight from the trap to the band edge.
+    Gamma -> 0 as F -> 0.
+
+    It is evaluated by 96-point Gauss-Legendre quadrature on [0, dE/kT]. The
+    integrand is smooth, and its width is always >= ~K^(-2/3). dGamma/dF
+    comes from the same quadrature, since dK/dF = -K/F:
+        dGamma/dF = integral exp(u - K u^1.5) * K u^1.5 / F du.
     """
     F = np.asarray(F_abs, dtype=float)
     m_t = model.m_t_over_m0 * _M0
     kT = _KB_SI * T
-    F_Gamma_SI = np.sqrt(24.0 * m_t * kT ** 3) / (_Q_SI * _HBAR)  # V/m
-    F_Gamma = F_Gamma_SI / 100.0  # V/cm (this project's field unit)
-
+    F_Gamma = np.sqrt(24.0 * m_t * kT ** 3) / (_Q_SI * _HBAR) / 100.0   # V/cm
+    if dE_eV is None:
+        dE_eV = 0.5 * model.Eg_eV - abs(model.Et_minus_Ei_eV)
+    umax = np.asarray(dE_eV, dtype=float)[..., None] * _Q_SI / kT     # per point allowed
+    u = 0.5 * umax * (_GL_X + 1.0)
+    w = 0.5 * umax * _GL_W
     F_safe = np.where(F > 0, F, 1.0)
-    Delta = (F_safe / F_Gamma) ** 2
-
-    large = Delta > 30.0
-    D_lo = np.where(large, 30.0, Delta)   # safe for the exact branch
-    D_hi = np.where(large, Delta, 30.0)   # safe (>=30) for the asymptotic branch
-
-    E1 = exp1(D_lo)
-    Gamma_exact = D_lo * np.exp(D_lo) * E1
-    dGamma_dDelta_exact = (1.0 + D_lo) * np.exp(D_lo) * E1 - 1.0
-
-    Gamma_asymp = 1.0 - 1.0 / D_hi + 2.0 / D_hi ** 2 - 6.0 / D_hi ** 3 + 24.0 / D_hi ** 4 - 120.0 / D_hi ** 5
-    dGamma_dDelta_asymp = (1.0 / D_hi ** 2 - 4.0 / D_hi ** 3 + 18.0 / D_hi ** 4
-                            - 96.0 / D_hi ** 5 + 600.0 / D_hi ** 6)
-
-    Gamma = np.where(large, Gamma_asymp, Gamma_exact)
-    dGamma_dDelta = np.where(large, dGamma_dDelta_asymp, dGamma_dDelta_exact)
-
-    dDelta_dF = 2.0 * Delta / F_safe
-    dGamma_dF = dGamma_dDelta * dDelta_dF
-
+    K = (4.0 / (3.0 * np.sqrt(12.0))) * F_Gamma / F_safe
+    u15 = u ** 1.5
+    E = np.exp(u - K[..., None] * u15)
+    Gamma = np.sum(E * w, axis=-1)
+    dGamma_dF = np.sum(E * u15 * w, axis=-1) * K / F_safe
     zero = F <= 0
-    Gamma = np.where(zero, 0.0, Gamma)
-    dGamma_dF = np.where(zero, 0.0, dGamma_dF)
-    return Gamma, dGamma_dF
+    return np.where(zero, 0.0, Gamma), np.where(zero, 0.0, dGamma_dF)
 
 
 def hurkx_tat_generation(n, p, F_abs, mat, model: HurkxTATModel):

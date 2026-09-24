@@ -43,7 +43,17 @@ class Region:
     kind: str = "semiconductor"   # "semiconductor" | "insulator"
     eps_r: float = None    # relative permittivity override - required when kind="insulator"
                              # (e.g. an oxide's 3.9), ignored for "semiconductor" regions
-                             # (those use the Material's own eps_r).
+                             # (those use their material's eps_r).
+    grading_cm_per_decade: tuple = None  # (gx, gy): a GRADED doping region - full
+                             # concentration inside the box, falling off outside it by one
+                             # decade per gx (in x) / gy (in y) cm, and ADDED to the net
+                             # doping painted so far (dopants compensate) instead of replacing
+                             # it. Models a steep implanted/diffused S/D extension tail.
+                             # None = the usual uniform, last-region-wins box.
+    material: object = None  # semiconductor regions only: a core.params.Material for a
+                             # different semiconductor (e.g. SiGe source/drains -> a 2D
+                             # heterojunction, see semiconductor_material_index). None =
+                             # leave the material as painted so far (doping-only region).
 
 
 @dataclass
@@ -90,9 +100,15 @@ class Domain2D:
                 continue
             x0, x1 = region.x_range_cm
             y0, y1 = region.y_range_cm
+            sign = 1.0 if region.doping_type == "n" else -1.0
+            if region.grading_cm_per_decade is not None:
+                gx, gy = region.grading_cm_per_decade
+                dx = np.maximum(np.maximum(x0 - x, x - x1), 0.0)
+                dy = np.maximum(np.maximum(y0 - y, y - y1), 0.0)
+                net = net + sign * region.concentration_cm3 * 10.0 ** (-(dx / gx + dy / gy))
+                continue
             mask = ((x >= x0 - tol_x) & (x <= x1 + tol_x)
                     & (y >= y0 - tol_y) & (y <= y1 + tol_y))
-            sign = 1.0 if region.doping_type == "n" else -1.0
             net = np.where(mask, sign * region.concentration_cm3, net)
         return net
 
@@ -133,9 +149,48 @@ class Domain2D:
             else:
                 mask = ((x >= x0 - tol_x) & (x <= x1 + tol_x)
                         & (y >= y0 - tol_y) & (y <= y1 + tol_y))
+                was_insulator = is_insulator
                 is_insulator = np.where(mask, False, is_insulator)
-                eps_r = np.where(mask, mat.eps_r, eps_r)
+                if region.material is not None:
+                    eps_r = np.where(mask, region.material.eps_r, eps_r)
+                else:   # doping-only region: keep the semiconductor painted so far
+                    eps_r = np.where(mask & was_insulator, mat.eps_r, eps_r)
         return is_insulator, eps_r
+
+    def semiconductor_materials(self):
+        """Distinct semiconductor materials of the regions, in first-use
+        order - index k+1 in semiconductor_material_index; index 0 is the
+        base Material passed to the mesh builder."""
+        out = []
+        for region in self.regions:
+            if region.kind != "insulator" and region.material is not None and \
+                    all(region.material is not m for m in out):
+                out.append(region.material)
+        return out
+
+    def semiconductor_material_index(self, x_cm, y_cm):
+        """Per point: 0 for the base semiconductor, k+1 for
+        semiconductor_materials()[k]. Same last-region-wins painting and
+        inclusive boundary tolerance as doping_at, so a node ON a doping
+        boundary that is also a material boundary takes the later region's
+        doping AND material (a metallurgical junction coinciding with a
+        heterointerface stays consistent). Only regions with a material
+        repaint it."""
+        x = np.asarray(x_cm, dtype=float)
+        y = np.asarray(y_cm, dtype=float)
+        idx = np.zeros(x.shape, dtype=int)
+        mats = self.semiconductor_materials()
+        tol_x = _EPS_REL * max(self.width_cm, 1e-30)
+        tol_y = _EPS_REL * max(self.height_cm, 1e-30)
+        for region in self.regions:
+            if region.kind == "insulator" or region.material is None:
+                continue
+            x0, x1 = region.x_range_cm
+            y0, y1 = region.y_range_cm
+            mask = ((x >= x0 - tol_x) & (x <= x1 + tol_x) & (y >= y0 - tol_y) & (y <= y1 + tol_y))
+            k = next(i for i, m in enumerate(mats) if m is region.material)
+            idx = np.where(mask, k + 1, idx)
+        return idx
 
     def _mesa_at_x(self, x, tol_x):
         for mesa in self.top_mesas:

@@ -3472,3 +3472,247 @@ Regression: testsuite 37/37 OK; 2D diode 21/21 converged; MOS capacitor
 31/31 (C-V within ~3% of before - the interface-charge fix). Not done: `solver2d/arclength_continuation.py`/`mosfet_arclength.py`
 (previous session, untracked) are no longer needed for this device and
 were left out of the commit.
+
+## 30. Session 20: 2D band-to-band / trap-assisted tunneling - GIDL and
+## drain-body junction leakage, local vs nonlocal (field-line) models
+
+**Goal.** Turn on the tunneling leakage models in the 2D NMOS and separate
+the two band-to-band components at Vds = 1 V: GIDL (Id-Vg, gate-controlled,
+at the drain surface under the gate edge) and drain-body junction tunneling
+(Id-Vsub at Vg = 0, gate-independent). Also: how does the 1D local model
+behave in 2D? New package `btbt/`; driver `python3 -m btbt.main_btbt2d_sweep`.
+
+**Device (`configs/input_mosfet_2d_btbt.yaml`; the shipped example is
+untouched).** At the shipped 1e16 substrate the junction field at Vdb = 1 V is
+about 8e4 V/cm, where Kane's exp(-B/F) is about exp(-270), and the gate has no
+overlap with the drain, so neither component can exist. New device: uniform
+p 1e18 substrate, n+ poly gate on 3 nm oxide (Vt about 0.45 V), and the
+drain/source extended 40 nm under the gate as a two-step lateral grade: an
+n 3e18 tip, then the n+ 1e20 body. The tip has to be lighter than 1e20
+(surface bending of Eg needs Vdg of about 7 V at 1e20, about 2 V at 3e18). It
+also has to span the FULL junction depth: a 30 nm-deep tip was tried first
+and was fully depleted between the gate and the p body (n about 1e5-1e10
+instead of 3e18), so the drain potential never reached the gate edge and
+there was no GIDL at all.
+
+**Models.**
+- *Local* (`btbt/local2d.py`): the 1D tat/ models unchanged (Kane
+  `btbt_generation` and Hurkx `hurkx_gamma`). The node field is the
+  semiconductor-triangle area-weighted |grad psi| (oxide triangles are
+  excluded, since their field is 3x the silicon's). Fully Newton-coupled,
+  with an exact Jacobian (FD-checked; the only mismatches are at |E| ~ 0,
+  where dG/dF = 0).
+- *Nonlocal* (`btbt/kernel.py`, `btbt/paths2d.py`, `btbt/geom2d.py`): paths
+  are traced along **electric field lines** (RK2 on the recovered nodal
+  gradient, exact P1 potential for the energy, adaptive steps). Kane: from
+  each start node, uphill until psi has risen by Eg (valence band at the
+  start aligned with conduction band at the end). F_eff = Eg/l goes into
+  the SAME Kane A, B, P, so in a uniform field it equals the local model to
+  5e-14. A field line that ends on the oxide or the free surface before
+  gaining Eg means no tunneling. Holes are generated at the path start,
+  electrons at the path end (barycentric split). The occupation factor
+  D = 1 - exp(-(phin_end - phip_start)/Vt) is 0 in equilibrium. Hurkx: Gamma_n
+  and Gamma_p use the field averaged along the half-gap (Eg/2) paths, uphill
+  for electrons and downhill for holes. Paths are frozen during each Newton
+  solve (the Jacobian would be dense) and updated in a lagged outer
+  iteration. The trap rate's local n, p dependence stays implicit.
+- Solver hook: `newton_solve_2d(..., generation=)` (Gn, Gp, and N x 3N
+  derivative matrices). With None the results are byte-identical: the
+  shipped MOSFET outputs are unchanged. `tat/newton_solver_tat.py` got the
+  1D equivalent `G_ext=`.
+
+**1D first (`btbt/main_btbt_1d.py`).** p 1e18 / n+ 1e20 diode. The local Kane
+model carries a spurious -1.7e-7 A/cm^2 at Va = 0 (and BTBT opposing forward
+current); the nonlocal model carries 0. The nonlocal onset is delayed until
+the bands can support a short path, and it sits 2-5x below uncapped local
+at high bias (a triangular field averages below its peak). The F_sat =
+9e5 V/cm cap flattens the 1D local curve above about 1 V reverse. The outer
+loop needs 2 passes; the two contact currents agree (pair conservation).
+
+**Bug fixed in `tat/tat.py::hurkx_gamma`.** The closed form
+Delta*exp(Delta)*E1(Delta) tends to 1, capping trap-assisted enhancement
+at 2x SRH at any field. It is replaced by Hurkx's integral itself,
+int_0^{dE/kT} exp(u - K u^1.5) du, by 96-point Gauss-Legendre, with dGamma/dF
+from the same quadrature (FD-exact). It matches 2 sqrt(3 pi)(F/F_G)exp((F/F_G)^2)
+at moderate field and saturates near exp(dE/kT) at high field. The shipped
+1D TAT example's leakage enhancement went from 1.2-1.4x to 2.6-7.5x. The
+`diode_tat` golden was recaptured (the only testsuite change; 37/37 OK).
+The user's standing point: in silicon, band-to-band leakage is mostly
+trap-assisted; direct tunneling dominates only in narrow-gap materials.
+
+**Results (Vds = 1 V; `out/btbt/input_mosfet_2d_btbt/`).**
+- *Id-Vg:* the nonlocal model has a flat floor of about 4e-13 A/um below Vt
+  (bulk-junction trap-assisted), then GIDL turns on below Vg of about
+  -1.2 V: trap-assisted at the surface first, then direct Kane, which
+  dominates by Vg = -2 V (4e-11 A/um). `gidl_fields_bands.png` shows why:
+  along a cut through the overlap, the surface band bending is 1.05 V (< Eg,
+  no paths) at Vg = -1, 1.33 V (15 nm paths) at -1.4, and 1.74 V (9 nm paths)
+  at -2. The uncapped local model overstates GIDL about 100x at moderate Vg,
+  firing at the gate-corner field spike without any band-bending check. The
+  capped local model barely rises at all.
+- *Id-Vsub:* the nonlocal model is dominated by bulk-junction tunneling
+  along the n+ bottom junction: trap-assisted near Vsub = 0, direct Kane
+  beyond about -1 V (3.4e-8 A/um at -3 V; paths 12 -> 9.6 nm;
+  `junction_fields_bands.png`). The gate-edge surface components stay 1e3x
+  smaller, so the two sweeps isolate the two components as intended. The
+  capped local model saturates at 1.5e-10.
+- *Local-model artifact:* where local Kane generates pairs at a node that
+  also has a huge Hurkx Gamma (about 1e7), the trap immediately recombines
+  most of them. The integrated trap term is NEGATIVE (-1.4e-7 A/um at
+  Vsub = -3, drawn with x markers), and the terminal current is about 10x
+  below its own Kane generation. The nonlocal model avoids this by
+  separating the electron from the hole by the tunneling length.
+- *Convergence and speed:* all 128 points converge (4 models x 2 sweeps x 16
+  points). The local models need a strength turn-on at equilibrium
+  (10^-9 -> 1), because a cold start fails at the very first bias step.
+  Nonlocal: 1-2 outer passes per point, with paths traced on the secant
+  predictor. Wall time is about 80 s for all 8 curves in parallel, above the
+  one-minute target; it is mostly linear solves on the 9.7k-point mesh
+  under 8-way CPU contention (single-process about 0.2 s per Newton
+  iteration). Already applied: 0.2 V steps, a lighter mesh, a vectorized
+  tracer, and skipping the outer re-solve when the retraced generation is
+  within 1%.
+
+**Not done:** a faster linear solver (petsc4py, still pending);
+Gaussian/graded doping profiles (the tip is piecewise constant); Schenk
+trap-assisted tunneling in 2D; per-carrier Hurkx masses; tunneling-path
+refinement near the gate corner.
+
+## 31. Session 21: PMOS tunneling leakage, Si vs strained Si0.6Ge0.4
+## source/drains - 2D heterojunction support
+
+**Devices.** `configs/input_pmos_2d_btbt.yaml` is the Session 20 NMOS with
+every polarity reversed: n 1e18 body, p+ 1e20 S/D with a full-depth p 3e18
+tip 40 nm under the gate, p+ poly gate (5.17 eV), Vds = -1 V, Id-Vg from -1 to
++2 V, and Id-Vsub from 0 to +3 V (reverse body bias).
+`configs/input_pmos_2d_btbt_sige.yaml` is identical, except that the whole
+p-type S/D (tip + body) is compressively strained Si0.6Ge0.4 on Si
+(People & Bean: Eg = 0.824 eV, dEv = 0.296 eV, dEc = 0), so the metallurgical
+junction is also the heterointerface. junction_h is 5 nm (was 10) so the
+valence-band step stays within about one element of the junction.
+
+**2D heterojunction support (new).**
+- `mesh2d/geometry2d.py`: `Region.material` (optional, semiconductor
+  regions), `semiconductor_materials()` and `semiconductor_material_index()`
+  (same last-wins painting and inclusive boundaries as doping, so a
+  junction node that is also a heterointerface node gets the later region's
+  doping AND material). The permittivity per triangle comes from the
+  region's material.
+- `mesh2d/config2d.py`: region `material:` blocks (the same shape as 1D,
+  including alloy/strain). Regions sharing a name share one material.
+- `mesh2d/mesh2d.py`: `dEi_arr` (Xi(node) - Xi(base), core/materials.py),
+  `Eg_arr`, `ec_off_arr` (= Vt ln(Nc/ni) = Ec - Ei), and a per-node `ni_arr`.
+- `solver2d/newton_solver_qf_2d.py`: n = ni exp((psi+dEi-phin)/Vt) and
+  p = ni exp((phip-psi-dEi)/Vt); equilibrium psi and ohmic BCs include dEi.
+  The Scharfetter-Gummel argument gets the per-edge heterojunction shift
+  (`_sg_shifts`, the 2D form of physics.py's `_sg_potential_n/p`), with
+  separate shifts for electrons and holes, so the flux is exactly zero in
+  equilibrium across a material step.
+- Every shift is exactly 0 on a single-material mesh. The shipped MOSFET
+  outputs are byte-identical and the testsuite passes 37/37.
+- Validated on a quasi-1D p+ SiGe 1e20 / n-Si strip against the 1D
+  heterojunction solver:
+  - Equilibrium phin = phip = 0 to 1e-16.
+  - The reverse-bias SiGe/Si current ratio matches 1D to 1%.
+  - Forward injection into the SiGe matches the analytic short-base value
+    with the 2D solver's own mobility (5.64 vs 5.7 A/cm^2 at 0.6 V). 1D's
+    constant Vegard SiGe electron mobility (about 2400 vs about 90 for the
+    2D doping model at 1e20) explains the remaining 1D-vs-2D forward gap.
+
+**Tunneling across a heterojunction.**
+- The paths use band edges, not psi. Kane is complete when
+  Ec(end) = Ev(start): the "level" -Ec = psi + dEi - ec_off rises by
+  Eg(start). Hurkx half paths go from the midgap trap to Ec (depth ec_off)
+  for electrons and to Ev (depth Eg - ec_off) for holes. The tracer still
+  follows the electrostatic field lines.
+- Kane's B scales as (Eg_path/Eg_Si)^1.5, with Eg_path the gap averaged
+  along the path (the WKB exponent of a triangular barrier, B ~
+  sqrt(m) Eg^1.5), and F_eff = Eg_path/l. A Si-only path is exactly the old
+  expression.
+- `hurkx_gamma` takes a per-point trap depth. The local model is updated
+  the same way.
+- `btbt/paths1d.py` got the same band-edge search. On the hetero strip the
+  onset paths are 15.5 nm in 2D and 16.7 nm in 1D. At -2 to -3 V, Si
+  junction BTBT agrees within 3% between 1D and 2D; SiGe agrees within
+  1.5x (the 2D P1 spreading of the Ev step).
+
+**Results (nonlocal Kane + Hurkx, |Vds| = 1 V; `out/btbt/pmos_si_vs_sige.png`
+from `python3 -m btbt.compare_pmos_sige`).**
+- **Si PMOS vs mirrored NMOS:** within 1.2-1.7x everywhere (for example
+  GIDL at |Vg| = 2: 3.6e-11 vs 4.4e-11 A/um; junction at |Vsub| = 3: 5.5e-8 vs
+  3.3e-8). The models are polarity-symmetric, as expected. The small
+  differences are hole vs electron mobility and velocity saturation.
+- **SiGe vs Si S/D:**
+  - GIDL at Vg = +2 V: 1.45e-8 vs 3.6e-11 (400x).
+  - Off-state floor at Vg = 0-1 V: 1.4e-11 vs 4.6e-13 (30x).
+  - Junction leakage at Vsub = +1 V: 1.2e-8 vs 3.3e-11 (360x); at +3 V:
+    3.9e-6 vs 5.5e-8 (70x).
+- **Mechanism shift:** in Si the zero-body-bias junction floor is
+  trap-assisted, and direct Kane takes over only beyond about 0.6 V of body
+  bias. In SiGe, direct Kane at the heterojunction dominates already at
+  Vsub = 0. The valence-band offset shortens the paths (8.5 -> 7.6 nm at
+  Vsub 1.6 -> 3 V; `input_pmos_2d_btbt_sige/junction_fields_bands.png`). GIDL
+  in SiGe is also Kane-dominated. This is the narrow-gap behavior the user
+  pointed out.
+- **Secondary effects:** the SRH-only floor is about 20x higher with SiGe
+  (larger ni). At high body bias the trap-assisted bulk term turns net
+  negative in both devices: tunneling-generated carriers recombine through
+  the traps.
+- **Runtime:** both devices (none + nonlocal, 2 sweeps each) take about
+  95 s together, 4 workers each. All 128 points converge.
+
+**Caveats:** strained-SiGe mobility and DOS are not modeled (Vegard values
+for DOS, Si doping-dependent mobility); Kane A and the reduced mass are kept
+at Si values, and only B is scaled by Eg; the heterointerface in 2D is
+spread over one element in the P1 interpolation used by the path search.
+
+## 32. Session 22: why GIDL turns on so late here - an onset ablation
+
+The user noted that in every nonlocal run GIDL appears only deep in negative
+Vg, while in modern MOSFETs it rises right below threshold. The cause is the
+device, not the model: 3 nm SiO2, an n+ poly gate, and a 40 nm-overlap tip
+of uniform 3e18. The drain surface has to bend by about Eg + 0.3 V before
+paths get short, and with a thick oxide most of Vdg drops across the oxide.
+A 1D MOS estimate for the 3e18 tip gives Vdg of about 2.4 V (3 nm SiO2),
+consistent with the simulated onset near Vg = -1.4 V at Vds = 1 V.
+
+**New code.**
+- Graded doping regions in 2D (`Region.grading_cm_per_decade`, config key
+  `grading_nm_per_decade: [gx, gy]`): full concentration inside the box,
+  one decade of fall-off per gx/gy outside it, ADDED to the net doping
+  (compensation) instead of replacing it.
+- Interface-trap trap-assisted tunneling in `btbt/paths2d.py`
+  (`interface_traps: {Nit_cm2, sigma_cm2, vth_cm_s}` under `btbt:`): surface
+  SRH at the Si/SiO2 interface nodes, with s0 = sigma*vth*Nit and each
+  carrier's capture enhanced by the same nonlocal Hurkx Gamma as the bulk
+  traps (`btbt/tat_kernel.py::trap_generation`, interface length per node
+  in `TriGeom.if_len`). The Jacobian is FD-checked. It is reported as
+  component `it_surface`.
+- `btbt/gidl_ablation.py` writes cumulative variant configs to
+  `out/btbt/gidl_ablation/` and runs them in parallel (about 90 s for all
+  five). No halo, per the user (rare in FinFET/nanosheet devices).
+
+**Results (NMOS Id-Vg, Vds = 1 V; onset = Vg where |Id| reaches 10x its
+minimum):**
+
+| variant (cumulative) | GIDL onset | Id(Vg = -1 V) |
+|---|---|---|
+| 0 baseline: 3 nm SiO2, n+ poly, 40 nm 3e18 tip | -1.78 V | 4.6e-13 |
+| 1 + EOT 1 nm (3 nm layer, k = 11.7) | -0.92 V | 1.4e-11 |
+| 2 + metal gate 4.3 eV | -0.67 V | 6.4e-10 |
+| 3 + graded S/D (3 nm/dec, ~10 nm overlap) | -0.22 V | 8.0e-6 |
+| 4 + interface traps, Nit = 5e11 cm^-2 | -0.22 V | 8.0e-6 (no change) |
+
+- EOT is the largest single shift (about 0.9 V). The metal gate adds the
+  expected ~0.25 V.
+- The graded drain moves onset to just below threshold: the gate edge now
+  sees the 1e19-1e20 part of the gradient, where Kane paths are short.
+- With bulk tau = 1 ns (project default), the interface traps at
+  5e11 cm^-2 are invisible (about 2e-14 A/um of surface generation, against
+  a 4e-12 floor); with realistic bulk lifetimes they would matter relatively
+  more.
+- Magnitude caveat: variants 3-4 reach 1.9e-4 A/um at Vg = -2 V. That is
+  Vdg = 3 V across EOT 1 nm (about 30 MV/cm, beyond breakdown), outside any
+  real operating range. Around Vdg = 1.5-1.8 V the values are 1e-9-1e-7
+  A/um. Absolute GIDL also depends on the Kane A/B calibration (the FLOOXS
+  fit is used here); the onset TRENDS are the robust result.

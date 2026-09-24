@@ -141,10 +141,36 @@ def mobility_field(E, mu0, vsat, beta):
     return mu, dmu_dE
 
 
-def _densities(psi, phin, phip, ni_arr, Vt):
-    n = ni_arr * np.exp((psi - phin) / Vt)
-    p = ni_arr * np.exp((phip - psi) / Vt)
+def _densities(psi, phin, phip, ni_arr, Vt, dEi=0.0):
+    """dEi: per-node heterojunction band shift (mesh.dEi_arr, see
+    _mesh_dEi) - 0 for a single-material device."""
+    n = ni_arr * np.exp((psi + dEi - phin) / Vt)
+    p = ni_arr * np.exp((phip - psi - dEi) / Vt)
     return n, p
+
+
+def _mesh_dEi(mesh):
+    return mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else 0.0
+
+
+def _sg_shifts(mesh, ii, jj, Vt):
+    """Per-edge additions to the Scharfetter-Gummel argument d =
+    (psi_j - psi_i)/Vt at a heterojunction (the 2D form of core/physics.py's
+    _sg_potential_n/_sg_potential_p): with u_n = (psi+dEi)/Vt + ln(ni) and
+    u_p = (psi+dEi)/Vt - ln(ni), equilibrium n = exp(u_n)*const and
+    p = exp(-u_p)*const, so SG on d_n = u_n,j - u_n,i (d_p likewise) carries
+    exactly zero current in equilibrium across a material step. The plain
+    d leaves a spurious current wherever ni or dEi jumps. Both shifts are
+    0 on a single-material mesh, and on edges touching an insulator node
+    (those edges carry no carrier flux anyway)."""
+    dEi = getattr(mesh, "dEi_arr", None)
+    if dEi is None or mesh.ni_arr is None:
+        return 0.0, 0.0
+    ni = mesh.ni_arr
+    ok = (ni[ii] > 0) & (ni[jj] > 0)
+    lr = np.where(ok, np.log(np.where(ok, ni[jj], 1.0) / np.where(ok, ni[ii], 1.0)), 0.0)
+    de = np.where(ok, (dEi[jj] - dEi[ii]) / Vt, 0.0)
+    return de + lr, de - lr
 
 
 def _mesh_mobility_nodal(mesh, mat):
@@ -301,10 +327,13 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     if edge_mask is not None:
         geo = geo * edge_mask
     d = (psi[jj] - psi[ii]) / Vt
-    Bp, dBp = bernoulli(d)
-    Bm, dBm = bernoulli(-d)
+    sn, sp_ = _sg_shifts(mesh, ii, jj, Vt)
+    Bp, dBp = bernoulli(d + sn)
+    Bm, dBm = bernoulli(-(d + sn))
+    Bpp, dBpp = bernoulli(d + sp_)
+    Bmp, dBmp = bernoulli(-(d + sp_))
     Sn = n[jj] * Bp - n[ii] * Bm
-    Sp = p[ii] * Bp - p[jj] * Bm
+    Sp = p[ii] * Bpp - p[jj] * Bmp
     In = geo * mu_n * Sn
     Ip = geo * mu_p * Sp
     if not jacobian:
@@ -314,8 +343,8 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     # (dd/dpsi_j = 1/Vt), and through mu (velocity saturation, dmu/d(dpsi)).
     dSn_dpsi_j = (n[jj] * Bp + n[jj] * dBp + n[ii] * dBm) / Vt
     dSn_dpsi_i = -(n[ii] * Bm + n[jj] * dBp + n[ii] * dBm) / Vt
-    dSp_dpsi_j = (p[jj] * Bm + p[ii] * dBp + p[jj] * dBm) / Vt
-    dSp_dpsi_i = -(p[ii] * Bp + p[ii] * dBp + p[jj] * dBm) / Vt
+    dSp_dpsi_j = (p[jj] * Bmp + p[ii] * dBpp + p[jj] * dBmp) / Vt
+    dSp_dpsi_i = -(p[ii] * Bpp + p[ii] * dBpp + p[jj] * dBmp) / Vt
     vn = geo * Sn * dmu_n
     vp = geo * Sp * dmu_p
     dIn_dpsi_i = cn * dSn_dpsi_i - vn
@@ -325,8 +354,8 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     # d/dphi: only through n,p (dn/dphin = -n/Vt, dp/dphip = p/Vt).
     dIn_dphin_i = cn * n[ii] * Bm / Vt
     dIn_dphin_j = -cn * n[jj] * Bp / Vt
-    dIp_dphip_i = cp * p[ii] * Bp / Vt
-    dIp_dphip_j = -cp * p[jj] * Bm / Vt
+    dIp_dphip_i = cp * p[ii] * Bpp / Vt
+    dIp_dphip_j = -cp * p[jj] * Bmp / Vt
     return In, Ip, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
                     dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j)
 
@@ -354,11 +383,11 @@ def continuity_row_scale(mat: Material, h_typ: float) -> float:
 
 
 def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
-              edge_mask=None, velocity_saturation=False):
+              edge_mask=None, velocity_saturation=False, generation=None):
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
     ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
-    n, p = _densities(psi, phin, phip, ni_arr, mat.Vt)
+    n, p = _densities(psi, phin, phip, ni_arr, mat.Vt, _mesh_dEi(mesh))
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
@@ -391,6 +420,10 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     Rpsi = (div_psi - Q * (n - p - mesh.Cdop) * cv_semi) / mesh.cv_area / poisson_scale
     Rn = (div_n / cv_semi_safe - Q * R) / cont_scale
     Rp = (div_p / cv_semi_safe + Q * R) / cont_scale
+    if generation is not None:
+        Gn, Gp, _, _ = generation(psi, phin, phip, jacobian=False)
+        Rn = Rn + Q * Gn / cont_scale
+        Rp = Rp - Q * Gp / cont_scale
 
     # phin/phip have NO governing equation at a non-contact insulator node
     # (n=p=0 there regardless of their value, since ni_arr=0 - there is no
@@ -415,8 +448,11 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
 
 
 def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
-                            poisson_scale, cont_scale, edge_mask=None, velocity_saturation=False):
-    """edge_mask: optional boolean (E,) array - see _residual()'s own
+                            poisson_scale, cont_scale, edge_mask=None, velocity_saturation=False,
+                            generation=None):
+    """generation: optional extra carrier generation (see newton_solve_2d).
+
+    edge_mask: optional boolean (E,) array - see _residual()'s own
     (much longer) docstring for the full rationale; None (default, every
     existing caller) reproduces this function's exact prior behavior
     unchanged. Applied here by masking cn_e/cp_e (the common per-edge
@@ -427,7 +463,7 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     psi, phin, phip = unpack_qf(U, N)
     ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
     Vt = mat.Vt
-    n, p = _densities(psi, phin, phip, ni_arr, Vt)
+    n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
@@ -459,6 +495,11 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     Rpsi = (div_psi - Q * (n - p - mesh.Cdop) * cv_semi) / mesh.cv_area / poisson_scale
     Rn = (div_n / cv_semi_safe - Q * R) / cont_scale
     Rp = (div_p / cv_semi_safe + Q * R) / cont_scale
+    dGn_dU = dGp_dU = None
+    if generation is not None:
+        Gn, Gp, dGn_dU, dGp_dU = generation(psi, phin, phip, jacobian=True)
+        Rn = Rn + Q * Gn / cont_scale
+        Rp = Rp - Q * Gp / cont_scale
 
     # See _residual()'s matching comment: phin/phip are pinned to 0 (not
     # solved via the normal continuity equation) at every non-contact
@@ -553,6 +594,15 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     add(r_p_free, N + free_np, Q * dR_dn[free_np] * dn_dphin[free_np] / cont_scale)
     add(r_p_free, 2 * N + free_np, Q * dR_dp[free_np] * dp_dphip[free_np] / cont_scale)
 
+    # --- Extra generation: d(Gn)/dU, d(Gp)/dU (sparse N x 3N over
+    # U = (psi, phin, phip), or None for a source held fixed during this
+    # solve) ---
+    for dG, row0, sgn in ((dGn_dU, N, 1.0), (dGp_dU, 2 * N, -1.0)):
+        if dG is not None:
+            c = sp.coo_matrix(dG)
+            keep = ~is_np_fixed[c.row]
+            add(row0 + c.row[keep], c.col[keep], sgn * Q * c.data[keep] / cont_scale)
+
     # --- phin/phip identity-pinning rows at non-contact insulator nodes
     # (see the matching Rn/Rp override above) - these rows have NO other
     # contribution (excluded from every block above via is_np_fixed), so a
@@ -584,7 +634,8 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
 def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50, verbose=False,
                      psi_init=None, phin_init=None, phip_init=None,
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
-                     damping="line_search", cold_retry=True, velocity_saturation=False):
+                     damping="line_search", cold_retry=True, velocity_saturation=False,
+                     generation=None):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -651,7 +702,18 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     layer ported here - a full 2D Gummel solver is still deferred).
     cold_retry=False skips that retry (and the non-convergence warning) -
     for a continuation driver that handles a failed step itself by
-    shrinking the bias step, where a cold restart only wastes time."""
+    shrinking the bias step, where a cold restart only wastes time.
+
+    generation: optional extra electron/hole generation (e.g. band-to-band
+    tunneling, btbt/), a callable generation(psi, phin, phip, jacobian) ->
+    (Gn, Gp, dGn_dU, dGp_dU): per-node rates in cm^-3 s^-1 (electrons
+    and holes may be generated at DIFFERENT nodes - a nonlocal tunneling
+    path), and their sparse (N x 3N) derivatives w.r.t. U = (psi, phin,
+    phip), or None for a source held fixed during the solve (lagged by the
+    caller). Added as -G to the
+    recombination term of the electron/hole continuity rows. Only the
+    default line-search damping supports it. None (default) leaves the
+    solve unchanged."""
     N = len(mesh.points)
     Vt = mat.Vt
     ni_arr, _ = _mesh_ni_edge_g(mesh, mat)
@@ -676,7 +738,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     # doesn't poison the cold-start guess with a NaN.
     is_insulator = mesh.is_insulator if mesh.is_insulator is not None else np.zeros(N, dtype=bool)
     ni_safe_eq = np.where(is_insulator, 1.0, ni_arr)
-    psi_eq = np.where(is_insulator, 0.0, equilibrium_bulk_potential_arr(Vt, ni_safe_eq, mesh.Cdop))
+    dEi_eq = mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else None
+    psi_eq = np.where(is_insulator, 0.0,
+                      equilibrium_bulk_potential_arr(Vt, ni_safe_eq, mesh.Cdop, delta_Ei_arr=dEi_eq))
 
     psi_bc = np.empty(len(contact_point_idx))
     phin_bc = np.empty(len(contact_point_idx))
@@ -690,8 +754,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         else:
             n_bc, p_bc = contact_values(mat, mesh.Cdop[pt], ni=ni_arr[pt])
             psi_bc[k] = psi_eq[pt] + v_applied
-            phin_bc[k] = psi_bc[k] - Vt * np.log(n_bc / ni_arr[pt])
-            phip_bc[k] = psi_bc[k] + Vt * np.log(p_bc / ni_arr[pt])
+            dEi_pt = dEi_eq[pt] if dEi_eq is not None else 0.0
+            phin_bc[k] = psi_bc[k] + dEi_pt - Vt * np.log(n_bc / ni_arr[pt])
+            phip_bc[k] = psi_bc[k] + dEi_pt + Vt * np.log(p_bc / ni_arr[pt])
 
     def _cold_start():
         # phin0=phip0=0 EXACTLY everywhere (the natural equilibrium guess)
@@ -737,6 +802,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         U = np.concatenate([psi0, phin0, phip0])
 
         if damping == "bank_rose":
+            if generation is not None:
+                raise NotImplementedError("generation= is only supported with damping='line_search'")
             # See newton_solve_2d's own docstring for why this path is
             # opt-in only (not the default) and should only be used on an
             # already-close warm start, never a cold start.
@@ -753,7 +820,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             raise ValueError(f"damping must be 'line_search' or 'bank_rose', got {damping!r}")
 
         F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                       poisson_scale, cont_scale, edge_mask, velocity_saturation)
+                                       poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
         res_norm = np.max(np.abs(F))
 
         # Step control: each Newton direction is scaled uniformly so no
@@ -794,7 +861,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             for _ in range(20):
                 U_try = U + step * delta
                 F_try = _residual(U_try, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                   poisson_scale, cont_scale, edge_mask, velocity_saturation)
+                                   poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
                 merit_try = np.linalg.norm(row_scale * F_try)
                 if np.isfinite(merit_try) and merit_try < merit * (1 - 1e-4 * step):
                     break
@@ -804,7 +871,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
 
             U = U_try
             F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                           poisson_scale, cont_scale, edge_mask, velocity_saturation)
+                                           poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
             res_norm = np.max(np.abs(F))
             if res_norm < best_res:
                 best_U, best_res = U, res_norm
@@ -846,6 +913,6 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a cold-start retry.")
 
     psi, phin, phip = unpack_qf(U, N)
-    n, p = _densities(psi, phin, phip, ni_arr, Vt)
+    n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
             "iters": it, "res_norm": res_norm, "velocity_saturation": velocity_saturation}

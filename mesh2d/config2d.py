@@ -30,6 +30,23 @@ def _range_cm(pair_um):
     return (float(pair_um[0]) * _UM_TO_CM, float(pair_um[1]) * _UM_TO_CM)
 
 
+_REGION_MATERIALS = {}
+
+
+def _region_material(block):
+    """A region's optional `material:` block (same shape as the top-level
+    one: name / derive_from / alloy with strain, see core.config) resolved
+    to a live Material. Regions sharing a material name share one object,
+    so they count as the same material."""
+    if not block:
+        return None
+    from core.config import _resolve_material_block
+    key = block.get("name") or repr(sorted(block.items()))
+    if key not in _REGION_MATERIALS:
+        _REGION_MATERIALS[key] = _resolve_material_block(block)
+    return _REGION_MATERIALS[key]
+
+
 def build_domain_from_config(cfg: dict) -> Domain2D:
     geom = cfg["geometry"]
     width_cm = float(geom["width_um"]) * _UM_TO_CM
@@ -52,6 +69,9 @@ def build_domain_from_config(cfg: dict) -> Domain2D:
             concentration_cm3=float(r.get("concentration_cm3", 0.0)),
             kind=r.get("kind", "semiconductor"),
             eps_r=float(r["eps_r"]) if r.get("eps_r") is not None else None,
+            material=_region_material(r.get("material")),
+            grading_cm_per_decade=(tuple(float(v) * 1e-7 for v in r["grading_nm_per_decade"])
+                                   if r.get("grading_nm_per_decade") else None),
         ))
 
     top_mesas = [

@@ -58,6 +58,15 @@ class Mesh2D:
                                             # fvgeometry.py; == facet_length without `mat`
     cv_area_semi: np.ndarray = None       # (N,) cm^2 - control volume inside semiconductor
                                             # (carrier/doping charge, recombination)
+    # Heterojunction arrays (only set when `mat` is passed; all relative to
+    # that base material): delta_Ei = Xi(node material) - Xi(base) (eV, see
+    # core.materials.Xi - enters n = ni exp((psi+dEi-phin)/Vt)), the bandgap,
+    # and Ec - Ei = Vt ln(Nc/ni), so Ec = -(psi+dEi) + ec_off and
+    # Ev = Ec - Eg in the solver's energy reference. For a single-material
+    # device dEi = 0, Eg = mat.Eg_eV, ec_off = Vt ln(Nc/ni) everywhere.
+    dEi_arr: np.ndarray = None
+    Eg_arr: np.ndarray = None
+    ec_off_arr: np.ndarray = None
 
 
 def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, tri_insulator=None,
@@ -164,9 +173,17 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
     tags = tag_boundary_points(fv.points, domain)
 
     ni_arr = is_insulator = None
+    dEi_arr = Eg_arr = ec_off_arr = None
     if mat is not None:
+        from core.materials import delta_Ei_of
         is_insulator, _ = domain.material_props_at(fv.points[:, 0], fv.points[:, 1], mat)
-        ni_arr = np.where(is_insulator, 0.0, mat.ni)
+        mats = [mat] + domain.semiconductor_materials()
+        k = domain.semiconductor_material_index(fv.points[:, 0], fv.points[:, 1])
+        pick = lambda f: np.array([f(m) for m in mats])[k]
+        ni_arr = np.where(is_insulator, 0.0, pick(lambda m: m.ni))
+        dEi_arr = np.where(is_insulator, 0.0, pick(lambda m: delta_Ei_of(m, mat)))
+        Eg_arr = pick(lambda m: m.Eg_eV)
+        ec_off_arr = pick(lambda m: m.Vt * np.log(m.Nc / m.ni))
 
     return Mesh2D(
         domain=domain,
@@ -189,6 +206,9 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
         is_insulator=is_insulator,
         facet_length_semi=fv.facet_length_semi if fv.facet_length_semi is not None else fv.facet_length,
         cv_area_semi=fv.cv_area_semi if fv.cv_area_semi is not None else fv.cv_area,
+        dEi_arr=dEi_arr,
+        Eg_arr=Eg_arr,
+        ec_off_arr=ec_off_arr,
     )
 
 
