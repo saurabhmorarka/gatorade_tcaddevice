@@ -1,19 +1,18 @@
 # 1D diode simulation input parameters - AVALANCHE BREAKDOWN example.
 #
-# Run with: python3 main_avalanche.py
+# Run with: python3 -m avalanche.main_avalanche
 #
 # Special, opt-in example (NOT part of a normal CMOS flow): a one-sided
 # step junction, heavy p-side (1e19 cm^-3) / light n-side (1e17 cm^-3), so
 # essentially all the depletion width and field sit on the lighter n-side -
 # the standard "one-sided abrupt junction" assumption Sze's empirical
 # breakdown-voltage formula requires. At this doping,
-# analytic.breakdown_voltage_sze() gives BV ~= 11V - a fairly heavily doped
-# ("Zener-like") light side chosen SPECIFICALLY to bring breakdown down into
-# a compact, easy-to-see voltage range (the first version of this example
-# used a 1e16 light side, giving BV~=62V, which needed a much longer sweep
-# to reach and turned out to be numerically much harder to converge deep
-# into - see newton_solver_avalanche.py's module docstring and
-# DEVELOPMENT_LOG.md session 10 for the full story of what that took).
+# analytic.breakdown_voltage_sze() gives BV ~= 11V; the solver, using the
+# van Overstraeten-de Man ionization coefficients, breaks down at ~14.1V
+# (defined at |J| = 1 A/cm^2), and the ionization integral evaluated on its
+# own solved field is ~1 there - the gap to Sze is the coefficient set, not
+# the solve. Lighter (1e16, BV~52V) and heavier/graded devices are exercised
+# by avalanche/robustness_matrix.py.
 #
 # Domain sizing: Wn_um comfortably exceeds the depletion width even past
 # breakdown (<0.5 um at Va=-16V, per analytic.depletion_widths) - the
@@ -38,60 +37,49 @@ material:
   # ni_cm3: 1.0e10
 
 mesh:
-  growth: 1.06
+  growth: 1.10
   bulk_spacing_debye_factor: 5.0
-  # Tried loosening this from 0.05 to see if the avalanche runaway survives
-  # a mesh affordable in 2D/3D - it does not, and the failure is a sharp
-  # cliff, not a graceful accuracy loss: even 0.08 (barely coarser, h_min
-  # 0.10nm vs 0.06nm) makes the ENTIRE fine-tail runaway vanish (M(Va) stays
-  # pinned at 1.00 all the way to -13.93V, where the fine mesh gives
-  # M~118). This is not a Newton convergence failure (self-consistency
-  # looks fine at the coarser settings) - it is the discretized avalanche
-  # feedback itself losing its runaway branch once the peak-field region is
-  # under-resolved, even though the classic Debye-length transport
-  # criterion (which 0.08-0.2 still satisfy, 5-12 cells/Debye length) says
-  # the mesh should be adequate for ordinary transport. See
-  # DEVELOPMENT_LOG.md for the full sweep of factors tried and why this
-  # example keeps 0.05 rather than the looser value once planned here.
-  junction_spacing_debye_factor: 0.05
+  # 0.3 Debye lengths of the heavy side at the junction (~0.4 nm cells).
+  # An earlier version of this example needed 0.05 because loosening the mesh
+  # appeared to make the avalanche runaway vanish - that was a numerics bug
+  # (roundoff-dominated majority-carrier current feeding the generation term,
+  # see DEVELOPMENT_LOG.md session 23), not a resolution requirement. With
+  # the current solver, avalanche/robustness_matrix.py shows BV agreeing to
+  # within ~0.2% from 0.05 down to 1.0 (a few-nm junction cells).
+  junction_spacing_debye_factor: 0.3
 
 avalanche:
-  enabled: true
-  E_crit_V_cm: 4.0e5   # a-priori peak-field estimate, used only to size the mesh
+  enabled: true        # also cap h_min at the ionization mean free path (no effect for this device)
+  E_crit_V_cm: 4.0e5   # a-priori peak-field estimate, used only for that mesh cap
   cells_per_mfp: 8.0
   # ii_model defaults to Si van Overstraeten-de Man (avalanche.py)
 
-  # Right at avalanche onset, current rises by orders of magnitude within a
-  # fraction of a volt - far too sharp for the coarse sweep below to track
-  # (a uniform sweep fine enough to resolve THIS transition everywhere
-  # would need thousands of points over the full bias range). fine_tail
-  # concentrates extra-fine bias-point spacing over just this last
-  # stretch, appended after the coarse sweep reaches start_V - see
-  # main_avalanche.py's build_fine_tail_va_list() and
-  # avalanche_config.parse_avalanche_config's docstring. With this, the
-  # sweep tracks the physical (low-current) branch smoothly all the way to
-  # I~5.6e-5 A at stop_V, right up against the voltage-controlled-
-  # continuation wall (see newton_solver_avalanche.py's
-  # newton_gummel_solve docstring) - without it, the coarse sweep alone
-  # loses the physical branch and lands on numerical noise well before
-  # reaching values this large.
-  fine_tail:
-    start_V: -13.8
-    stop_V: -13.988
-    step_V: 0.004
+  # Impact-ionization driving force: hybrid (default) | gradqf | efield -
+  # see newton_solver_avalanche.py's module docstring. hybrid uses the
+  # quasi-Fermi gradient where a carrier is dense and the field where it is
+  # sparse; efield cannot converge once either side is doped >~1e20.
+  driving_force: hybrid
+  ref_density_cm3: 1.0e16
+
+  # Arc-length trace (main_avalanche.py): voltage-controlled seed steps to
+  # seed_V, then follow the I-V curve itself - through the near-vertical
+  # knee and any turn-back - until |J| reaches J_stop_A_cm2. No bias
+  # schedule to tune (this replaces the old hand-tuned fine_tail block).
+  continuation:
+    seed_V: -1.0
+    J_stop_A_cm2: 1.0e3
+    V_limit: 100.0
+    ds_max: 1.0
 
 voltage_sweep:
-  # Dense sampling from near-equilibrium through the avalanche runaway.
-  # Ordered near-equilibrium -> deep reverse bias (NOT the other way) so
-  # bias-point continuation gets a gentle cold start at Va=-0.05V and walks
-  # outward - jumping straight to deep reverse bias as the very first
-  # (cold-start) point starves the Newton solve of a good initial guess and
-  # was observed to fail to converge. reverse_stop_V here is just the
-  # COARSE leg's end point - avalanche.fine_tail above takes over from
-  # here down to -13.988V (see that block's comment).
+  # Only used if this device is swept through the generic voltage-controlled
+  # path (math_model newton_avalanche via core.solver.voltage_sweep);
+  # main_avalanche.py uses the arc-length trace above instead. A voltage-
+  # controlled sweep converges fine up to the knee but cannot follow the
+  # near-vertical curve through it.
   reverse_start_V: -0.05
-  reverse_stop_V: -13.8
-  reverse_points: 90
+  reverse_stop_V: -13.5
+  reverse_points: 60
   forward_start_V: 0.0
   forward_stop_V: 0.6
   forward_points: 8
@@ -100,5 +88,7 @@ solver:
   math_model: newton_avalanche
 
 output:
-  save_bias_points: [-1, -6, -10, -12.5, -13.8, -13.98, -13.988]
+  # main_avalanche.py saves fields at fixed current levels instead;
+  # these are only for the generic voltage-controlled path.
+  save_bias_points: [-1, -6, -10, -13]
   structure_file: diode_breakdown_structure.json

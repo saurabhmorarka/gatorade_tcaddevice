@@ -3,52 +3,55 @@ plain-gradient current (same base formulation as newton_solver_qf.py), EXTENDED
 with a field-dependent impact-ionization (avalanche) generation term in both
 continuity equations.
 
-THIS IS A SPECIAL, OPT-IN, NON-DEFAULT SOLVER. A normal CMOS-flow junction is
-operated well below its avalanche breakdown voltage, where impact ionization
-is entirely negligible - none of the other examples/solvers in this codebase
-model it, and none of their behavior changes by this module existing. This
-module is only reached via the explicit math_model="newton_avalanche" switch
-(see solver.py/config.py) with an explicit avalanche: enabled: true block in
-the input YAML (see avalanche_config.py), and its own dedicated driver
-(main_avalanche.py) and example device (input_diode_breakdown.yaml).
+THIS IS A SPECIAL, OPT-IN, NON-DEFAULT SOLVER, reached via
+math_model="newton_avalanche" or its own driver (main_avalanche.py). It keeps
+its own private copies of the QF building blocks (ARCHITECTURE.md: avalanche
+stays standalone); the only shared pieces it uses are solver-agnostic
+numerics in core/ (newton_numerics.py, jacobian_scaling.py, arclength.py).
 
-WHY A NEW MODULE (not a flag threaded into newton_solver_qf.py): matches this
-project's own precedent - newton_solver_qf.py itself was added as a sibling
-module to newton_solver.py rather than a flag inside it, to keep the
-non-avalanche path's code and behavior completely untouched. See
-newton_solver_qf.py's own module docstring for the shared design notes (why
-an analytic Jacobian + direct sparse solve, why quasi-Fermi unknowns + a
-plain-gradient current rather than Scharfetter-Gummel).
-
-THE PHYSICS: impact ionization is not a new PDE - it's an extra local
-electron-hole-pair GENERATION rate G_ii(x) (cm^-3 s^-1) added to both
-continuity equations, playing the same role as SRH recombination R but with
-the OPPOSITE sign (a net source, not a sink):
+THE PHYSICS: impact ionization is an extra local electron-hole-pair
+generation rate added to both continuity equations (opposite sign to SRH R):
 
     dJn/dx = q*(R - G_ii)      dJp/dx = -q*(R - G_ii)
+    G_ii = (alpha_n(F_n)*|Jn| + alpha_p(F_p)*|Jp|) / q
 
-using the standard van Overstraeten-de Man / Chynoweth local-field model
-(see avalanche.py):
+with the van Overstraeten-de Man coefficients (avalanche.py). F_n, F_p are
+the DRIVING FORCES - see DRIVING FORCE below; G_ii's dependence on |J| (the
+very quantity the continuity equations solve for) is the positive feedback
+that makes the multiplication factor diverge at breakdown.
 
-    G_ii = (alpha_n(E)*|Jn| + alpha_p(E)*|Jp|) / q
+DRIVING FORCE (driving_force= "hybrid" (default) | "gradqf" | "efield"),
+per edge, per carrier:
+  - "efield": F = |E| = |dpsi/dx| - the textbook local-field model. Correct,
+    but it evaluates alpha(E)*|J| in the thin high-field slice of a heavily
+    doped side, where the carrier is majority and its plain-gradient current
+    is dominated by roundoff (a huge conductance q*mu*p/h times a quasi-Fermi
+    difference below double-precision resolution). At 1e20-1e21 doping that
+    noise is hundreds of times the real leakage current, and the solve fails
+    even at Va=-0.25V (DEVELOPMENT_LOG.md session 23).
+  - "gradqf": F = |dphi/dx| of that carrier - the default of Genius-TCAD
+    (src/solution/control.cc, II_Force=GradQf) and of FLOOXS/Charon's
+    van Overstraeten model (Emfn/Emfp). Physically it is the force that
+    actually heats the carrier; a majority carrier in quasi-equilibrium has
+    |grad phi| ~ 0, so the noisy slice drops out. Its known weakness is the
+    opposite limit: where a carrier's density is tiny but its current is
+    large (the minority edge of a strongly multiplying depletion region),
+    |grad phi| = |J|/(q*mu*c) overshoots the field and produces a spurious
+    voltage snapback at ~1e-2 A/cm^2 in these diodes.
+  - "hybrid": F = w*|grad phi| + (1-w)*|E|, w = c^2/(c^2 + c_ref^2), c the
+    carrier's own edge-averaged density - |grad phi| where the carrier is
+    dense (removes the majority-current noise), |E| where it is sparse
+    (removes the low-density overshoot). The same idea as FLOOXS/Charon's
+    documented n*F/(n+n0) damping of the gradient driving force.
 
-This is what makes the multiplication factor M(Va) diverge sharply near
-breakdown: G_ii depends exponentially on the local field E (itself set by
-psi) AND on the very currents Jn, Jp it feeds back into - a positive-feedback
-loop absent from every other solver in this codebase. Bank & Rose (1981)
-"Algorithm Global" damping (bank_rose_damping.py) is implemented and
-available here specifically because of that sharp nonlinearity, though
-empirically newton_solver_qf.py's plain backtracking line search proved the
-more robust DEFAULT for this device - see newton_gummel_solve's own
-docstring below for the full empirical comparison and why.
+alpha(F) is continuous down to F=0 (AvalancheModel.E_floor_V_cm is only a
+guard against 0-division; the old 1.75e5 V/cm hard floor was a jump in
+alpha that Newton could not settle across).
 
-THE JACOBIAN: G_ii's dependence on BOTH n and p transport variables creates a
-coupling not present in newton_solver_qf.py today - G_ii depends on phip (via
-Jp) inside the ELECTRON continuity row, and on phin (via Jn) inside the HOLE
-continuity row (previously, the electron row's only phip-dependency was
-through dR_dp at the SAME node column; here it becomes a genuine 3-wide
-phip-column stencil, and likewise for the hole row's phin columns). See the
-per-edge derivative block in _residual_and_jacobian below.
+NEWTON: core/newton_numerics.damped_newton (row-normalized merit). Dirichlet
+rows are unit rows (u - u_bc = 0); the Ruiz equilibration inside the linear
+solve makes the old pivoting-safety diagonal scaling unnecessary, and unit
+rows keep the arc-length (Va-as-unknown) extension exactly consistent.
 """
 import warnings
 
@@ -58,9 +61,16 @@ import scipy.sparse as sp
 from core.params import Q, Material
 from core import physics as ph
 from core.solver import contact_values
+from core.newton_numerics import (ROW_TOL, damped_newton, uniform_step_clip, componentwise_step_clip,
+                                  edge_current_noise, resolved_current)
 from avalanche.avalanche import AvalancheModel, ionization_coeffs
-from core.bank_rose_damping import bank_rose_solve
-from core.jacobian_scaling import equilibrated_spsolve
+
+DRIVING_FORCES = ("hybrid", "gradqf", "efield")
+# Density (cm^-3) where the hybrid driving force is half |grad phi|, half |E|.
+DEFAULT_REF_DENSITY_CM3 = 1.0e16
+# Same rationale as newton_solver_qf.py's MAX_QF_STEP.
+_MAX_QF_STEP = 5.0
+_MAX_PSI_STEP = 1.0
 
 
 def _poisson_scale(mat: Material, h_typ: float) -> float:
@@ -71,561 +81,356 @@ def _continuity_scale(mat: Material, h_typ: float) -> float:
     return Q * mat.Dn * mat.ni / h_typ
 
 
-def _unpack(U, N):
-    """U = [psi, phin, phip]."""
-    return U[:N], U[N:2 * N], U[2 * N:3 * N]
+def _force_weight(c, force, c_ref):
+    """w and dw/dc for F = w*|grad phi| + (1-w)*|E| (see module docstring)."""
+    if force == "gradqf":
+        return np.ones_like(c), np.zeros_like(c)
+    if force == "efield":
+        return np.zeros_like(c), np.zeros_like(c)
+    w = 1.0 / (1.0 + (c_ref / c) ** 2)
+    return w, 2.0 * w * (1.0 - w) / c
 
 
-def _edge_quantities_avalanche(psi, phin, phip, n, p, x, mat, ii_model):
-    """Per-edge plain-gradient flux, recombination, and impact-ionization
-    generation rate - shared by the residual-only and residual+Jacobian
-    paths so they never disagree. Identical to newton_solver_qf.py's
-    _edge_quantities, plus the new avalanche block at the end."""
-    h = np.diff(x)
-    n_avg = (n[:-1] + n[1:]) / 2.0
-    p_avg = (p[:-1] + p[1:]) / 2.0
+class AvalancheProblem:
+    """The discretized avalanche drift-diffusion system on one mesh, with
+    the applied bias Va as a parameter. Unknowns U = [psi, phin, phip]."""
 
-    Jn = -Q * mat.mu_n * n_avg * (phin[1:] - phin[:-1]) / h
-    Jp = -Q * mat.mu_p * p_avg * (phip[1:] - phip[:-1]) / h
+    def __init__(self, x, Cdop, mat: Material, psi_eq, ii_model: AvalancheModel = None,
+                 driving_force="hybrid", ref_density_cm3=DEFAULT_REF_DENSITY_CM3):
+        if driving_force not in DRIVING_FORCES:
+            raise ValueError(f"driving_force must be one of {DRIVING_FORCES}, got {driving_force!r}")
+        self.x, self.Cdop, self.mat, self.psi_eq = x, Cdop, mat, psi_eq
+        self.ii_model = ii_model or AvalancheModel.si_von_overstraeten_de_man()
+        self.force, self.c_ref = driving_force, ref_density_cm3
+        self.N = N = len(x)
+        self.h = np.diff(x)
+        self.cvol_i = ph._control_volumes(x)[1:-1]
+        h_typ = np.min(self.h)
+        self.poisson_scale = _poisson_scale(mat, h_typ)
+        self.cont_scale = _continuity_scale(mat, h_typ)
+        Vt = mat.Vt
+        n0, p0 = contact_values(mat, Cdop[0])
+        nL, pL = contact_values(mat, Cdop[-1])
+        # u_bc(Va) = offset + [Va at the left (biased) contact, 0 at the right]
+        self.bc_rows = np.array([0, N - 1, N, 2 * N - 1, 2 * N, 3 * N - 1])
+        self.bc_offset = np.array([psi_eq[0], psi_eq[-1],
+                                   psi_eq[0] - Vt * np.log(n0 / mat.ni), psi_eq[-1] - Vt * np.log(nL / mat.ni),
+                                   psi_eq[0] + Vt * np.log(p0 / mat.ni), psi_eq[-1] + Vt * np.log(pL / mat.ni)])
+        self.bc_dVa = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
 
-    ni = mat.ni
-    denom = mat.tau_p * (n + ni) + mat.tau_n * (p + ni)
-    num = n * p - ni ** 2
-    R = num / denom
+    # ---- helpers -------------------------------------------------------
+    def bc_values(self, Va):
+        return self.bc_offset + Va * self.bc_dVa
 
-    # E = -d(psi)/dx (this codebase's existing sign convention, e.g.
-    # depletion_potential_profile's field is built the same way).
-    E_e = -(psi[1:] - psi[:-1]) / h
-    Eabs_e = np.abs(E_e)
-    alpha_n_e, alpha_p_e, dalpha_n_dE_e, dalpha_p_dE_e = ionization_coeffs(Eabs_e, ii_model)
-    Gii_e = (alpha_n_e * np.abs(Jn) + alpha_p_e * np.abs(Jp)) / Q
+    def apply_bc(self, U, Va):
+        U = U.copy()
+        U[self.bc_rows] = self.bc_values(Va)
+        return U
 
-    return (h, n_avg, p_avg, Jn, Jp, R, denom, num,
-            E_e, Eabs_e, alpha_n_e, alpha_p_e, dalpha_n_dE_e, dalpha_p_dE_e, Gii_e)
+    def densities(self, U):
+        N, mat = self.N, self.mat
+        psi, phin, phip = U[:N], U[N:2 * N], U[2 * N:]
+        n = mat.ni * np.exp((psi - phin) / mat.Vt)
+        p = mat.ni * np.exp((phip - psi) / mat.Vt)
+        return psi, phin, phip, n, p
 
+    def _edges(self, psi, phin, phip, n, p):
+        mat, h = self.mat, self.h
+        n_avg = 0.5 * (n[:-1] + n[1:])
+        p_avg = 0.5 * (p[:-1] + p[1:])
+        dpsi, dphin, dphip = np.diff(psi), np.diff(phin), np.diff(phip)
+        Jn = -Q * mat.mu_n * n_avg * dphin / h
+        Jp = -Q * mat.mu_p * p_avg * dphip / h
+        Eabs = np.abs(dpsi) / h
+        wn, dwn = _force_weight(n_avg, self.force, self.c_ref)
+        wp, dwp = _force_weight(p_avg, self.force, self.c_ref)
+        Fqn, Fqp = np.abs(dphin) / h, np.abs(dphip) / h
+        Fn = wn * Fqn + (1.0 - wn) * Eabs
+        Fp = wp * Fqp + (1.0 - wp) * Eabs
+        an, _, dan, _ = ionization_coeffs(Fn, self.ii_model)
+        _, ap, _, dap = ionization_coeffs(Fp, self.ii_model)
+        Gii_e = (an * np.abs(Jn) + ap * np.abs(Jp)) / Q
+        return dict(n_avg=n_avg, p_avg=p_avg, dpsi=dpsi, dphin=dphin, dphip=dphip, Jn=Jn, Jp=Jp,
+                    Eabs=Eabs, wn=wn, dwn=dwn, wp=wp, dwp=dwp, Fqn=Fqn, Fqp=Fqp,
+                    an=an, ap=ap, dan=dan, dap=dap, Gii_e=Gii_e)
 
-def _gii_node(Gii_e, hm, hp, cvol_i):
-    """Box-integrate the per-edge generation rate onto each interior node's
-    control volume - the FV-consistent way to inject a piecewise-constant
-    per-edge source into a node-centered balance, exactly analogous to how
-    the flux-divergence term is already box-integrated (each edge
-    contributes its own half-length to each of its two endpoint control
-    volumes). hm=h[:-1] (edge e_lo, i.e. h[idx-1]), hp=h[1:] (edge e_hi,
-    i.e. h[idx]), both already sliced to interior length like the caller's
-    lap_m/lap_p."""
-    return (hm * Gii_e[:-1] + hp * Gii_e[1:]) / (2.0 * cvol_i)
+    def _srh(self, n, p):
+        mat = self.mat
+        denom = mat.tau_p * (n + mat.ni) + mat.tau_n * (p + mat.ni)
+        num = n * p - mat.ni ** 2
+        return num / denom, denom, num
 
+    # ---- residual / Jacobian (Va enters only through the BC rows) ------
+    def residual(self, U, Va):
+        N, mat, h = self.N, self.mat, self.h
+        psi, phin, phip, n, p = self.densities(U)
+        hm, hp, cv = h[:-1], h[1:], self.cvol_i
+        F = np.empty(3 * N)
+        F[self.bc_rows] = U[self.bc_rows] - self.bc_values(Va)
+        lap_m, lap_p = mat.eps / hm / cv, mat.eps / hp / cv
+        F[1:N - 1] = (lap_p * (psi[2:] - psi[1:-1]) - lap_m * (psi[1:-1] - psi[:-2])
+                      - Q * (n[1:-1] - p[1:-1] - self.Cdop[1:-1])) / self.poisson_scale
+        e = self._edges(psi, phin, phip, n, p)
+        R, _, _ = self._srh(n, p)
+        Gn = (hm * e["Gii_e"][:-1] + hp * e["Gii_e"][1:]) / (2.0 * cv)
+        Jn, Jp = e["Jn"], e["Jp"]
+        F[N + 1:2 * N - 1] = ((Jn[1:] - Jn[:-1]) / cv - Q * (R[1:-1] - Gn)) / self.cont_scale
+        F[2 * N + 1:3 * N - 1] = ((Jp[1:] - Jp[:-1]) / cv + Q * (R[1:-1] - Gn)) / self.cont_scale
+        return F
 
-def _residual_only(U, x, Cdop, mat, ii_model, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale):
-    """Fast path: residual vector only, no Jacobian. Used for Bank-Rose
-    trial evaluations that get rejected and re-tried at a different t_k."""
-    N = len(x)
-    psi, phin, phip = _unpack(U, N)
-    Vt = mat.Vt
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
-    cvol = ph._control_volumes(x)
+    def residual_and_jacobian(self, U, Va):
+        """(F, J) with J = dF/dU (3N x 3N sparse). dF/dVa is -bc_dVa in
+        the Dirichlet rows and 0 elsewhere (see dF_dVa)."""
+        N, mat, h, Vt = self.N, self.mat, self.h, self.mat.Vt
+        psi, phin, phip, n, p = self.densities(U)
+        hm, hp, cv = h[:-1], h[1:], self.cvol_i
+        F = self.residual(U, Va)
+        e = self._edges(psi, phin, phip, n, p)
+        R, denom, num = self._srh(n, p)
+        lap_m, lap_p = mat.eps / hm / cv, mat.eps / hp / cv
 
-    Rpsi = np.empty(N)
-    Rn = np.empty(N)
-    Rp = np.empty(N)
-    Rpsi[0], Rpsi[-1] = psi[0] - psi_bc[0], psi[-1] - psi_bc[-1]
-    Rn[0], Rn[-1] = phin[0] - phin_bc[0], phin[-1] - phin_bc[-1]
-    Rp[0], Rp[-1] = phip[0] - phip_bc[0], phip[-1] - phip_bc[-1]
+        dn_dpsi, dn_dphin = n / Vt, -n / Vt
+        dp_dpsi, dp_dphip = -p / Vt, p / Vt
+        # Edge current derivatives; "_L"/"_R" = w.r.t. the edge's left/right node.
+        kn, kp = -Q * mat.mu_n / h, -Q * mat.mu_p / h
+        dJn_dpsi_L = kn * (dn_dpsi[:-1] / 2) * e["dphin"]
+        dJn_dpsi_R = kn * (dn_dpsi[1:] / 2) * e["dphin"]
+        dJn_dphin_L = kn * ((dn_dphin[:-1] / 2) * e["dphin"] - e["n_avg"])
+        dJn_dphin_R = kn * ((dn_dphin[1:] / 2) * e["dphin"] + e["n_avg"])
+        dJp_dpsi_L = kp * (dp_dpsi[:-1] / 2) * e["dphip"]
+        dJp_dpsi_R = kp * (dp_dpsi[1:] / 2) * e["dphip"]
+        dJp_dphip_L = kp * ((dp_dphip[:-1] / 2) * e["dphip"] - e["p_avg"])
+        dJp_dphip_R = kp * ((dp_dphip[1:] / 2) * e["dphip"] + e["p_avg"])
 
-    h = np.diff(x)
-    hm, hp = h[:-1], h[1:]
-    cvol_i = cvol[1:-1]
-    lap_m = mat.eps / hm / cvol_i
-    lap_p = mat.eps / hp / cvol_i
-    Rpsi[1:-1] = (lap_p * (psi[2:] - psi[1:-1]) - lap_m * (psi[1:-1] - psi[:-2])
-                  - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])) / poisson_scale
+        # Driving-force derivatives: F = w*Fq + (1-w)*|E|, w = w(c_avg).
+        sE, sn, sp_ = np.sign(e["dpsi"]), np.sign(e["dphin"]), np.sign(e["dphip"])
+        dE_L, dE_R = -sE / h, sE / h
+        gn = (e["Fqn"] - e["Eabs"]) * e["dwn"]      # dFn/dn_avg
+        gp = (e["Fqp"] - e["Eabs"]) * e["dwp"]      # dFp/dp_avg
+        wn, wp = e["wn"], e["wp"]
+        dFn_dpsi_L = (1 - wn) * dE_L + gn * dn_dpsi[:-1] / 2
+        dFn_dpsi_R = (1 - wn) * dE_R + gn * dn_dpsi[1:] / 2
+        dFn_dphin_L = wn * (-sn / h) + gn * dn_dphin[:-1] / 2
+        dFn_dphin_R = wn * (sn / h) + gn * dn_dphin[1:] / 2
+        dFp_dpsi_L = (1 - wp) * dE_L + gp * dp_dpsi[:-1] / 2
+        dFp_dpsi_R = (1 - wp) * dE_R + gp * dp_dpsi[1:] / 2
+        dFp_dphip_L = wp * (-sp_ / h) + gp * dp_dphip[:-1] / 2
+        dFp_dphip_R = wp * (sp_ / h) + gp * dp_dphip[1:] / 2
 
-    (_, _, _, Jn, Jp, R, _, _,
-     _, _, _, _, _, _, Gii_e) = _edge_quantities_avalanche(psi, phin, phip, n, p, x, mat, ii_model)
-    Gii_node = _gii_node(Gii_e, hm, hp, cvol_i)
+        an, ap = e["an"], e["ap"]
+        sJn, sJp = np.sign(e["Jn"]), np.sign(e["Jp"])
+        An, Ap = e["dan"] * np.abs(e["Jn"]), e["dap"] * np.abs(e["Jp"])
+        dG_dpsi_L = (An * dFn_dpsi_L + an * sJn * dJn_dpsi_L + Ap * dFp_dpsi_L + ap * sJp * dJp_dpsi_L) / Q
+        dG_dpsi_R = (An * dFn_dpsi_R + an * sJn * dJn_dpsi_R + Ap * dFp_dpsi_R + ap * sJp * dJp_dpsi_R) / Q
+        dG_dphin_L = (An * dFn_dphin_L + an * sJn * dJn_dphin_L) / Q
+        dG_dphin_R = (An * dFn_dphin_R + an * sJn * dJn_dphin_R) / Q
+        dG_dphip_L = (Ap * dFp_dphip_L + ap * sJp * dJp_dphip_L) / Q
+        dG_dphip_R = (Ap * dFp_dphip_R + ap * sJp * dJp_dphip_R) / Q
 
-    Rn[1:-1] = ((Jn[1:] - Jn[:-1]) / cvol_i - Q * (R[1:-1] - Gii_node)) / cont_scale
-    Rp[1:-1] = ((Jp[1:] - Jp[:-1]) / cvol_i + Q * (R[1:-1] - Gii_node)) / cont_scale
+        idx = np.arange(1, N - 1)
+        lo, hi = idx - 1, idx          # edge indices left/right of node idx
+        w_lo, w_hi = hm / (2 * cv), hp / (2 * cv)   # box weights of each edge onto node idx
+        # Node-integrated G_ii derivatives w.r.t. node idx-1 (m), idx (0), idx+1 (p)
+        def node(dL, dR):
+            return w_lo * dL[lo], w_lo * dR[lo] + w_hi * dL[hi], w_hi * dR[hi]
+        Gpsi = node(dG_dpsi_L, dG_dpsi_R)
+        Gphin = node(dG_dphin_L, dG_dphin_R)
+        Gphip = node(dG_dphip_L, dG_dphip_R)
 
-    return np.concatenate([Rpsi, Rn, Rp])
+        dR_dn = (p * denom - num * mat.tau_p) / denom ** 2
+        dR_dp = (n * denom - num * mat.tau_n) / denom ** 2
+        dR_dpsi = dR_dn * dn_dpsi + dR_dp * dp_dpsi
+        cs, ps_ = self.cont_scale, self.poisson_scale
 
+        rows, cols, vals = [], [], []
 
-def _residual_and_jacobian(U, x, Cdop, mat, ii_model, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale):
-    """Returns (F, J), F the length-3N residual, J the 3N x 3N sparse
-    Jacobian dF/dU for U=[psi, phin, phip]. Fully vectorized (no per-node
-    Python loop). Structurally identical to newton_solver_qf.py's function
-    of the same name, plus the new impact-ionization block (search
-    "avalanche" below for every addition relative to that module)."""
-    N = len(x)
-    psi, phin, phip = _unpack(U, N)
-    Vt = mat.Vt
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
-    cvol = ph._control_volumes(x)
+        def add(r, c, v):
+            rows.append(r); cols.append(c); vals.append(v)
 
-    Rpsi = np.empty(N)
-    Rn = np.empty(N)
-    Rp = np.empty(N)
-    Rpsi[0], Rpsi[-1] = psi[0] - psi_bc[0], psi[-1] - psi_bc[-1]
-    Rn[0], Rn[-1] = phin[0] - phin_bc[0], phin[-1] - phin_bc[-1]
-    Rp[0], Rp[-1] = phip[0] - phip_bc[0], phip[-1] - phip_bc[-1]
+        # Poisson
+        add(idx, idx - 1, lap_m / ps_)
+        add(idx, idx, -(lap_m + lap_p) / ps_ - Q * (dn_dpsi[idx] - dp_dpsi[idx]) / ps_)
+        add(idx, idx + 1, lap_p / ps_)
+        add(idx, N + idx, -Q * dn_dphin[idx] / ps_)
+        add(idx, 2 * N + idx, Q * dp_dphip[idx] / ps_)
 
-    h = np.diff(x)
-    hm, hp = h[:-1], h[1:]
-    cvol_i = cvol[1:-1]
-    lap_m = mat.eps / hm / cvol_i
-    lap_p = mat.eps / hp / cvol_i
-    Rpsi[1:-1] = (lap_p * (psi[2:] - psi[1:-1]) - lap_m * (psi[1:-1] - psi[:-2])
-                  - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])) / poisson_scale
+        # Electron continuity: (Jn[hi]-Jn[lo])/cv - Q*(R - G), /cs
+        rn = N + idx
+        add(rn, idx - 1, (-dJn_dpsi_L[lo] / cv + Q * Gpsi[0]) / cs)
+        add(rn, idx, ((dJn_dpsi_L[hi] - dJn_dpsi_R[lo]) / cv - Q * dR_dpsi[idx] + Q * Gpsi[1]) / cs)
+        add(rn, idx + 1, (dJn_dpsi_R[hi] / cv + Q * Gpsi[2]) / cs)
+        add(rn, N + idx - 1, (-dJn_dphin_L[lo] / cv + Q * Gphin[0]) / cs)
+        add(rn, N + idx, ((dJn_dphin_L[hi] - dJn_dphin_R[lo]) / cv - Q * dR_dn[idx] * dn_dphin[idx] + Q * Gphin[1]) / cs)
+        add(rn, N + idx + 1, (dJn_dphin_R[hi] / cv + Q * Gphin[2]) / cs)
+        add(rn, 2 * N + idx - 1, Q * Gphip[0] / cs)
+        add(rn, 2 * N + idx, (-Q * dR_dp[idx] * dp_dphip[idx] + Q * Gphip[1]) / cs)
+        add(rn, 2 * N + idx + 1, Q * Gphip[2] / cs)
 
-    (h_e, n_avg, p_avg, Jn, Jp, R, denom, num,
-     E_e, Eabs_e, alpha_n_e, alpha_p_e, dalpha_n_dE_e, dalpha_p_dE_e, Gii_e) = \
-        _edge_quantities_avalanche(psi, phin, phip, n, p, x, mat, ii_model)
+        # Hole continuity: (Jp[hi]-Jp[lo])/cv + Q*(R - G), /cs
+        rp = 2 * N + idx
+        add(rp, idx - 1, (-dJp_dpsi_L[lo] / cv - Q * Gpsi[0]) / cs)
+        add(rp, idx, ((dJp_dpsi_L[hi] - dJp_dpsi_R[lo]) / cv + Q * dR_dpsi[idx] - Q * Gpsi[1]) / cs)
+        add(rp, idx + 1, (dJp_dpsi_R[hi] / cv - Q * Gpsi[2]) / cs)
+        add(rp, 2 * N + idx - 1, (-dJp_dphip_L[lo] / cv - Q * Gphip[0]) / cs)
+        add(rp, 2 * N + idx, ((dJp_dphip_L[hi] - dJp_dphip_R[lo]) / cv + Q * dR_dp[idx] * dp_dphip[idx] - Q * Gphip[1]) / cs)
+        add(rp, 2 * N + idx + 1, (dJp_dphip_R[hi] / cv - Q * Gphip[2]) / cs)
+        add(rp, N + idx - 1, -Q * Gphin[0] / cs)
+        add(rp, N + idx, (Q * dR_dn[idx] * dn_dphin[idx] - Q * Gphin[1]) / cs)
+        add(rp, N + idx + 1, -Q * Gphin[2] / cs)
 
-    # dn/dpsi = n/Vt, dn/dphin = -n/Vt ; dp/dpsi = -p/Vt, dp/dphip = p/Vt
-    dn_dpsi = n / Vt
-    dn_dphin = -n / Vt
-    dp_dpsi = -p / Vt
-    dp_dphip = p / Vt
+        add(self.bc_rows, self.bc_rows, np.ones(len(self.bc_rows)))
+        J = sp.coo_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+                          shape=(3 * N, 3 * N)).tocsc()
+        return F, J
 
-    dphin_e = phin[1:] - phin[:-1]
-    dphip_e = phip[1:] - phip[:-1]
+    def dF_dVa(self):
+        d = np.zeros(3 * self.N)
+        d[self.bc_rows] = -self.bc_dVa
+        return d
 
-    # Jn_e = -Q*mu_n*n_avg*dphin_e/h ; n_avg = (n_i+n_{i+1})/2  (same as
-    # newton_solver_qf.py; "_e" = derivative wrt the edge's LEFT node,
-    # "_ep1" = wrt its RIGHT node)
-    dJn_dpsi_e = -Q * mat.mu_n / h_e * (dn_dpsi[:-1] / 2.0) * dphin_e
-    dJn_dpsi_ep1 = -Q * mat.mu_n / h_e * (dn_dpsi[1:] / 2.0) * dphin_e
-    dJn_dphin_e = -Q * mat.mu_n / h_e * ((dn_dphin[:-1] / 2.0) * dphin_e - n_avg)
-    dJn_dphin_ep1 = -Q * mat.mu_n / h_e * ((dn_dphin[1:] / 2.0) * dphin_e + n_avg)
+    # ---- currents -------------------------------------------------------
+    def edge_currents(self, U):
+        psi, phin, phip, n, p = self.densities(U)
+        e = self._edges(psi, phin, phip, n, p)
+        return e["Jn"], e["Jp"]
 
-    dJp_dpsi_e = -Q * mat.mu_p / h_e * (dp_dpsi[:-1] / 2.0) * dphip_e
-    dJp_dpsi_ep1 = -Q * mat.mu_p / h_e * (dp_dpsi[1:] / 2.0) * dphip_e
-    dJp_dphip_e = -Q * mat.mu_p / h_e * ((dp_dphip[:-1] / 2.0) * dphip_e - p_avg)
-    dJp_dphip_ep1 = -Q * mat.mu_p / h_e * ((dp_dphip[1:] / 2.0) * dphip_e + p_avg)
+    def edge_noise(self, U):
+        psi, phin, phip, n, p = self.densities(U)
+        return edge_current_noise(phin, phip, n, p, self.h, Q * self.mat.mu_n, Q * self.mat.mu_p)
 
-    dR_dn = (p * denom - num * mat.tau_p) / denom ** 2
-    dR_dp = (n * denom - num * mat.tau_n) / denom ** 2
+    def terminal_current(self, U):
+        """(J_rep, J_std, k_best) - total current read on its best-resolved edge."""
+        Jn, Jp = self.edge_currents(U)
+        J_rep, J_std, k, _ = resolved_current(Jn + Jp, self.edge_noise(U))
+        return J_rep, J_std, k
 
-    # --- avalanche: per-edge dG_ii/d(unknown at each of the edge's two
-    # nodes) - chain rule through BOTH the field E (via psi) and the
-    # currents Jn, Jp (via psi, phin, phip). sign(E)/sign(J) are
-    # piecewise-constant multipliers (exact, not smoothed - same house
-    # style as bernoulli's exact-with-floor approach rather than a
-    # smoothing hack); G_ii's own dependence on J is |J|, so d|J|/dJ=sign(J).
-    sgn_E = np.sign(E_e)
-    sgn_n = np.sign(Jn)
-    sgn_p = np.sign(Jp)
-    dEabs_e = sgn_E / h_e          # d(Eabs_e)/d(psi at LEFT node)
-    dEabs_ep1 = -sgn_E / h_e       # d(Eabs_e)/d(psi at RIGHT node)
+    def edge_current_and_grad(self, U, k):
+        """Total current on edge k and its gradient w.r.t. the 6 unknowns it
+        depends on - the arc-length constraint's current measure."""
+        N, mat, Vt, h = self.N, self.mat, self.mat.Vt, self.h[k]
+        psi, phin, phip, n, p = self.densities(U)
+        nn, pp = n[k:k + 2], p[k:k + 2]
+        dfn, dfp = phin[k + 1] - phin[k], phip[k + 1] - phip[k]
+        a, b = -Q * mat.mu_n / h, -Q * mat.mu_p / h
+        J = a * nn.mean() * dfn + b * pp.mean() * dfp
+        cols = np.array([k, k + 1, N + k, N + k + 1, 2 * N + k, 2 * N + k + 1])
+        vals = np.array([
+            a * nn[0] / Vt / 2 * dfn - b * pp[0] / Vt / 2 * dfp,
+            a * nn[1] / Vt / 2 * dfn - b * pp[1] / Vt / 2 * dfp,
+            a * (-nn[0] / Vt / 2 * dfn - nn.mean()),
+            a * (-nn[1] / Vt / 2 * dfn + nn.mean()),
+            b * (pp[0] / Vt / 2 * dfp - pp.mean()),
+            b * (pp[1] / Vt / 2 * dfp + pp.mean()),
+        ])
+        return J, cols, vals
 
-    dalpha_term = (dalpha_n_dE_e * np.abs(Jn) + dalpha_p_dE_e * np.abs(Jp)) / Q
-    dGii_e_dpsi_e = dalpha_term * dEabs_e \
-        + (alpha_n_e * sgn_n * dJn_dpsi_e + alpha_p_e * sgn_p * dJp_dpsi_e) / Q
-    dGii_e_dpsi_ep1 = dalpha_term * dEabs_ep1 \
-        + (alpha_n_e * sgn_n * dJn_dpsi_ep1 + alpha_p_e * sgn_p * dJp_dpsi_ep1) / Q
-    dGii_e_dphin_e = alpha_n_e * sgn_n * dJn_dphin_e / Q
-    dGii_e_dphin_ep1 = alpha_n_e * sgn_n * dJn_dphin_ep1 / Q
-    dGii_e_dphip_e = alpha_p_e * sgn_p * dJp_dphip_e / Q
-    dGii_e_dphip_ep1 = alpha_p_e * sgn_p * dJp_dphip_ep1 / Q
+    def step_clip(self, delta):
+        return uniform_step_clip(delta, self.N, max_psi=_MAX_PSI_STEP, max_qf=_MAX_QF_STEP)
 
-    Gii_node = _gii_node(Gii_e, hm, hp, cvol_i)
+    def trial_clip(self, delta):
+        return componentwise_step_clip(delta, self.N, max_psi=_MAX_PSI_STEP, Vt=self.mat.Vt)
 
-    Rn[1:-1] = ((Jn[1:] - Jn[:-1]) / cvol_i - Q * (R[1:-1] - Gii_node)) / cont_scale
-    Rp[1:-1] = ((Jp[1:] - Jp[:-1]) / cvol_i + Q * (R[1:-1] - Gii_node)) / cont_scale
-    F = np.concatenate([Rpsi, Rn, Rp])
+    def solve(self, U0, Va, tol=ROW_TOL, maxiter=50, verbose=False):
+        """Voltage-controlled solve at Va from U0. Returns (U, merit, it, converged)."""
+        return damped_newton(self.apply_bc(U0, Va),
+                             lambda U: self.residual_and_jacobian(U, Va),
+                             lambda U: self.residual(U, Va),
+                             step_clip=self.step_clip, trial_clip=self.trial_clip, tol=tol, maxiter=maxiter,
+                             verbose=verbose, label="Newton(avalanche)")
 
-    idx = np.arange(1, N - 1)
-    k = idx - 1
-    e_lo, e_hi = k, k + 1
-    cv = cvol_i
-    w_lo = hm / (2.0 * cv)   # box weight of edge e_lo onto node idx
-    w_hi = hp / (2.0 * cv)   # box weight of edge e_hi onto node idx
-
-    # dGii_node[idx]/d(u at idx-1, idx, idx+1) - node idx is the RIGHT node
-    # of edge e_lo and the LEFT node of edge e_hi (identical orientation
-    # convention already used for dJn_dpsi_e/_ep1 above, verified against
-    # how newton_solver_qf.py assembles its own flux-divergence Jacobian).
-    dGii_node_dpsi_m = w_lo * dGii_e_dpsi_e[e_lo]
-    dGii_node_dpsi_0 = w_lo * dGii_e_dpsi_ep1[e_lo] + w_hi * dGii_e_dpsi_e[e_hi]
-    dGii_node_dpsi_p = w_hi * dGii_e_dpsi_ep1[e_hi]
-
-    dGii_node_dphin_m = w_lo * dGii_e_dphin_e[e_lo]
-    dGii_node_dphin_0 = w_lo * dGii_e_dphin_ep1[e_lo] + w_hi * dGii_e_dphin_e[e_hi]
-    dGii_node_dphin_p = w_hi * dGii_e_dphin_ep1[e_hi]
-
-    dGii_node_dphip_m = w_lo * dGii_e_dphip_e[e_lo]
-    dGii_node_dphip_0 = w_lo * dGii_e_dphip_ep1[e_lo] + w_hi * dGii_e_dphip_e[e_hi]
-    dGii_node_dphip_p = w_hi * dGii_e_dphip_ep1[e_hi]
-    # --- end avalanche block ---
-
-    rows_list, cols_list, data_list = [], [], []
-
-    def add(r, c, v):
-        rows_list.append(r)
-        cols_list.append(c)
-        data_list.append(v)
-
-    # Poisson interior rows: linear in psi, and dF_psi/dphin = dF_psi/dn*dn/dphin etc.
-    add(idx, idx - 1, lap_m / poisson_scale)
-    add(idx, idx, -(lap_m + lap_p) / poisson_scale
-        - Q * (dn_dpsi[idx] - dp_dpsi[idx]) / poisson_scale)
-    add(idx, idx + 1, lap_p / poisson_scale)
-    add(idx, N + idx, (-Q / poisson_scale) * dn_dphin[idx])
-    add(idx, 2 * N + idx, (-Q / poisson_scale) * (-dp_dphip[idx]))
-
-    # Electron continuity interior rows: Rn = (Jn[e_hi]-Jn[e_lo])/cv -
-    # Q*(R-Gii_node), all /cont_scale. Gii_node (unlike Jn) is NOT divided
-    # by cv again here - it's already a per-control-volume rate (see
-    # _gii_node's own /(2*cvol_i)), entering the residual the exact same
-    # undivided way R already does. So every dGii_node_* term below is
-    # added as Q*dGii_node_*/cont_scale, with NO extra /cv - keep this
-    # separate from the /cv flux-derivative terms rather than merging them,
-    # to avoid silently double-dividing by cv (caught via a finite-difference
-    # Jacobian check that failed by almost exactly a 1/cv factor before this
-    # split). Note the electron row now has THREE phip columns (idx-1, idx,
-    # idx+1) where newton_solver_qf.py's electron row only had ONE (idx, via
-    # dR_dp) - this is the new n<->p coupling avalanche introduces.
-    r_n = N + idx
-    add(r_n, idx - 1, -dJn_dpsi_e[e_lo] / cv / cont_scale + Q * dGii_node_dpsi_m / cont_scale)
-    add(r_n, idx, (dJn_dpsi_e[e_hi] - dJn_dpsi_ep1[e_lo]) / cv / cont_scale
-        + Q * dGii_node_dpsi_0 / cont_scale
-        - Q * (dR_dn[idx] * dn_dpsi[idx] + dR_dp[idx] * dp_dpsi[idx]) / cont_scale)
-    add(r_n, idx + 1, dJn_dpsi_ep1[e_hi] / cv / cont_scale + Q * dGii_node_dpsi_p / cont_scale)
-    add(r_n, N + idx - 1, -dJn_dphin_e[e_lo] / cv / cont_scale + Q * dGii_node_dphin_m / cont_scale)
-    add(r_n, N + idx, (dJn_dphin_e[e_hi] - dJn_dphin_ep1[e_lo]) / cv / cont_scale
-        + Q * dGii_node_dphin_0 / cont_scale
-        - Q * dR_dn[idx] * dn_dphin[idx] / cont_scale)
-    add(r_n, N + idx + 1, dJn_dphin_ep1[e_hi] / cv / cont_scale + Q * dGii_node_dphin_p / cont_scale)
-    # avalanche-new: electron row's phip columns (previously only idx, via dR_dp)
-    add(r_n, 2 * N + idx - 1, Q * dGii_node_dphip_m / cont_scale)
-    add(r_n, 2 * N + idx, Q * dGii_node_dphip_0 / cont_scale
-        - Q * dR_dp[idx] * dp_dphip[idx] / cont_scale)
-    add(r_n, 2 * N + idx + 1, Q * dGii_node_dphip_p / cont_scale)
-
-    # Hole continuity interior rows: Rp = (Jp[e_hi]-Jp[e_lo])/cv +
-    # Q*(R-Gii_node), so the avalanche contribution has the OPPOSITE sign to
-    # the electron row's (-Q*dGii_node/cont_scale, no /cv - same reasoning
-    # as the electron row above). New phin columns (previously only idx, via
-    # dR_dn) mirror the electron row's new phip columns.
-    r_p = 2 * N + idx
-    add(r_p, idx - 1, -dJp_dpsi_e[e_lo] / cv / cont_scale - Q * dGii_node_dpsi_m / cont_scale)
-    add(r_p, idx, (dJp_dpsi_e[e_hi] - dJp_dpsi_ep1[e_lo]) / cv / cont_scale
-        - Q * dGii_node_dpsi_0 / cont_scale
-        + Q * (dR_dn[idx] * dn_dpsi[idx] + dR_dp[idx] * dp_dpsi[idx]) / cont_scale)
-    add(r_p, idx + 1, dJp_dpsi_ep1[e_hi] / cv / cont_scale - Q * dGii_node_dpsi_p / cont_scale)
-    add(r_p, 2 * N + idx - 1, -dJp_dphip_e[e_lo] / cv / cont_scale - Q * dGii_node_dphip_m / cont_scale)
-    add(r_p, 2 * N + idx, (dJp_dphip_e[e_hi] - dJp_dphip_ep1[e_lo]) / cv / cont_scale
-        - Q * dGii_node_dphip_0 / cont_scale
-        + Q * dR_dp[idx] * dp_dphip[idx] / cont_scale)
-    add(r_p, 2 * N + idx + 1, dJp_dphip_ep1[e_hi] / cv / cont_scale - Q * dGii_node_dphip_p / cont_scale)
-    # avalanche-new: hole row's phin columns (previously only idx, via dR_dn)
-    add(r_p, N + idx - 1, -Q * dGii_node_dphin_m / cont_scale)
-    add(r_p, N + idx, Q * dR_dn[idx] * dn_dphin[idx] / cont_scale
-        - Q * dGii_node_dphin_0 / cont_scale)
-    add(r_p, N + idx + 1, -Q * dGii_node_dphin_p / cont_scale)
-
-    interior_rows = np.concatenate(rows_list)
-    interior_cols = np.concatenate(cols_list)
-    interior_data = np.concatenate(data_list)
-
-    # Dirichlet rows - same pivoting-safety scaling as newton_solver_qf.py.
-    dirichlet_idx = [0, N - 1, N + 0, N + N - 1, 2 * N + 0, 2 * N + N - 1]
-    dirichlet_rows, dirichlet_cols, dirichlet_data = [], [], []
-    for i in dirichlet_idx:
-        col_mask = interior_cols == i
-        local_max = np.max(np.abs(interior_data[col_mask])) if np.any(col_mask) else 0.0
-        dirichlet_rows.append(i)
-        dirichlet_cols.append(i)
-        dirichlet_data.append(max(1.0, local_max))
-
-    rows = np.concatenate([interior_rows, dirichlet_rows])
-    cols = np.concatenate([interior_cols, dirichlet_cols])
-    data = np.concatenate([interior_data, dirichlet_data])
-    J = sp.coo_matrix((data, (rows, cols)), shape=(3 * N, 3 * N)).tocsc()
-    return F, J
-
-
-# Same rationale/value as newton_solver_qf.py's _MAX_QF_STEP: a near-zero
-# carrier density leaves its quasi-Fermi potential almost unconstrained by
-# the residual, so the raw (pre-damping) Newton correction must be capped
-# regardless of which damping strategy scales it afterward.
-_MAX_QF_STEP = 5.0
+    def result_dict(self, U, it, converged):
+        N = self.N
+        psi, phin, phip, n, p = self.densities(U)
+        Jn, Jp = self.edge_currents(U)
+        J_rep, J_std, _ = self.terminal_current(U)
+        return {"psi": psi.copy(), "n": n, "p": p, "phin": phin.copy(), "phip": phip.copy(),
+                "Jn": Jn, "Jp": Jp, "Jtot": Jn + Jp, "iters": it,
+                "J_mean": J_rep, "J_std": J_std, "converged": converged}
 
 
 def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                          psi_init=None, phin_init=None, phip_init=None,
-                         f_tol=1e-9, maxiter=50, verbose=False,
-                         ii_model: AvalancheModel = None, damping="line_search"):
-    """Same signature/return shape as newton_solver_qf.newton_gummel_solve,
-    with two additions: an impact-ionization generation term in both
-    continuity equations (ii_model, defaulting to the standard Si
-    van Overstraeten-de Man model - this solver's whole purpose is avalanche,
-    so it is always modeled when this solver is used), and a choice of
-    damping strategy: "bank_rose" (Bank & Rose 1981 Algorithm Global,
-    bank_rose_damping.py - implemented and validated per the user's request,
-    see that module) or "line_search" (default here - newton_solver_qf.py's
-    plain backtracking).
+                         f_tol=ROW_TOL, maxiter=50, verbose=False,
+                         ii_model: AvalancheModel = None, driving_force="hybrid",
+                         ref_density_cm3=DEFAULT_REF_DENSITY_CM3):
+    """Voltage-controlled avalanche solve at one bias; same signature/return
+    shape as newton_solver_qf.newton_gummel_solve (plus "converged").
 
-    WHY "line_search" IS THE DEFAULT (not "bank_rose", despite
-    bank_rose_damping.py's own toy-problem validation showing it correctly
-    implements the paper's algorithm): empirically, on this device's
-    strongly-coupled avalanche feedback system, Algorithm Global's K
-    parameter persists and accumulates ACROSS outer Newton iterations by
-    design (K/10 on acceptance, 10*K on rejection - see that module's
-    docstring), and its eq-3.1 global sufficient-decrease test is strict
-    enough that once K climbs high early in a bias-point solve (from just a
-    handful of rejections, easy to trigger when the avalanche generation
-    term's curvature varies enormously across the coupled 3N-dimensional
-    system) it can take many outer iterations to relax back down - in
-    side-by-side sweeps of this device, plain backtracking stayed
-    well-converged (self-consistency O(1-10)) roughly twice as far into
-    reverse bias before both strategies hit the same underlying wall (see
-    below) as Bank-Rose did. Bank-Rose remains fully available
-    (damping="bank_rose") for devices where a residual-only backtracking
-    test proves inadequate, or for direct comparison.
+    Starting point: the previous bias point's solution when given (normal
+    continuation); otherwise - or if that attempt does not converge - the
+    converged NO-avalanche QF solution at this same Va (get the transport
+    right first, then switch on the generation feedback; a cold Gummel
+    start's few-mV psi noise on a sub-nm junction mesh is an unphysical
+    local field that alpha() amplifies enormously).
 
-    BOTH damping strategies eventually hit the same wall at a device- and
-    mesh-dependent bias, past which every subsequent bias point in a
-    continuation sweep returns an unchanged, non-physical value no matter
-    which damping is used. This is NOT a damping-strategy bug: it is the
-    well-known device-simulation limitation that a VOLTAGE-controlled bias
-    sweep cannot follow the I(Va) curve past the point where dI/dVa formally
-    diverges (avalanche breakdown's own vertical/S-shaped branch) - only a
-    CURRENT-controlled sweep (or a ballast resistor in series) can continue
-    past it, and neither is implemented here (out of scope - see
-    plans/avalanche_breakdown_plan.md). input_diode_breakdown.yaml's reverse
-    sweep is deliberately kept short of that wall for this device/mesh."""
-    if ii_model is None:
-        ii_model = AvalancheModel.si_von_overstraeten_de_man()
+    Near breakdown the I(Va) curve is nearly vertical and a voltage-
+    controlled step can overshoot it - use main_avalanche.py's arc-length
+    trace (core/arclength.py) to follow the curve through the knee."""
+    prob = AvalancheProblem(x, Cdop, mat, psi_eq, ii_model, driving_force, ref_density_cm3)
 
-    N = len(x)
-    n_bc0, p_bc0 = contact_values(mat, Cdop[0])
-    n_bcL, p_bcL = contact_values(mat, Cdop[-1])
-    Vt = mat.Vt
-
-    psi_bc = np.array([psi_eq[0] + Va, psi_eq[-1]])
-    phin_bc = np.array([psi_bc[0] - Vt * np.log(n_bc0 / mat.ni),
-                         psi_bc[-1] - Vt * np.log(n_bcL / mat.ni)])
-    phip_bc = np.array([psi_bc[0] + Vt * np.log(p_bc0 / mat.ni),
-                         psi_bc[-1] + Vt * np.log(p_bcL / mat.ni)])
-
-    h_typ = np.min(np.diff(x))
-    poisson_scale = _poisson_scale(mat, h_typ)
-    cont_scale = _continuity_scale(mat, h_typ)
-    stall_res_threshold = 1.0
-
-    def _gummel_start():
-        # A plain Gummel warm start (as newton_solver_qf.py uses for its own
-        # cold start) is NOT good enough here: it has no notion of the
-        # avalanche generation term at all, and this device's junction mesh
-        # is extremely fine (h_min tied to a degenerately-doped side's
-        # Debye length, sub-angstrom near x=0) - a few mV of ordinary Gummel
-        # iteration noise translates, over that tiny h, into a wildly
-        # unphysical local field, which the exponential alpha(E) model then
-        # amplifies into an enormous, spurious G_ii before Newton has even
-        # had a chance to correct psi. That drove the very first
-        # avalanche-solver Newton step's residual to ~1e10 and the Bank-Rose
-        # damping straight to its K ceiling with no way to recover (caught
-        # via a near-equilibrium Va=-0.05V test point stalling identically
-        # to deep reverse bias, which is not physically sensible - a mild
-        # bias should behave almost exactly like the no-avalanche solve).
-        # Fix: first converge the SAME bias point with the underlying
-        # (non-avalanche) QF transport solve - a clean, physically accurate
-        # psi/phin/phip with no impact-ionization feedback yet - and only
-        # then hand that off as the avalanche solve's starting point. This
-        # mirrors how real device simulators stage avalanche: get a good
-        # transport solution first, then turn on generation feedback.
+    def from_qf():
         from core.newton_solver_qf import newton_gummel_solve as qf_solve
         base = qf_solve(x, Cdop, mat, Va, psi_eq, n_eq, p_eq, maxiter=maxiter)
-        return base["psi"].copy(), base["phin"].copy(), base["phip"].copy()
+        return np.concatenate([base["psi"], base["phin"], base["phip"]])
 
-    _MAX_PSI_STEP = 1.0
-
-    def _clip(delta):
-        # Cap the step's WORST-OFFENDING component (psi against
-        # _MAX_PSI_STEP, phin/phip against _MAX_QF_STEP) by rescaling the
-        # ENTIRE delta vector by one global scalar, rather than clipping
-        # each component independently.
-        #
-        # Component-wise clipping was the ORIGINAL implementation here, and
-        # it is the actual root cause of the isolated wrong-branch points
-        # this device's sweep used to show (see main_avalanche.py's git
-        # history / DEVELOPMENT_LOG.md for the symptom: isolated bias
-        # points landing exactly on the no-avalanche current, surrounded by
-        # correctly-converging neighbors). The mechanism: J(U)*delta=-F(U)
-        # only guarantees delta is a DESCENT direction for ||F||^2 as a
-        # whole, undamped vector - that guarantee (what makes backtracking
-        # line search work at all) holds for any UNIFORM scalar multiple of
-        # delta, but not for a vector that clips some components far more
-        # than others, which is a DIFFERENT direction with no such
-        # guarantee. Near breakdown, the raw Newton correction can have
-        # components spanning many orders of magnitude (a near-zero-density
-        # node's quasi-Fermi potential barely constrained by the residual,
-        # next to a node with a huge, well-determined correction) - exactly
-        # where component-wise clipping distorts the direction the most.
-        # Caught by instrumenting a specific failing bias point: the
-        # continuation attempt's first Newton step (undamped, step=1) made
-        # a huge, correct-looking residual improvement, but the very next
-        # iteration's clipped direction was not a descent direction at all
-        # (line search had to shrink the step by a factor of ~2^-20, i.e.
-        # effectively zero, before finding ANY decrease) - the classic
-        # signature of a corrupted search direction, not genuine
-        # ill-conditioning. That stall then triggered this solver's
-        # equilibrium-reset fallback (_safe_gummel_retry), which - starting
-        # cold with no avalanche generation feedback at all - converges
-        # cleanly to the trivial, no-generation root instead, and gets
-        # accepted since it scores a lower raw residual (see
-        # newton_gummel_solve's fallback-selection logic below): a
-        # perfectly self-consistent but PHYSICALLY WRONG single bias point,
-        # which is what showed up as a kink in the I(Va) curve.
-        #
-        # A uniform rescale preserves the true Newton direction exactly
-        # (only shortens it), which is exactly what Bank & Rose's own
-        # scalar damping t_k already assumes step_clip_fn provides (see
-        # bank_rose_damping.py) - this makes both damping strategies here
-        # consistent with that same assumption instead of just the
-        # Bank-Rose path benefiting from it.
-        max_psi = np.max(np.abs(delta[:N])) if N else 0.0
-        max_qf = np.max(np.abs(delta[N:3 * N])) if 2 * N else 0.0
-        scale = max(max_psi / _MAX_PSI_STEP, max_qf / _MAX_QF_STEP, 1.0)
-        return delta / scale if scale > 1.0 else delta
-
-    def _run_newton(psi0, phin0, phip0):
-        psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
-        psi0[0], psi0[-1] = psi_bc
-        phin0[0], phin0[-1] = phin_bc
-        phip0[0], phip0[-1] = phip_bc
-        U0 = np.concatenate([psi0, phin0, phip0])
-
-        F_fn = lambda U: _residual_only(U, x, Cdop, mat, ii_model, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
-        FJ_fn = lambda U: _residual_and_jacobian(U, x, Cdop, mat, ii_model, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
-
-        if damping == "bank_rose":
-            return bank_rose_solve(U0, FJ_fn, F_fn, f_tol=f_tol, maxiter=maxiter,
-                                    step_clip_fn=_clip, verbose=verbose)
-
-        if damping != "line_search":
-            raise ValueError(f"damping must be 'bank_rose' or 'line_search', got {damping!r}")
-
-        # Fallback: newton_solver_qf.py's plain backtracking line search,
-        # for direct comparison against the Bank-Rose path.
-        U = U0
-        F, J = FJ_fn(U)
-        res_norm = np.max(np.abs(F))
-        it = 0
-        tiny_step_streak = 0
-        for it in range(1, maxiter + 1):
-            if res_norm < f_tol:
-                break
-            delta = _clip(equilibrated_spsolve(J, -F))
-            step = 1.0
-            for _ in range(20):
-                U_try = U + step * delta
-                F_try = F_fn(U_try)
-                res_try = np.max(np.abs(F_try))
-                if np.isfinite(res_try) and res_try < res_norm * (1 - 1e-4 * step):
-                    break
-                step *= 0.5
-            else:
-                U_try, res_try = U, res_norm
-            U = U_try
-            F, J = FJ_fn(U)
-            res_norm = np.max(np.abs(F))
-            if verbose:
-                print(f"  Newton(avalanche,line_search) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}")
-            tiny_step_streak = tiny_step_streak + 1 if step < 1e-4 else 0
-            if tiny_step_streak >= 2:
-                break
-        return U, res_norm, it, None
-
-    # NOTE on an approach that was tried and reverted: picking between a
-    # continuation candidate and a fresh-start/ramped candidate by
-    # comparing SELF-CONSISTENCY (whichever scored lower) sounds appealing
-    # but empirically backfired - a spurious high-current root can score a
-    # deceptively OK self-consistency ratio (order 1-10, not obviously
-    # pathological), so the "pick the better of two" comparison sometimes
-    # PREFERRED the wrong branch over the correct low-current one. The psi
-    # step clip in _clip above is what actually fixes the root cause (see
-    # its comment); trust the direct continuation solve whenever Newton
-    # itself reports convergence, exactly like every other solver in this
-    # codebase, and only fall back to a fresh start when it doesn't.
-    def _safe_gummel_retry():
-        """The fresh-start fallback's own inner solve (newton_solver_qf.py,
-        unmodified - it has no reason to expect the deep-reverse-bias
-        regime avalanche pushes into) can itself raise, not just warn: very
-        deep bias makes exp((psi-phin)/Vt) overflow, which can hand
-        spsolve a Jacobian with NaN/Inf entries and a BLAS/LAPACK error
-        instead of the graceful "did not converge" warning every other
-        failure mode here produces. Treat that the same as any other
-        failed retry (worse than what we already have) rather than letting
-        it crash the whole sweep."""
-        try:
-            return _run_newton(*_gummel_start())
-        except Exception as e:
-            if verbose:
-                print(f"  Gummel-restart fallback itself raised ({e!r}) - ignoring, keeping prior candidate")
-            return None, np.inf, 0, None
-
-    # An adaptive bias-step subdivision scheme (retry a too-large Va jump by
-    # first converging an intermediate half-step, recursing further if
-    # needed) was tried here and REMOVED after measurement: on this
-    # device's actual failures, the very first Newton iteration at EVERY
-    # recursion depth - down to 1/16th of the original step - achieved
-    # ZERO residual improvement at any step size, showing the blocker
-    # isn't the SIZE of the Va jump (which subdivision targets) but a
-    # local pathology at that specific state that persists regardless of
-    # how small a step is taken. Subdivision therefore bought nothing here
-    # while multiplying runtime severalfold on every failing point
-    # (up to 5 full nested Newton solves instead of 1). The mechanism is
-    # still worth keeping in mind for a genuinely different failure mode -
-    # a user-supplied Va_list with an actually oversized jump between
-    # consecutive points (e.g. a hand-edited sweep skipping straight from
-    # -1V to -13V) - just not for what's failing in this device/mesh
-    # today; see DEVELOPMENT_LOG.md if resurrecting it.
-    if psi_init is None:
-        U, res_norm, it, _ = _safe_gummel_retry()
-    else:
-        try:
-            U, res_norm, it, _ = _run_newton(psi_init, phin_init, phip_init)
-        except Exception:
-            U, res_norm, it = None, np.inf, 0
-        if res_norm > stall_res_threshold:
-            U_retry, res_retry, it_retry, _ = _safe_gummel_retry()
-            if res_retry < res_norm:
-                U, res_norm, it = U_retry, res_retry, it_retry
-
-    if U is None:
-        # Both the continuation attempt and the fresh-start retry raised
-        # (see _safe_gummel_retry) - fall back to the last known-good
-        # state (psi_init if we have one, else equilibrium) rather than
-        # crash the sweep. This point is unusable and callers MUST check
-        # J_std/J_mean (reported as inf below) before trusting it.
-        U = np.concatenate([
-            psi_init if psi_init is not None else psi_eq,
-            phin_init if phin_init is not None else np.zeros(N),
-            phip_init if phip_init is not None else np.zeros(N)])
-        res_norm = np.inf
-
-    if res_norm > stall_res_threshold:
+    converged = False
+    if psi_init is not None:
+        U, merit, it, converged = prob.solve(np.concatenate([psi_init, phin_init, phip_init]),
+                                             Va, f_tol, maxiter, verbose)
+    if not converged:
+        U2, merit2, it2, conv2 = prob.solve(from_qf(), Va, f_tol, maxiter, verbose)
+        if psi_init is None or conv2 or merit2 < merit:
+            U, merit, it, converged = U2, merit2, it2, conv2
+    if not converged:
         warnings.warn(
-            f"Newton(avalanche) solve did not converge at Va={Va} V "
-            f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a Gummel-restart retry - "
-            "check this point's self-consistency (J_std/J_mean) before trusting it.")
+            f"Newton(avalanche) solve did not converge at Va={Va} V (max|F/d|={merit:.3e} V "
+            f"at iteration {it}) - check this point's self-consistency (J_std/J_mean).")
+    return prob.result_dict(U, it, converged)
 
-    psi, phin, phip = _unpack(U, N)
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
 
-    (_, _, _, Jn, Jp, _, _, _, _, _, _, _, _, _, _) = \
-        _edge_quantities_avalanche(psi, phin, phip, n, p, x, mat, ii_model)
-    Jtot = Jn + Jp
-    J_interior = Jtot[1:-1] if len(Jtot) > 2 else Jtot
-    J_rep = float(np.median(J_interior))
+def trace_breakdown(x, Cdop, mat: Material, ii_model: AvalancheModel = None,
+                    driving_force="hybrid", ref_density_cm3=DEFAULT_REF_DENSITY_CM3,
+                    seed_V=-1.0, J_stop_A_cm2=1e3, V_limit=None, ds_max=1.0,
+                    max_points=500, verbose=False):
+    """Trace the reverse-bias I-V curve from near equilibrium, through the
+    avalanche knee, up to |J| = J_stop_A_cm2 (A/cm^2).
 
-    return {
-        "psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
-        "Jn": Jn, "Jp": Jp, "Jtot": Jtot, "iters": it,
-        "J_mean": J_rep, "J_std": float(np.std(J_interior)),
-    }
+    Voltage-controlled steps (bisected on failure) walk from 0 V to seed_V;
+    core/arclength.trace_iv then follows the curve in the (Va, ln|J|) plane,
+    which needs no bias schedule and no knowledge of where breakdown is.
+
+    Returns dict(Va, J, iters, U, status, rejections, problem, psi_eq,
+    n_eq, p_eq, seed_Va, seed_J) - Va/J cover the seeds plus the trace."""
+    from core.solver import solve_equilibrium
+    from core.arclength import trace_iv
+
+    psi_eq, n_eq, p_eq, _ = solve_equilibrium(x, Cdop, mat)
+    prob = AvalancheProblem(x, Cdop, mat, psi_eq, ii_model, driving_force, ref_density_cm3)
+    Vt = mat.Vt
+    U = np.concatenate([psi_eq, psi_eq - Vt * np.log(n_eq / mat.ni), psi_eq + Vt * np.log(p_eq / mat.ni)])
+
+    seeds, V, dV = [], 0.0, 0.1
+    while V > seed_V + 1e-12:
+        V_try = max(V - dV, seed_V)
+        U_try, merit, it, ok = prob.solve(U, V_try, verbose=verbose)
+        if not ok:
+            dV *= 0.5
+            if dV < 1e-4:
+                raise RuntimeError(f"trace_breakdown: could not seed the trace near Va={V_try:.4f} V "
+                                   f"(max|F/d|={merit:.2e})")
+            continue
+        U, V = U_try, V_try
+        seeds.append((U.copy(), V))
+        dV = min(1.5 * dV, 0.25)
+
+    tr = trace_iv(prob.residual_and_jacobian, prob.residual, lambda U, Va: prob.dF_dVa(),
+                  prob.edge_current_and_grad, lambda U: int(np.argmin(prob.edge_noise(U))),
+                  seeds[-2:], step_clip=prob.step_clip, trial_clip=prob.trial_clip, ds_max=ds_max, J_stop=J_stop_A_cm2,
+                  V_limit=V_limit, max_points=max_points, verbose=verbose)
+
+    seed_Va = np.array([s[1] for s in seeds])
+    seed_J = np.array([prob.terminal_current(s[0])[0] for s in seeds])
+    return dict(Va=np.concatenate([seed_Va, tr["Va"]]), J=np.concatenate([seed_J, tr["J"]]),
+                iters=tr["iters"], U=[s[0] for s in seeds] + tr["U"], status=tr["status"],
+                rejections=tr["rejections"], problem=prob, psi_eq=psi_eq, n_eq=n_eq, p_eq=p_eq,
+                seed_Va=seed_Va, seed_J=seed_J)

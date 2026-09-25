@@ -61,15 +61,19 @@ open for the general-PDE direction below.
 
 `avalanche/`'s impact-ionization physics is numerically finicky (its
 generation rate depends on `|Jn|`, `|Jp|` — the very quantities the
-continuity equations solve for — creating direct positive feedback that
-needs Bank-Rose damping the other solvers don't). It is not expected to
+continuity equations solve for — a direct positive feedback that makes the
+I-V near-vertical at breakdown, traced with arc-length continuation
+(`core/arclength.py`) rather than a voltage sweep). It is not expected to
 ever run combined with TAT/BTBT or other generation mechanisms in the
 same solve, in 1D or later in 2D/3D. `avalanche/newton_solver_avalanche.py`
 deliberately keeps its own private copies of the QF-solver building
 blocks rather than importing `core/newton_solver_qf.py`'s shared ones —
 this is intentional, not an oversight, and should stay that way. Do not
 propose or build a shared multi-mechanism solver that merges avalanche
-with anything else.
+with anything else. (Solver-agnostic numerics with no physics in them —
+`core/newton_numerics.py`, `core/jacobian_scaling.py`, `core/arclength.py`
+— are shared by every 1D solver, avalanche included; the rule is about
+physics and QF building blocks, not generic Newton/continuation code.)
 
 (`tat/newton_solver_tat.py` already sums Kane BTBT + one trap-assisted
 model — Hurkx or Schenk — within a single solve. That composability is

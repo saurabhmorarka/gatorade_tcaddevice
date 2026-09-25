@@ -50,12 +50,12 @@ import warnings
 
 import numpy as np
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 
 from core.params import Q, Material
 from core import physics as ph
 from core.materials import MaterialField
-from core.jacobian_scaling import equilibrated_spsolve
+from core.newton_numerics import (ROW_TOL, damped_newton, uniform_step_clip, componentwise_step_clip,
+                                  edge_current_noise, resolved_current)
 from core.solver import contact_values
 
 # Public building blocks shared with other QF-based solvers (currently
@@ -286,7 +286,7 @@ MAX_QF_STEP = 5.0
 
 def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                          psi_init=None, phin_init=None, phip_init=None,
-                         f_tol=1e-9, maxiter=50, verbose=False):
+                         f_tol=ROW_TOL, maxiter=50, verbose=False):
     """Same signature/return shape as solver.gummel_solve and
     newton_solver.newton_gummel_solve, but solves for quasi-Fermi potentials
     (phin, phip) instead of raw densities - see module docstring.
@@ -319,7 +319,6 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
     h_typ = np.min(np.diff(x))
     poisson_scale = poisson_row_scale(mf, h_typ)
     cont_scale = continuity_row_scale(mf, h_typ)
-    stall_res_threshold = 1.0
 
     def _gummel_start():
         from core.solver import gummel_solve
@@ -330,106 +329,59 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
 
     def _run_newton(psi0, phin0, phip0):
         """One full Newton attempt from a given starting point. Returns
-        (U, res_norm, it)."""
+        (U, merit, it, converged) - see core/newton_numerics.py for the
+        row-normalized merit (and why the old raw-residual max-norm test
+        stalled on roundoff in heavily doped majority-carrier rows)."""
         psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
         psi0[0], psi0[-1] = psi_bc
         phin0[0], phin0[-1] = phin_bc
         phip0[0], phip0[-1] = phip_bc
-
-        U = np.concatenate([psi0, phin0, phip0])
-        F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
-        res_norm = np.max(np.abs(F))
-
-        it = 0
-        tiny_step_streak = 0
-        for it in range(1, maxiter + 1):
-            if res_norm < f_tol:
-                break
-            # Ruiz row/column equilibration before the sparse solve (see
-            # core/jacobian_scaling.py and tat/newton_solver_tat.py's own
-            # use of it) - mathematically exact/recoverable, just better-
-            # conditioned arithmetic. Needed for a real heterojunction: a
-            # material with a substantially different ni (e.g. SiGe's ~150x
-            # larger ni than Si) makes the Jacobian's dJn/dphin ~ -Q*mu*n
-            # entries span many more orders of magnitude across the device
-            # than any homojunction case does, stalling a plain spsolve's
-            # line search well short of convergence (confirmed directly: an
-            # un-equilibrated SiGe/Si solve stalled at |F|~15.7 with the
-            # step size collapsed to ~1e-6 and no further residual
-            # reduction found in 20 halvings - not a bad-Jacobian bug, an
-            # FD check at that exact stalled point matched to ~1e-7 relative
-            # error; equilibration alone resolves it). Applied
-            # unconditionally (not just when a heterojunction is detected)
-            # keeps one solve path, matching newton_solver_tat.py's own
-            # choice for the same reason.
-            delta = equilibrated_spsolve(J, -F)
-            # Cap the raw phin/phip step: wherever a carrier's density is
-            # near zero (deep in the bulk on the wrong side of the
-            # junction, e.g. electrons on the p-side), that quasi-Fermi
-            # potential barely affects the residual (dn/dphin = n/Vt approx
-            # 0 there) and is nearly unconstrained by the physics - Newton
-            # can then send it hundreds of volts off in one step without
-            # the residual objecting (caught via a warm-start-from-
-            # equilibrium case where phip swung to -612V for exactly this
-            # reason, well past where a physically sane potential should
-            # ever be at room temperature). A few volts is already a very
-            # generous cap for this project's bias ranges.
-            delta[N:3 * N] = np.clip(delta[N:3 * N], -MAX_QF_STEP, MAX_QF_STEP)
-
-            step = 1.0
-            for _ in range(20):
-                U_try = U + step * delta
-                F_try = _residual_only(U_try, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
-                res_try = np.max(np.abs(F_try))
-                if np.isfinite(res_try) and res_try < res_norm * (1 - 1e-4 * step):
-                    break
-                step *= 0.5
-            else:
-                U_try, res_try = U, res_norm
-
-            U = U_try
-            F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
-            res_norm = np.max(np.abs(F))
-            if verbose:
-                print(f"  Newton(QF) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}")
-
-            tiny_step_streak = tiny_step_streak + 1 if step < 1e-4 else 0
-            if tiny_step_streak >= 2:
-                break
-        return U, res_norm, it
+        U0 = np.concatenate([psi0, phin0, phip0])
+        # Ruiz row/column equilibration happens inside damped_newton's
+        # linear solve (core/jacobian_scaling.py) - needed for real
+        # heterojunctions, where a substantially different ni (e.g. SiGe's
+        # ~150x larger ni) spreads the dJn/dphin entries over many more
+        # orders of magnitude than any homojunction.
+        #
+        # The step is shortened by ONE scalar so no phin/phip entry moves
+        # more than MAX_QF_STEP: wherever a carrier's density is near zero
+        # (electrons deep in the p-side bulk, say) its quasi-Fermi potential
+        # barely affects the residual and a raw step could send it hundreds
+        # of volts off (seen: phip swinging to -612V from an equilibrium
+        # warm start). A uniform rescale keeps the Newton direction, which
+        # the line search's descent guarantee relies on.
+        return damped_newton(
+            U0,
+            lambda U: _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale),
+            lambda U: _residual_only(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale),
+            step_clip=lambda d: uniform_step_clip(d, N, max_psi=1.0, max_qf=MAX_QF_STEP),
+            trial_clip=lambda d: componentwise_step_clip(d, N, max_psi=1.0, Vt=Vt),
+            tol=f_tol, maxiter=maxiter, verbose=verbose, label="Newton(QF)")
 
     if psi_init is None:
-        U, res_norm, it = _run_newton(*_gummel_start())
+        U, merit, it, converged = _run_newton(*_gummel_start())
     else:
         # phin_init/phip_init are already this solver's own native unknowns
         # (or, if warm-starting from the raw-density Newton solver, are
         # already provided in exactly this phin/phip convention too - both
         # solvers derive/use the identical phin = psi - Vt*ln(n/ni) relation).
-        U, res_norm, it = _run_newton(psi_init, phin_init, phip_init)
-        if res_norm > stall_res_threshold:
+        U, merit, it, converged = _run_newton(psi_init, phin_init, phip_init)
+        if not converged:
             # A warm start can inherit a structurally degenerate Jacobian
             # from its source point - most notably right after equilibrium
             # (Va=0), where phin=phip=psi_eq is exactly FLAT across the
-            # whole interior, making every edge's flux-vs-psi Jacobian
-            # coupling (proportional to that edge's own delta-phin, which is
-            # then exactly zero) vanish identically, not just become small.
-            # Warm-starting the next bias point straight from that untouched
-            # flat interior inherits the same near-singular structure and
-            # the line search can get stuck unable to escape it (caught via
-            # exactly this failure at the first forward point after Va=0 in
-            # a 1e21-doping sweep). Retry from a fresh Gummel-derived start
-            # (the same recovery already used for the sweep's very first,
-            # cold-start point) rather than accepting a stuck, wrong answer -
-            # Gummel's own decoupled iteration doesn't share this failure
-            # mode, so it reliably breaks the exact symmetry.
-            U_retry, res_retry, it_retry = _run_newton(*_gummel_start())
-            if res_retry < res_norm:
-                U, res_norm, it = U_retry, res_retry, it_retry
+            # interior, making every edge's flux-vs-psi coupling (which is
+            # proportional to that edge's own delta-phin) vanish identically.
+            # Retry from a fresh Gummel-derived start, whose decoupled
+            # iteration doesn't share that failure mode.
+            U_r, merit_r, it_r, conv_r = _run_newton(*_gummel_start())
+            if conv_r or merit_r < merit:
+                U, merit, it, converged = U_r, merit_r, it_r, conv_r
 
-    if res_norm > stall_res_threshold:
+    if not converged:
         warnings.warn(
             f"Newton(QF) solve did not converge at Va={Va} V "
-            f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a Gummel-restart retry - "
+            f"(max|F/d|={merit:.3e} V at iteration {it}) even after a Gummel-restart retry - "
             "check this point's self-consistency (J_std/J_mean) before trusting it.")
 
     psi, phin, phip = unpack_qf(U, N)
@@ -437,16 +389,17 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
     p = mf.ni_arr * np.exp((phip - psi - mf.delta_Ei_arr) / Vt)
 
     # Report currents from THIS solver's own plain-gradient flux (not
-    # physics.edge_currents' Scharfetter-Gummel formula) - the two
-    # discretizations agree closely once converged, but using SG here would
-    # silently mix formulations in the reported self-consistency check.
-    _, _, _, Jn, Jp, _, _, _ = _edge_quantities(psi, phin, phip, n, p, x, mf)
+    # physics.edge_currents' Scharfetter-Gummel formula), and read the
+    # terminal current only where it is numerically resolved - in a heavily
+    # doped majority region the edge current is roundoff (see
+    # core/newton_numerics.resolved_current).
+    h_e, _, _, Jn, Jp, _, _, _ = _edge_quantities(psi, phin, phip, n, p, x, mf)
     Jtot = Jn + Jp
-    J_interior = Jtot[1:-1] if len(Jtot) > 2 else Jtot
-    J_rep = float(np.median(J_interior))
+    noise = edge_current_noise(phin, phip, n, p, h_e, Q * mf.mu_n_edge, Q * mf.mu_p_edge)
+    J_rep, J_std, _, _ = resolved_current(Jtot, noise)
 
     return {
         "psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
         "Jn": Jn, "Jp": Jp, "Jtot": Jtot, "iters": it,
-        "J_mean": J_rep, "J_std": float(np.std(J_interior)),
+        "J_mean": J_rep, "J_std": J_std, "converged": converged,
     }

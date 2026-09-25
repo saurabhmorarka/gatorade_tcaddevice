@@ -80,7 +80,7 @@ python3 main.py                  # or any other script below
 
 That's the only setup step - every script in this repo (`main.py`,
 `mos/mos_main.py`, `avalanche/main_avalanche.py`, `mos/mos_poly_sweep.py`,
-`avalanche/avalanche_diagnostics.py`, `testsuite/test_examples.py`, ...) is
+`avalanche/robustness_matrix.py`, `testsuite/test_examples.py`, ...) is
 then runnable from the repo root, either directly with `python3
 <path>/<script>.py` or (for anything inside the `core`/`mos`/`avalanche`
 packages) as a module with `python3 -m <package>.<script>`, e.g. `python3
@@ -179,6 +179,31 @@ schema (`doping`, `mesh`, `voltage_sweep`, `output` sections) even though
 the tools don't yet share a single "device stack" description - see
 `mesh.py`'s module docstring for what they do share (the mesh engine
 itself and the doping-profile machinery in `doping_profiles.py`).
+
+## Avalanche breakdown (`avalanche/`, `configs/input_diode_breakdown.yaml`)
+
+```bash
+python3 -m avalanche.main_avalanche        # 1e19/1e17 diode traced through breakdown, ~2 s
+python3 -m avalanche.robustness_matrix     # 8 devices x 4 meshes, pass/fail per run, ~1 min
+```
+
+Impact ionization (van Overstraeten-de Man) in both continuity equations,
+driven by a density-weighted blend of the quasi-Fermi gradient and the
+electric field. The reverse I-V is traced **through** the near-vertical
+breakdown knee with arc-length continuation in the (Va, ln|J|) plane
+(`core/arclength.py`), so there is no bias schedule to tune. It holds up
+from 1e17 to 1e21 doping on either side, with flat, Gaussian or graded
+profiles and meshes as coarse as ~50 nodes. `main_avalanche.py` checks the
+result against the no-avalanche solve (multiplication factor), Sze's and
+Miller's closed forms, and the ionization integral on the solver's own field
+at the numeric breakdown voltage (~1, as it should be).
+
+<p align="center">
+  <img src="out/avalanche/breakdown_iv.png" alt="Avalanche breakdown I-V, multiplication factor and ionization integral" width="98%">
+</p>
+<p align="center">
+  <img src="out/avalanche/doping_sweep_iv.png" alt="Breakdown vs heavy-side doping 1e18-1e21" width="98%">
+</p>
 
 ## MOS capacitor (`mos/mos_main.py`, `configs/input_mos.yaml`)
 

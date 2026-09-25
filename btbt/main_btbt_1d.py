@@ -73,7 +73,10 @@ def uniform_field_check(model, Eg):
 
 
 def terminal_J(r):
-    return r["Jtot"][0], r["Jtot"][-1]
+    """Total current at the left and right contact edges, from the solver's
+    Jtot_resolved (exact, noise-free - see tat/newton_solver_tat.py): the raw
+    edge current next to the n+ contact is roundoff-dominated."""
+    return r["Jtot_resolved"][0], r["Jtot_resolved"][-1]
 
 
 def main():
