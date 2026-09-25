@@ -165,8 +165,9 @@ def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False, m
     see newton_solver_qf.py - aimed at the strongly asymmetric/degenerate
     doping cases where "newton" doesn't converge), or "newton_avalanche"
     (newton_solver_qf.py's formulation EXTENDED with a field-dependent
-    impact-ionization generation term and Bank-Rose damping, see
-    newton_solver_avalanche.py - a special, opt-in mode for modeling
+    impact-ionization generation term, see newton_solver_avalanche.py;
+    voltage-controlled here, so use avalanche/main_avalanche.py's
+    arc-length trace to go through the breakdown knee - a special, opt-in mode for modeling
     avalanche breakdown under high reverse bias; not used by any normal
     CMOS-flow example), or "newton_tat" (newton_solver_qf.py's formulation
     extended with reverse-bias junction leakage - Kane band-to-band

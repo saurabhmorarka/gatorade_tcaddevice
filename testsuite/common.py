@@ -72,45 +72,45 @@ def run_diode(path=None):
 
 
 def run_diode_breakdown(path=None):
-    """Avalanche-breakdown example (newton_avalanche). Regression scalars
-    are deliberately sampled from the WELL-CONVERGED part of the sweep
-    (early reverse bias, well below where the numeric solve's own
-    voltage-controlled-continuation wall lives - see
-    newton_solver_avalanche.py's newton_gummel_solve docstring) plus one
-    pure closed-form number (BV_sze) and one closed-form-only diagnostic
-    (ionization_integral, which depends only on analytic.py's depletion
-    approximation and avalanche.ionization_coeffs, not on the PDE solve at
-    all) - never from inside the sharp runaway itself, so this stays stable
-    under the normal golden-comparison tolerance."""
+    """Avalanche-breakdown example, traced through breakdown with arc-length
+    continuation exactly as avalanche/main_avalanche.py does. Regression
+    scalars: the numeric breakdown voltage (Va at |J| = 1 A/cm^2 - a sharp,
+    well-defined point of a curve that is nearly vertical there), the current
+    at two leakage-regime biases (log-interpolated along the trace), and two
+    closed-form numbers (Sze's BV and the depletion-approximation
+    ionization integral at -10 V) that do not depend on the PDE solve."""
+    from avalanche.newton_solver_avalanche import trace_breakdown
     path = path or os.path.join(TCAD1D_ROOT, "configs", "input_diode_breakdown.yaml")
     input_cfg = diode_cfg.load_config(path)
     mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = \
         diode_cfg.build_from_config(input_cfg)
     av = acfg.parse_avalanche_config(input_cfg)
+    cont = av["continuation"]
 
     g = build_diode_grid(mat, dev,
                           avalanche_ii_refine={"E_crit_V_cm": av["E_crit_V_cm"],
                                                 "ii_model": av["ii_model"],
                                                 "cells_per_mfp": av["cells_per_mfp"]},
                           **mesh_opts)
-    x, Cdop = g["x"], g["Cdop"]
-
-    _, _, _, results = voltage_sweep(x, Cdop, mat, dev, Va_list, method="newton_avalanche")
-    Va_arr = np.array([r["Va"] for r in results])
-    I_num = np.array([r["I"] for r in results])
-
-    BV_sze = float(dan.breakdown_voltage_sze(mat, dev))
-    ii_integral_sample = float(dan.ionization_integral(mat, dev, -10.0, av["ii_model"]))
-
-    idx_neg1 = int(np.argmin(np.abs(Va_arr - (-1.0))))
-    idx_neg10 = int(np.argmin(np.abs(Va_arr - (-10.0))))
+    tr = trace_breakdown(g["x"], g["Cdop"], mat, ii_model=av["ii_model"], driving_force=av["driving_force"],
+                         ref_density_cm3=av["ref_density_cm3"], seed_V=cont["seed_V"],
+                         J_stop_A_cm2=cont["J_stop_A_cm2"], V_limit=cont["V_limit"], ds_max=cont["ds_max"])
+    Va, logJ = tr["Va"], np.log(np.abs(tr["J"]))
+    i = int(np.argmax(logJ > 0.0))
+    BV = float(np.interp(0.0, logJ[i - 1:i + 1], Va[i - 1:i + 1]))
+    # Va decreases along the (pre-breakdown) trace; np.interp needs increasing x
+    # Current DENSITY (A/cm^2, ~1e-5 here), not current: the golden check's
+    # abs_tol=1e-8 would swallow any change to a ~1e-9 A terminal current.
+    J_at = [float(np.exp(np.interp(v, Va[:i][::-1], logJ[:i][::-1]))) for v in (-1.0, -10.0)]
 
     return {
-        "n_mesh_points": len(x),
-        "BV_sze_estimate_V": BV_sze,
-        "ionization_integral_at_neg10V": ii_integral_sample,
-        "Va_sample_V": [float(Va_arr[idx_neg1]), float(Va_arr[idx_neg10])],
-        "I_numeric_sample_A": [float(I_num[idx_neg1]), float(I_num[idx_neg10])],
+        "n_mesh_points": len(g["x"]),
+        "trace_status": tr["status"],
+        "BV_sze_estimate_V": float(dan.breakdown_voltage_sze(mat, dev)),
+        "ionization_integral_at_neg10V": float(dan.ionization_integral(mat, dev, -10.0, av["ii_model"])),
+        "BV_numeric_at_1A_cm2_V": BV,
+        "Va_sample_V": [-1.0, -10.0],
+        "J_numeric_sample_A_cm2": J_at,
     }
 
 

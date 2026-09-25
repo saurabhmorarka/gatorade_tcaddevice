@@ -3714,3 +3714,143 @@ minimum):**
   real operating range. Around Vdg = 1.5-1.8 V the values are 1e-9-1e-7
   A/um. Absolute GIDL also depends on the Kane A/B calibration (the FLOOXS
   fit is used here); the onset TRENDS are the robust result.
+
+## 33. Session 23: avalanche breakdown made robust - the real root causes
+(roundoff, not a fold point), row-normalized Newton, quasi-Fermi/field
+hybrid driving force, arc-length tracing (branch `avalanche-robust-solver`)
+
+**The ask.** Session 16's avalanche work left a "half-baked" state: the
+1e19/1e17 example only reached breakdown with a hand-tuned 0.004 V
+`fine_tail`, isolated points had to be masked, and a heavy-side doping sweep
+(1e18-1e21) failed almost completely at 1e20/1e21. Session 16 diagnosed a
+fold point and planned pseudo-arclength continuation. The user asked for a
+solution that works for every doping level and profile, on various meshes,
+and wanted it checked against external codes, not just papers.
+
+**Re-diagnosis: it was never a fold.** A 1D p-n diode's I(V) has no fold at
+these currents. Measured instead:
+
+1. *The base (no-avalanche) QF solver never converged in reverse bias at
+   >=1e19.* Every point from -0.25 V to -18 V had 10-100% current
+   non-conservation (the dashed "baselines" in the old doping-sweep plot were
+   garbage too). In a heavily doped region the majority-carrier current is a
+   huge conductance times a quasi-Fermi difference below double-precision
+   resolution of phi (~1e-17 V needed), so those rows carry a roundoff FLOOR
+   in the raw residual: at 1e19, Va=-0.5 V Newton stalled at |F|=24 in a
+   majority-hole row whose own floor was 94. The old max-norm line search was
+   then pinned by that noise, and genuinely unconverged depletion-region rows
+   (|F|~3e3 at 1e20, floor 1e-11) sat under it, so Newton froze. This also
+   explains "zero progress at any step size", the doping dependence (floor
+   grows 10x per decade) and the mesh sensitivity.
+2. *The avalanche term was fed that same noise.* G = alpha(E)*|Jp| in the
+   ~0.5 nm high-field slice of a p+ side, where Jp was ~350x roundoff - so
+   1e20/1e21 failed even at Va=-0.25 V.
+3. *alpha(E) was discontinuous*: hard-floored to 0 at 1.75e5 V/cm (alpha_p
+   jumps from ~14 cm^-1 to 0), which Newton cannot settle across once a
+   depletion-edge driving force sits there.
+
+**External codes consulted (source, not summaries).** Genius-TCAD-Open
+(cogenda/Genius-TCAD-Open): default impact-ionization driving force is
+`GradQf` (`src/solution/control.cc:535`), SG edge currents, and breakdown is
+traced with a dynamic load-line continuation (`solve_iv_trace` in
+`src/solver/ddm_common/ddm_solver.cc`, Goossens et al.). FLOOXS/Charon
+(`Silicon/Avalanche/vanOberstraeten.tcl`): driving force = quasi-Fermi
+gradient (Emfn/Emfp) with an optional n*F/(n+n0) density damping "for
+convergence where strong generation occurs in regions with small density".
+vela-tcad was also checked; its README says its BV output is diagnostic-
+only, not calibrated.
+
+**What changed.**
+- `core/newton_numerics.py` (new, solver-agnostic): `damped_newton` with a
+  row-normalized merit. Each row's residual is divided by its own diagonal
+  (the Newton correction for that row's unknown, in volts), and a row counts
+  as converged when it is within tolerance OR at its own roundoff floor
+  (NOISE_FACTOR*eps*(|J|@|U|)_i). The line search minimizes the 2-norm of the
+  scaled residual (the Newton direction is a guaranteed descent direction for
+  any fixed row weighting; the old max-norm is not). Three design points
+  were forced by measurement:
+  - *row maximum as the scale* failed a Kane-BTBT cold start at Va=0 (the
+    largest entry in an n+ hole row is dG/dpsi, not the row's own phip
+    coupling, so phip looked converged at 1e-4 V while it needed volts);
+  - *diagonal alone* failed 26/32 avalanche traces (rows with a small
+    diagonal but large off-diagonal terms sit permanently at ~1e-10, three
+    orders below their own roundoff) - hence the roundoff discount;
+  - the diagonal falls back to the row max only when < 1e-6 of it (only the
+    arc-length constraint row, whose diagonal t_V ~ 3e-9 at the knee;
+    physical rows measured >= 7.5e-4).
+  Steps: a uniform scalar clip (keeps the Newton direction) plus, only when
+  that clip had to shorten the step, a first trial of the per-component
+  log-damped step (d -> sign(d)*Vt*ln(1+|d|/Vt)), accepted only if it lowers
+  the merit - per-component limiting alone was session 16's wrong-branch bug.
+- `core/newton_solver_qf.py`, `tat/newton_solver_tat.py`: use it, and report
+  the terminal current from the best-resolved edge
+  (`newton_numerics.resolved_current`). TAT also returns `Jtot_resolved`,
+  reconstructed exactly on every edge from the converged balance
+  Jtot[i]-Jtot[i-1] = q*cvol_i*(Gp_ext-Gn_ext)_i (total current is not edge-
+  constant with a nonlocal BTBT source); `btbt/main_btbt_1d.py`'s contact
+  currents use it.
+- `avalanche/newton_solver_avalanche.py` rewritten around an
+  `AvalancheProblem` class: driving force `hybrid` (default) | `gradqf` |
+  `efield`, where hybrid = w*|grad phi| + (1-w)*|E|, w = c^2/(c^2+c_ref^2)
+  (c the carrier's edge density, c_ref=1e16): |grad phi| where the carrier is
+  dense (kills the majority-current noise), |E| where it is sparse. Pure
+  GradQf produced a spurious ~200-250 mV voltage snapback at ~1e-2 A/cm^2
+  (|grad phi| = J/(q*mu*c) overshoots where c is tiny); pure efield cannot
+  start at 1e21. Hybrid: zero snapback, zero step rejections, BV doping-
+  independent (14.081 V at 1e19, 14.082 V at 1e21); c_ref sensitivity <1 mV
+  at 1e18 and 0.4%/decade at 1e21. Dirichlet rows are now unit rows (Ruiz
+  equilibration makes the old pivot-safety scaling unnecessary). Jacobian
+  FD-checked for all three forces (<=4e-7, with ~140 ionizing edges and the
+  hybrid weight spanning 0-1); dF/dVa and the current gradient to 1e-10.
+  Bank-Rose is no longer used by avalanche (its raw-residual test
+  reintroduces bug 1); `core/bank_rose_damping.py` stays for the 2D solver.
+- `avalanche/avalanche.py`: alpha floor lowered to a 1e4 V/cm divide-by-zero
+  guard (alpha ~ 1e-54 of its prefactor there - continuous in practice).
+  New `ionization_integrals_from_field` (the coupled two-carrier criterion on
+  a solved potential).
+- `core/arclength.py` (new, solver-agnostic): pseudo-arclength continuation
+  in the (Va, ln|J|) plane, Va an extra unknown, secant predictor, bordered
+  Newton corrector, adaptive ds. `trace_breakdown` seeds it with voltage
+  steps to -1 V. Replaces `fine_tail`, the self-consistency masking, the
+  Gummel-restart candidate picking and `avalanche_diagnostics.py`.
+- `core/analytic.ionization_integral` now uses the coupled two-carrier
+  criterion. The old uncoupled int max(alpha_n, alpha_p) dx overcounted by
+  ~50%: it crossed 1 at ~11 V for 1e19/1e17 - agreeing with Sze's 11 V by
+  coincidence, which is why session 16 thought three estimates agreed. The
+  coupled form crosses 1 at ~14.0 V; the solver breaks down at 14.08 V
+  (|J| = 1 A/cm^2), and the integral on its own solved field there is 0.995
+  (electron) / 1.032 (hole). The remaining gap to Sze is the van
+  Overstraeten-de Man coefficient set, not the solve.
+- `input_diode_breakdown.yaml`: mesh 0.05 -> 0.3 Debye (session 16's "a
+  looser mesh kills the avalanche" was bug 2, not resolution); `continuation`
+  and `driving_force` blocks; `fine_tail` removed (ignored with a warning).
+- `avalanche/robustness_matrix.py` (new): 8 devices (flat/gaussian/log-
+  graded on either side, p+n and n+p, 1e16-1e21, BV 8-52 V) x 4 meshes
+  (0.05 Debye/1.06 growth down to 3 Debye/1.25, 52-363 nodes), each traced to
+  1e3 A/cm^2 with pass/fail checks, CSV and I-V plots with Sze's BV. Result:
+  32/32 pass in ~45 s, worst current non-conservation ~1e-5, no snapback.
+  BV agrees within ~1% between fine, medium and coarse meshes for every
+  device; the very-coarse tier drifts 1.3-9.5% (worst: the 52-node n+
+  gaussian, which also under-resolves its own doping profile).
+- Tests: `diode_breakdown` golden now records the numeric BV, trace status
+  and current DENSITY (the old ~1e-9 A currents were below the checker's
+  abs_tol=1e-8, so they never really tested anything; the old -10 V value was
+  in fact the no-avalanche current, M~1, a wrong-branch result).
+  `test_avalanche_robustness.py` runs three of the hardest matrix cells.
+
+**Merge gate (user rule: shared-code changes must improve things and never
+slow or change 2D).** 2D solvers import none of the changed modules; the 2D
+MOSFET sweep output is bit-identical to main (20.7 s main, 20.1 s branch).
+A/B against main on the seven 1D QF/TAT examples: same currents on every
+previously good point (<=1.5e-6), and every bias point now conserves current
+to <1e-3 except Va=0 where J~0 (main: 46/48 and 44/48 bad points on the
+SiGe TAT examples, 2 on input_diode_si1); 1.4-5x faster. btbt 1D validation
+identical to main (the Va=0 and contact-mismatch columns improve from
+roundoff noise to ~1e-16). Testsuite 40/40 in ~10 s (was 37 in 13 s) with
+zero non-convergence warnings (main: 194).
+
+**Not done.** Scharfetter-Gummel flux in QF form (would mainly help the
+very-coarse mesh tier). Porting the same Newton/merit to the 2D QF solver
+(it has its own f_tol workarounds, see newton_solver_qf_2d.py); porting
+avalanche to 2D (driving force per edge is already how Genius does it; the
+real 2D work is refining where the peak field actually sits).

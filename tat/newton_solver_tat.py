@@ -11,17 +11,16 @@ alongside newton_solver.py, avalanche/newton_solver_avalanche.py alongside
 that) - keeps the plain QF solve's code and behavior byte-for-byte
 untouched.
 
-UNLIKE avalanche/newton_solver_avalanche.py, this solver does NOT need
-Bank-Rose damping. Avalanche's G_ii depends on |Jn|, |Jp| - the very
-quantities the continuity equations solve for - creating direct positive
-feedback (more current -> more generation -> more current) responsible for
-the S-curve/fold-point pathology documented in DEVELOPMENT_LOG.md session
-16. Both G_btbt and G_tat here depend only on the local field and local
-densities n, p - never on Jn/Jp - so there is no such self-reinforcing
-loop. Plain backtracking Newton (this module reuses
-newton_solver_qf.py's own line-search loop, unmodified) is used instead;
-this is checked, not merely assumed (see the finite-difference Jacobian
-check and the example sweep's own self-consistency in main_tat.py).
+UNLIKE avalanche/newton_solver_avalanche.py, this solver needs no
+arc-length continuation. Avalanche's G_ii depends on |Jn|, |Jp| - the very
+quantities the continuity equations solve for - a positive feedback (more
+current -> more generation -> more current) that makes I(Va) near-vertical
+at breakdown. Both G_btbt and G_tat here depend only on the local field and
+local densities n, p - never on Jn/Jp - so there is no such self-reinforcing
+loop, and an ordinary voltage-controlled sweep with the shared damped Newton
+(core/newton_numerics.py, same as newton_solver_qf.py) suffices; this is
+checked, not merely assumed (see the finite-difference Jacobian check and
+the example sweep's own self-consistency in main_tat.py).
 
 Both generation terms plug in like a REPLACEMENT of the existing R term
 in newton_solver_qf.py's continuity rows, not an addition alongside it:
@@ -47,7 +46,8 @@ import scipy.sparse.linalg as spla
 from core.params import Q, KB, Material
 from core import physics as ph
 from core.materials import MaterialField
-from core.jacobian_scaling import equilibrated_spsolve
+from core.newton_numerics import (ROW_TOL, damped_newton, uniform_step_clip, componentwise_step_clip,
+                                  edge_current_noise, resolved_current)
 from core.solver import contact_values
 from core.newton_solver_qf import poisson_row_scale, continuity_row_scale, unpack_qf, MAX_QF_STEP
 from tat.tat import KaneBTBTModel, HurkxTATModel, btbt_generation, hurkx_tat_generation
@@ -339,7 +339,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                          psi_init=None, phin_init=None, phip_init=None,
                          kane_model=None, trap_model=None,
                          trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN,
-                         f_tol=1e-9, maxiter=50, verbose=False, G_ext=None):
+                         f_tol=ROW_TOL, maxiter=50, verbose=False, G_ext=None):
     """Same signature/return shape as newton_solver_qf.newton_gummel_solve,
     plus optional kane_model/trap_model (default to the standard Si
     constructors in tat/tat.py if not given) and trap_generation_fn -
@@ -378,7 +378,6 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
     h_typ = np.min(np.diff(x))
     poisson_scale = poisson_row_scale(mf, h_typ)
     cont_scale = continuity_row_scale(mf, h_typ)
-    stall_res_threshold = 1.0
 
     def _gummel_start():
         from core.solver import gummel_solve
@@ -392,84 +391,68 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
         psi0[0], psi0[-1] = psi_bc
         phin0[0], phin0[-1] = phin_bc
         phip0[0], phip0[-1] = phip_bc
-
-        U = np.concatenate([psi0, phin0, phip0])
-        F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
-                                       poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn, G_ext)
-        res_norm = np.max(np.abs(F))
-
-        it = 0
-        tiny_step_streak = 0
-        for it in range(1, maxiter + 1):
-            if res_norm < f_tol:
-                break
-            # Ruiz row/column equilibration before the sparse solve (same
-            # module avalanche/newton_solver_avalanche.py already reuses
-            # for its own extreme-magnitude generation terms) -
-            # mathematically exact/recoverable, just better-conditioned
-            # arithmetic. Hurkx's own bounded-by-1/tau generation doesn't
-            # need it (plain spsolve already converges cleanly), but
-            # Schenk's much larger, more rapidly field-varying generation
-            # (see tat.py's SchenkTATModel docstring) creates the same
-            # class of severe ill-conditioning avalanche's Jacobian hit -
-            # confirmed directly: an un-equilibrated Schenk solve stalled
-            # at |F|~5e8 from a 1e11 cold start, the identical Newton
-            # sequence with equilibration alone reached |F|~2e-5 in 12
-            # clean, full-step iterations. Applying it unconditionally
-            # (not just for Schenk) keeps one solve path for both models.
-            delta = equilibrated_spsolve(J, -F)
-            delta[N:3 * N] = np.clip(delta[N:3 * N], -MAX_QF_STEP, MAX_QF_STEP)
-
-            step = 1.0
-            for _ in range(20):
-                U_try = U + step * delta
-                F_try = _residual_only(U_try, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
-                                        poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn, G_ext)
-                res_try = np.max(np.abs(F_try))
-                if np.isfinite(res_try) and res_try < res_norm * (1 - 1e-4 * step):
-                    break
-                step *= 0.5
-            else:
-                U_try, res_try = U, res_norm
-
-            U = U_try
-            F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
-                                           poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn, G_ext)
-            res_norm = np.max(np.abs(F))
-            if verbose:
-                print(f"  Newton(TAT) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}")
-
-            tiny_step_streak = tiny_step_streak + 1 if step < 1e-4 else 0
-            if tiny_step_streak >= 2:
-                break
-        return U, res_norm, it
+        U0 = np.concatenate([psi0, phin0, phip0])
+        # Same row-normalized damped Newton as newton_solver_qf.py (see
+        # core/newton_numerics.py). Its linear solve keeps the Ruiz
+        # row/column equilibration this solver already relied on for
+        # Schenk's large, rapidly field-varying generation (an
+        # un-equilibrated Schenk solve stalled at |F|~5e8 from a 1e11 cold
+        # start; with equilibration it converged in 12 full steps).
+        args = (x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
+                kane_model, trap_model, trap_generation_fn, G_ext)
+        return damped_newton(
+            U0,
+            lambda U: _residual_and_jacobian(U, *args),
+            lambda U: _residual_only(U, *args),
+            step_clip=lambda d: uniform_step_clip(d, N, max_psi=1.0, max_qf=MAX_QF_STEP),
+            trial_clip=lambda d: componentwise_step_clip(d, N, max_psi=1.0, Vt=Vt),
+            tol=f_tol, maxiter=maxiter, verbose=verbose, label="Newton(TAT)")
 
     if psi_init is None:
-        U, res_norm, it = _run_newton(*_gummel_start())
+        U, merit, it, converged = _run_newton(*_gummel_start())
     else:
-        U, res_norm, it = _run_newton(psi_init, phin_init, phip_init)
-        if res_norm > stall_res_threshold:
-            U_retry, res_retry, it_retry = _run_newton(*_gummel_start())
-            if res_retry < res_norm:
-                U, res_norm, it = U_retry, res_retry, it_retry
+        U, merit, it, converged = _run_newton(psi_init, phin_init, phip_init)
+        if not converged:
+            U_r, merit_r, it_r, conv_r = _run_newton(*_gummel_start())
+            if conv_r or merit_r < merit:
+                U, merit, it, converged = U_r, merit_r, it_r, conv_r
 
-    if res_norm > stall_res_threshold:
+    if not converged:
         warnings.warn(
             f"Newton(TAT) solve did not converge at Va={Va} V "
-            f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a Gummel-restart retry - "
+            f"(max|F/d|={merit:.3e} V at iteration {it}) even after a Gummel-restart retry - "
             "check this point's self-consistency (J_std/J_mean) before trusting it.")
 
     psi, phin, phip = unpack_qf(U, N)
     n = mf.ni_arr * np.exp((psi - phin + mf.delta_Ei_arr) / Vt)
     p = mf.ni_arr * np.exp((phip - psi - mf.delta_Ei_arr) / Vt)
 
-    _, _, _, Jn, Jp = _edge_quantities(psi, phin, phip, n, p, x, mf)
+    h_e, _, _, Jn, Jp = _edge_quantities(psi, phin, phip, n, p, x, mf)
     Jtot = Jn + Jp
-    J_interior = Jtot[1:-1] if len(Jtot) > 2 else Jtot
-    J_rep = float(np.median(J_interior))
+    noise = edge_current_noise(phin, phip, n, p, h_e, Q * mf.mu_n_edge, Q * mf.mu_p_edge)
+    # Jtot_resolved: the total current on every edge, read where it is best
+    # resolved (core/newton_numerics.resolved_current) and carried to every
+    # other edge exactly. Summing the converged electron and hole rows at
+    # node i gives Jtot[i] - Jtot[i-1] = q*cvol_i*(Gp_ext - Gn_ext)_i - the
+    # local generation/recombination cancels - so the total current is
+    # edge-constant without a nonlocal source, and otherwise changes by the
+    # known injected charge. The raw Jtot next to a heavily doped contact is
+    # roundoff (a huge conductance times a sub-resolution quasi-Fermi step).
+    k = int(np.argmin(noise))
+    if G_ext is None:
+        offset = np.zeros_like(Jtot)
+    else:
+        Gn_ext, Gp_ext = G_ext
+        cvol_i = ph._control_volumes(x)[1:-1]
+        offset = np.concatenate([[0.0], np.cumsum(Q * cvol_i * (Gp_ext[1:-1] - Gn_ext[1:-1]))])
+    Jtot_resolved = Jtot[k] + offset - offset[k]
+    _, J_std, _, _ = resolved_current(Jtot - offset, noise)
+    # Terminal current: the (edge-constant) resolved current, or with a
+    # nonlocal source the right-contact value.
+    J_rep = float(Jtot_resolved[-1])
 
     return {
         "psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
-        "Jn": Jn, "Jp": Jp, "Jtot": Jtot, "iters": it,
-        "J_mean": J_rep, "J_std": float(np.std(J_interior)),
+        "Jn": Jn, "Jp": Jp, "Jtot": Jtot, "Jtot_resolved": Jtot_resolved, "iters": it,
+        "J_mean": J_rep, "J_std": J_std, "converged": converged,
     }

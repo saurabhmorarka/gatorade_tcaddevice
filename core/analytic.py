@@ -194,35 +194,33 @@ def breakdown_voltage_sze(mat: Material, dev: Device) -> float:
 
 
 def ionization_integral(mat: Material, dev: Device, Va: float, ii_model) -> float:
-    """Selberherr's breakdown criterion, evaluated from the closed-form
-    depletion-approximation field profile (NOT the numeric PDE solve):
-    integral of alpha_eff(E(x)) dx across the depletion region. Reaches 1
-    at the (depletion-approximation) breakdown voltage - an independent
-    closed-form cross-check against both breakdown_voltage_sze and the
-    numeric avalanche solver's own current runaway, using the SAME
-    avalanche.ionization_coeffs field model the PDE solver uses, but with
-    the field coming from the simple triangular depletion-approximation
-    profile instead of the self-consistent solve.
+    """The two-carrier ionization-integral breakdown criterion, evaluated on
+    the closed-form depletion-approximation field profile (NOT the numeric
+    PDE solve): the larger of the electron- and hole-initiated integrals
 
-    Uses alpha_eff = max(alpha_n, alpha_p) at each point (a common
-    simplified single-carrier approximation of the true coupled
-    ionization-integral criterion, adequate for an order-of-magnitude
-    cross-check; the numeric solver itself uses the full two-carrier
-    G_ii = (alpha_n*|Jn|+alpha_p*|Jp|)/q, so this is deliberately a looser,
-    independent estimate rather than a re-derivation of the same formula)."""
-    from avalanche.avalanche import ionization_coeffs
+        I_n = int alpha_n * exp(-int (alpha_n - alpha_p) dx') dx   (and I_p),
+
+    which reaches 1 exactly where the multiplication factor diverges. An
+    independent closed-form cross-check against the numeric avalanche
+    solver's breakdown, using the SAME avalanche.ionization_coeffs model but
+    the textbook triangular field instead of the self-consistent one.
+
+    An earlier version used the uncoupled single-carrier shortcut
+    int max(alpha_n, alpha_p) dx, which overcounts ionization by ~50% here:
+    it crossed 1 at ~11 V for the 1e19/1e17 breakdown example - agreeing with
+    Sze's 11 V by coincidence - while this coupled form crosses 1 at ~14.0 V,
+    matching the numeric solver's 14.08 V (DEVELOPMENT_LOG.md session 23)."""
+    from avalanche.avalanche import ionization_integrals_from_field
     xp, xn, W = depletion_widths(mat, dev, Va)
     V = max(built_in_potential(mat, dev) - Va, 1e-6)
-    # Triangular field profile of the depletion approximation: peak field
-    # E_max at x=0, linearly decaying to 0 at each depletion edge.
+    # Triangular field of the depletion approximation: peak E_max at x=0,
+    # decaying linearly to 0 at each depletion edge; psi is its integral
+    # (only |dpsi/dx| enters the criterion, so the sign convention is moot).
     E_max = 2.0 * V / W
-    x = np.linspace(-xp, xn, 2000)
-    E_abs = E_max * (1.0 - np.abs(x) / np.where(x < 0, xp, xn))
-    E_abs = np.clip(E_abs, 0.0, None)
-    alpha_n, alpha_p, _, _ = ionization_coeffs(E_abs, ii_model)
-    alpha_eff = np.maximum(alpha_n, alpha_p)
-    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz  # numpy>=2.0 renamed trapz
-    return float(_trapz(alpha_eff, x))
+    x = np.linspace(-xp, xn, 4001)
+    E_abs = np.clip(E_max * (1.0 - np.abs(x) / np.where(x < 0, xp, xn)), 0.0, None)
+    psi = np.concatenate([[0.0], np.cumsum(0.5 * (E_abs[1:] + E_abs[:-1]) * np.diff(x))])
+    return max(ionization_integrals_from_field(x, psi, ii_model))
 
 
 def multiplication_factor_miller(Va: np.ndarray, BV: float, n: float = 3.0) -> np.ndarray:

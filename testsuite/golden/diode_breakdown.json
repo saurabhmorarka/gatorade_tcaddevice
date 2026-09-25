@@ -1,13 +1,15 @@
 {
+  "BV_numeric_at_1A_cm2_V": -14.075488195203796,
   "BV_sze_estimate_V": 10.961986342525709,
-  "I_numeric_sample_A": [
-    -5.171301936586922e-10,
-    -2.358688243124408e-09
+  "J_numeric_sample_A_cm2": [
+    5.266596370845056e-06,
+    4.4895922772433534e-05
   ],
   "Va_sample_V": [
-    -0.9769662921348314,
-    -9.937640449438202
+    -1.0,
+    -10.0
   ],
-  "ionization_integral_at_neg10V": 0.8473393064940457,
-  "n_mesh_points": 283
+  "ionization_integral_at_neg10V": 0.6614333959007371,
+  "n_mesh_points": 162,
+  "trace_status": "reached_J_stop"
 }

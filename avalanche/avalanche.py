@@ -30,16 +30,24 @@ import numpy as np
 @dataclass
 class AvalancheModel:
     """Chynoweth-law coefficients alpha(E) = a*exp(-b/E), E in V/cm, alpha
-    in cm^-1. Below E_floor_V_cm (the fit's own lower validity bound),
-    alpha is hard-floored to exactly zero (not smoothed/extrapolated) -
-    this also guarantees exp(-b/E) never evaluates near E=0."""
+    in cm^-1.
+
+    E_floor_V_cm is only a guard against dividing by zero: below it alpha
+    is set to exactly 0, which at 1e4 V/cm is already exp(-123) ~ 1e-54 of
+    the prefactor, so alpha stays continuous for any practical purpose.
+    The fit's own validated range starts at 1.75e5 V/cm, and an earlier
+    version hard-floored alpha to 0 right there - a JUMP (alpha_p falls from
+    ~14 cm^-1 to 0) that Newton could never settle across once some edge's
+    driving force sat near 1.75e5 V/cm, e.g. at a depletion edge during
+    breakdown (DEVELOPMENT_LOG.md session 23). Below 1.75e5 V/cm the formula
+    is an extrapolation, but a smooth and physically negligible one."""
     a_n: float = 7.03e5      # electrons, single field region
     b_n: float = 1.231e6
     a_p_lo: float = 1.582e6  # holes, E in [E_floor_V_cm, E_split_V_cm)
     b_p_lo: float = 2.036e6
     a_p_hi: float = 6.71e5   # holes, E >= E_split_V_cm
     b_p_hi: float = 1.693e6
-    E_floor_V_cm: float = 1.75e5
+    E_floor_V_cm: float = 1.0e4
     E_split_V_cm: float = 4.0e5
 
     @staticmethod
@@ -77,3 +85,27 @@ def ionization_coeffs(E_abs: np.ndarray, model: AvalancheModel):
     dalpha_p_dE = np.where(below_floor, 0.0, dalpha_p_dE)
 
     return alpha_n, alpha_p, dalpha_n_dE, dalpha_p_dE
+
+
+def ionization_integrals_from_field(x, psi, model: AvalancheModel):
+    """Classical breakdown criterion evaluated on a SOLVED potential profile:
+    the electron- and hole-initiated ionization integrals
+
+        I_n = int alpha_n * exp(-int_x0^x (alpha_n - alpha_p) dx') dx
+        I_p = int alpha_p * exp(-int_x^xL (alpha_p - alpha_n) dx') dx
+
+    over the whole device, with alpha evaluated at the local field
+    |dpsi/dx| of each edge (x increasing from the p-side contact; electrons
+    drift toward +x, holes toward -x). Either integral reaching 1 is the
+    local-field condition for the multiplication factor to diverge, so at
+    the numerically traced breakdown voltage both should be ~1 - an
+    independent check that the PDE solve's breakdown is consistent with the
+    ionization coefficients it was given. Uses |E| everywhere, so in the thin
+    high-field slice of a heavily doped side (where the solver's hybrid
+    driving force deliberately does not, see newton_solver_avalanche.py) it
+    slightly overcounts. Returns (I_n, I_p)."""
+    h = np.diff(x)
+    an, ap, _, _ = ionization_coeffs(np.abs(np.diff(psi)) / h, model)
+    d_n = np.cumsum((an - ap) * h)
+    d_p = np.cumsum(((ap - an) * h)[::-1])[::-1]
+    return float(np.sum(an * np.exp(-d_n) * h)), float(np.sum(ap * np.exp(-d_p) * h))
