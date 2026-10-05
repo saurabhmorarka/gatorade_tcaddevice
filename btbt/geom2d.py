@@ -78,6 +78,37 @@ class TriGeom:
         col = np.arange(len(v)) - start[v]
         self.node_tris = np.full((N, max(1, deg.max())), -1)
         self.node_tris[v, col] = t
+        self._neighbors = None
+
+    @property
+    def neighbors(self):
+        """(M,3) triangle across the edge opposite vertex k (-1 on the mesh
+        boundary), for the compiled tracer's point-location walk."""
+        if self._neighbors is None:
+            T = self.triangles
+            M = len(T)
+            a = np.stack([T[:, 1], T[:, 2], T[:, 0]], axis=1).ravel()      # edge opposite vertex k
+            b = np.stack([T[:, 2], T[:, 0], T[:, 1]], axis=1).ravel()
+            key = np.minimum(a, b).astype(np.int64) * len(self.points) + np.maximum(a, b)
+            order = np.argsort(key, kind="stable")
+            ks = key[order]
+            same = np.flatnonzero(ks[1:] == ks[:-1])
+            nb = np.full(3 * M, -1, dtype=np.int64)
+            i, j = order[same], order[same + 1]
+            nb[i], nb[j] = j // 3, i // 3
+            self._neighbors = nb.reshape(M, 3)
+            # vertex -> triangles (CSR), for steps past a concave boundary corner
+            v = T.ravel()
+            order = np.argsort(v, kind="stable")
+            self._vt_ptr = np.concatenate([[0], np.cumsum(np.bincount(v, minlength=len(self.points)))])
+            self._vt_idx = (order // 3).astype(np.int64)
+        return self._neighbors
+
+    @property
+    def vertex_tris(self):
+        """CSR (ptr, idx) of the triangles around each vertex."""
+        self.neighbors
+        return self._vt_ptr, self._vt_idx
 
     def tri_grad(self, psi):
         """(M,2) constant gradient of the P1 interpolant on every triangle."""

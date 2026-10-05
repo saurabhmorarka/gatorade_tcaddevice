@@ -96,6 +96,7 @@ To confirm everything works end to end after installing:
 python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
 python3 testsuite/test_2d_examples.py  # every bias point of the 4 2D drivers (~1.5 min)
 python3 testsuite/test_vtk.py          # VTK export (also checks ParaView reads it, if installed)
+python3 testsuite/test_native.py       # compiled kernels vs numpy (skipped if not built)
 ```
 
 ### Fast path (optional): PETSc solvers for 3D
@@ -113,6 +114,24 @@ python3 main2d_mosfet_sweep.py --extrude-um 0.1 --nz 6   # 3D extruded MOSFET, f
 Set `TCAD_LINSOLVE=superlu|umfpack|scipy_ilu|petsc_lu|petsc_ilu` to force a
 backend (default `auto`: SuperLU below 60k unknowns, PETSc ILU above). The
 3D roadmap and measured performance are in `plans/3d_plan.md`.
+
+### Compiled kernels (optional, Rust)
+
+Hot loops that numpy can't vectorize well have a Rust version in `native/`.
+So far that is the nonlocal-tunneling field-line tracer, about 8x faster
+than numpy, which cuts each nonlocal BTBT curve from ~43 s to ~26 s.
+Everything runs without it: `core/native.py` falls back to numpy when the
+extension isn't installed, and `TCAD_NATIVE=0` forces the fallback.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # Rust toolchain
+pip install maturin
+cd native && maturin develop --release && cd ..   # builds into the active env
+python3 testsuite/test_native.py                    # compiled vs numpy, to round-off
+```
+
+If both a venv and conda are active, maturin refuses to guess. Unset one
+first (for example `env -u CONDA_PREFIX maturin develop --release`).
 
 ### Viewing results in ParaView (VTK export)
 

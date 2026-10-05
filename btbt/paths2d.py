@@ -49,6 +49,7 @@ and p stays implicit in the Newton Jacobian.
 import numpy as np
 import scipy.sparse as sp
 
+from core.native import native
 from tat.tat import hurkx_gamma
 from btbt.kernel import path_rate, occupation_factor
 from btbt.tat_kernel import hurkx_enhancement
@@ -93,6 +94,8 @@ class FieldLineTracer:
         lev = psi if level is None else level
         target = np.array(np.broadcast_to(np.asarray(target, dtype=float), (K,)))
         eg_int = np.zeros(K)
+        if native is not None and record is None:
+            return self._trace_native(g_node, lev, starts, target, sign, L_max)
         gm = np.hypot(g_node[starts, 0], g_node[starts, 1])
         pos = g.points[starts].copy()
         tri = self._first_triangle(starts, sign * g_node[starts] / np.maximum(gm, 1e-30)[:, None])
@@ -156,6 +159,20 @@ class FieldLineTracer:
         if rec is not None:
             out["poly"] = [np.array(rec[int(k)]) for k in record]
         return out
+
+    def _trace_native(self, g_node, lev, starts, target, sign, L_max):
+        """The same trace in compiled code (native/src/lib.rs), each path
+        run to completion; agrees with the loop above to round-off."""
+        g = self.geom
+        K = len(starts)
+        f64 = lambda a: np.ascontiguousarray(a, dtype=np.float64)      # noqa: E731
+        i64 = lambda a: np.ascontiguousarray(a, dtype=np.int64)        # noqa: E731
+        l, end, end_tri, dpsi, s, eg_int = native.trace_field_lines(
+            f64(g.points), i64(g.triangles), g.neighbors, *g.vertex_tris, f64(g._Minv), f64(g._v2),
+            np.ascontiguousarray(g.tri_semi, dtype=bool), f64(g_node), f64(lev), f64(g.Eg), i64(starts),
+            np.full(K, -2, dtype=np.int64), f64(target), f64(np.broadcast_to(L_max, (K,))), float(sign), float(self.Eg),
+            DS_FRAC, DS_MIN, DS_MAX)
+        return dict(l=l, end=end, end_tri=end_tri, dpsi=dpsi, s=s, eg_int=eg_int)
 
 
 class NonlocalTunneling2D:

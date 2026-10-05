@@ -4045,3 +4045,70 @@ unchanged (71.6 s, same SS/Vt/DIBL/Ion).
 **Not in Phase 0 yet:** current density vectors (need edge currents
 projected to cells), a YAML schema skeleton for the virtual fab (that goes
 with Phase 3), and converting old `*_structure.json` files.
+
+## 37. Session 25 (cont.): Rust field-line tracer (first compiled kernel)
+
+The user approved installing a Rust toolchain (rustup, Rust 1.99, maturin
+1.15) for components where Rust gives 5-10x. The first candidate came from
+the section 35 profile: in each nonlocal BTBT curve about half the time
+(~15 s) was field-line tracing.
+
+**What was built**
+- `native/` is a PyO3 + rust-numpy crate (`tcad_native`, abi3, so one
+  build serves Python 3.10+). Build with `maturin develop --release`.
+- `native/src/lib.rs` `trace_field_lines` mirrors
+  `FieldLineTracer.trace` step for step: RK2 midpoint steps, adaptive ds,
+  the band-edge level test, linear interpolation of the crossing, and the
+  stop rules (left the semiconductor, stalled, length cap). The start
+  triangle choice (`_first_triangle`) moved in too.
+  - Point location is an adjacency walk from the previous triangle. At a
+    boundary edge it searches the triangles around the current triangle's
+    vertices (for a short step past a concave corner), otherwise the point
+    is outside.
+  - A first version scanned all triangles at boundary exits, which cost
+    2x. The ring search replaced it.
+- `btbt/geom2d.py`: `TriGeom.neighbors` (edge adjacency) and
+  `vertex_tris` (CSR), both computed lazily.
+- `core/native.py` is the optional loader. `native` is None if the
+  extension isn't built or `TCAD_NATIVE=0`; callers keep numpy.
+- `btbt/paths2d.py` dispatches to the compiled tracer unless polylines are
+  being recorded (the generation-map figures). Those keep the numpy path.
+
+**Accuracy.** On equilibrium, Vd = 1 V and GIDL (Vg = -1.5 V, Vd = 1 V)
+states, for the Kane and both Hurkx traces (3.4k-4k paths each):
+- same set of complete paths, same end triangles
+- lengths, energy gains and bandgap integrals agree to <= 1e-13 relative
+
+`testsuite/test_native.py` checks this at rtol 1e-10.
+
+**Speed** (one trace of ~3.5k paths): numpy 33-65 ms, Rust 4-8 ms, about
+8x. That is ~7 ns per RK2 step, near the serial limit. The numpy loop was
+already vectorized across paths, so the gain is less than a naive "Python
+loop vs Rust" estimate.
+
+BTBT sweep (8 curves, 8 workers, M3 Pro), Rust vs numpy:
+
+| | numpy | Rust |
+|---|---|---|
+| idvg nonlocal | 41.4 s | 24.3 s |
+| idvsub nonlocal | 44.5 s | 28.4 s |
+| all curves wall-clock | 45.5 s | 37.6 s |
+| process total | 51.7 s | 43.5 s |
+
+The nonlocal curves are no longer the only critical path. The local curves
+(~27 s under contention, mostly Hurkx Gamma and Newton) now set it too.
+
+**Moved values.** Between the two runs, the only differences above noise are:
+- the nonlocal body current at the shared zero-bias point (0.8%, the same
+  OUTER_TOL swap seen in section 35)
+- tat_bulk at 3e-5
+
+Models that never call the tracer ("none", "local") differ by the same
+amounts between runs (Newton counts 5 vs 6, currents at the ~1e-16 A/um
+floor). That is run-to-run noise, not the tracer.
+
+Regression check:
+- 1D 6/6
+- 2D 4/4 (venv and conda env, native on; includes the BTBT golden)
+- VTK 10/10
+- native 2/2 in both environments
