@@ -1,0 +1,133 @@
+# 3D program: handoff (written 2026-10-04 evening, resume 2026-10-05)
+
+Read this first, then `plans/3d_plan.md` (the full plan and measured
+performance) and `DEVELOPMENT_LOG.md` section 34.
+
+## Where things stand
+
+- Branch **`3d-perf-core`**, commit `4e14e7e`. Committed, **not merged, not
+  pushed**. The user keeps feature branches local until they decide to push,
+  and merges only when a phase is finished.
+- **Phase 1 (performance core) is mostly done.** Phase 0 (VTK export) has not
+  started.
+
+| run (M3 Pro, clean machine) | before | now |
+|---|---|---|
+| 2D MOSFET full I-V | 17.5 s | 7.5 s |
+| 2D BTBT sweep | 93 s | ~60 s |
+| 2D diode | 4.0 s | 2.8 s |
+| 2D MOS-cap C-V | 14 s | 14 s (not ported) |
+| 3D extruded MOSFET (28k nodes, 84k unknowns, 138 points) | hours | **73 s** |
+
+The 3D run matches 2D on every point within 1e-3. The user's target is a full
+3D I-V in about 1 minute; at the 102-point benchmark definition this testbed
+is about 54 s. That still needs confirming on a real FinFET mesh.
+
+## Environments
+
+- **pip venv:** `tcad1d/.venv` (Python 3.13, pymetis added). Run with
+  `.venv/bin/python`. Uses SuperLU+METIS.
+- **conda env `tcad`:** `~/miniconda3/envs/tcad/bin/python` (Python 3.12,
+  PETSc 3.26 + MUMPS + UMFPACK + pymetis), built from `environment.yml`.
+  Needed for 3D speed (PETSc block-ILU).
+- Run everything from the `tcad1d/` root.
+- The system `python3`/`python` lack the deps (miniconda base has no `triangle`).
+- The scratchpad from the 2026-10-04 session (`/private/tmp/claude-501/...`)
+  is ephemeral. Don't rely on its benchmark scripts or the `benv` env.
+
+## How to check things
+
+```bash
+.venv/bin/python testsuite/test_examples.py                 # 1D, 6 tests, ~6 s
+.venv/bin/python testsuite/test_2d_examples.py -v           # 2D, 4 tests, ~90 s
+~/miniconda3/envs/tcad/bin/python testsuite/test_2d_examples.py -v
+.venv/bin/python main2d_mosfet_sweep.py --out-dir /tmp/x    # 2D timing (~7.5 s)
+~/miniconda3/envs/tcad/bin/python main2d_mosfet_sweep.py --extrude-um 0.1 --nz 6 --out-dir /tmp/y   # 3D (~75 s)
+```
+
+- 2D drivers write tracked files under `out/` unless given `--out-dir`. If a
+  run dirties `out/`, restore it with `git checkout out/`.
+- Force a linear-solver backend with
+  `TCAD_LINSOLVE=superlu|umfpack|scipy_ilu|petsc_lu|petsc_ilu`.
+
+## Gotchas learned the hard way
+
+1. **Orphaned workers.** Killing a driver's parent does not kill its
+   `ProcessPoolExecutor` workers (spawned processes named `...spawn_main...`).
+   Six orphans at ~200% CPU silently inflated every timing for ~20 minutes and
+   made the user's fans loud.
+   - After stopping a run: `pkill -f spawn_main`, then check with
+     `ps -Ao pid,pcpu,command -r | head`.
+   - Check the machine is idle before trusting any timing.
+2. **MPICH busy-polling.** conda-forge PETSc's MPICH burns ~2 cores per idle
+   process. `core/linsolve.py` sets `FI_PROVIDER=tcp` before importing
+   petsc4py. Keep that line above the import.
+3. **M3 Pro is 6 performance + 6 efficiency cores.** Default workers = P-core
+   count (`performance_cores()` in `main2d_mosfet_sweep.py`). Splitting curves
+   onto all 12 cores was slower.
+4. **3D is memory-bandwidth bound.** Wall time is ~75 s for 3, 4, 6 or 8
+   workers. More processes don't help; less data per iteration does.
+5. **ILU needs tight tolerances.** ILU-GMRES at a loose tolerance gives bad
+   Newton directions (quasi-Fermi levels of near-absent carriers). The
+   inexact-Newton cap is backend-dependent (`LinearSolver.max_rtol`): 1e-4
+   for LU-type preconditioners, 1e-8 for ILU.
+6. **The early-exit convergence test must include quasi-Fermi updates**
+   (density-weighted, `QF_DENSITY_REF=1 cm^-3`). A psi-only version made one
+   off-state point 1000x wrong (SS showed 16.5 mV/dec). Always check
+   SS/Vt/Ion against 2D after any convergence change.
+7. **Noise floors.** Off-state currents below ~1e-13 A/um are contact-current
+   round-off (~4e-17 A/um absolute), even with the old solver and between
+   BLAS builds. Golden floors are set from this measurement.
+8. **Drivers must test `r["converged"]`, not `res_norm < 1e-4`.** The
+   prediction exit can stop with |F|_inf up to 0.1.
+9. **scipy's `gmres` reports convergence unreliably here.** Use
+   `core.linsolve.gmres_right`.
+10. In zsh, `$var` does not word-split in loops (use `for a b in ...`).
+
+## Next steps (in order)
+
+1. **Port the MOS-cap Poisson solver.** `solver2d/poisson2d_mos.py` still
+   calls `equilibrated_spsolve`. Give it `LinearSolver` plus the update-based
+   convergence. The driver `main2d_mos_sweep.py` is single-process: 31 points
+   at 0.34 s each. Check the 2D goldens afterwards.
+2. **Profile the BTBT sweep** (`python -m btbt.main_btbt2d_sweep`, ~60 s, 8
+   curves).
+   - The nonlocal model's sparse generation Jacobian bypasses the
+     assembly plan.
+   - 8 workers exceed the 6 P-cores.
+3. **Phase 0: VTK export.** Write `.vtu` (+ `.pvd` for bias sweeps) from 2D
+   results and the 3D extruded mesh, with region/material/contact naming as
+   in the plan.
+   - Use a pure-numpy XML writer, so no dependency in the pip env.
+   - Verify it opens in ParaView 6 (installed in /Applications).
+4. **Phase 2: Qt viewer "tcadview".** PySide6 + pyvistaqt (PyVista/VTK are in
+   the miniconda base, not yet in `.venv`/`tcad`). The feature list is in the
+   plan, Part 3. Start with regions, slices, lin/log, probe and cut-lines on
+   existing 2D and extruded-3D data. It must be distributable via GitHub
+   (pip extras, CI, PyInstaller release builds).
+5. **3D speed levers** (only after a real 3D device exists to measure on):
+   - better preconditioner (AMG on the Poisson block / field-split)
+   - FP32 preconditioner (half the memory traffic; Rust or GPU candidate)
+   - tangent predictor
+6. Then Phase 3+: virtual fab (planar, then FinFET, then nanosheet), octree
+   mesher (a Rust candidate), the 3D validation ladder.
+
+Before merging `3d-perf-core`, the user's merge gate applies: goldens pass,
+moved values explained, and before/after runtimes reported.
+
+## User decisions to respect (all also in memory)
+
+- Own process engine, no ViennaPS. Level-set/voxel virtual fab, three-layer
+  YAML.
+- Qt desktop viewer, distributable via GitHub.
+- PETSc fast path plus a pure-scipy fallback.
+- Gate oxide always meshed (rejected the thin-dielectric BC).
+- Runtime is first-class: full 3D I-V in ~1 min; parallelize; report
+  honestly if it can't be met.
+- Rust where it gives 5-10x (speed, CPU or memory). Profile first.
+- Apple GPU has no FP64. GPU use goes to the viewer, voxel ops, and possibly
+  an FP32 preconditioner.
+- Future solvers: thermal, stress (FEM on the same tets), dopant diffusion,
+  borrowing COMSOL concepts. Avalanche stays standalone.
+- Show the plan before big implementations. Feature branch per phase. Update
+  `DEVELOPMENT_LOG.md` with every commit. Confirm before pushing.
