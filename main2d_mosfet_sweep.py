@@ -29,7 +29,6 @@ Usage: python3 main2d_mosfet_sweep.py [configs/input_mosfet_2d.yaml]
 import argparse
 import csv
 import os
-import subprocess
 import time
 import warnings
 from concurrent.futures import ProcessPoolExecutor
@@ -43,6 +42,7 @@ import yaml
 from core import structure_io as sio
 from core.config import _resolve_material_block
 from core.field_save import resolve_save_points
+from core.parallel import performance_cores
 from core.physics import equilibrium_bulk_potential
 from mesh2d.config2d import build_domain_from_config
 from mesh2d.mesh2d import build_mesh2d
@@ -267,23 +267,6 @@ def run_curve(task):
     return dict(task=task, points=points, newton_iters=total_it, log=log_lines,
                 time_s=time.perf_counter() - t0,
                 last_state={k: states[last][k] for k in ("psi", "n", "p", "phin", "phip")}, last_bias=last)
-
-
-def performance_cores():
-    """Number of PERFORMANCE cores (Apple silicon reports its efficiency
-    cores separately; an M3 Pro is 6P+6E). Measured on the M3 Pro: a sweep
-    split across all 12 cores ran SLOWER (10.4 s) than 6-8 workers (7.5 s) -
-    segments landing on the ~2-3x slower efficiency cores straggle and set
-    the wall-clock time. Falls back to os.cpu_count() elsewhere."""
-    try:
-        out = subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True,
-                             text=True, timeout=2)
-        n = int(out.stdout.strip())
-        if n > 0:
-            return n
-    except Exception:
-        pass
-    return os.cpu_count() or 6
 
 
 def split_task(task, curve_index, chunk_points):

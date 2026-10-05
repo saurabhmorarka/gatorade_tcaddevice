@@ -51,7 +51,7 @@ class LocalTunneling2D:
         dmag = np.einsum("sd,skd->sk", u, g.C[s])                 # d|g_t|/dpsi_k
         vals = (self._wa[:, :, None] * dmag[:, None, :]).ravel()
         N = len(psi)
-        return F, sp.csr_matrix((vals, (self._rows, self._cols)), shape=(N, N))
+        return F, sp.coo_matrix((vals, (self._rows, self._cols)), shape=(N, N))
 
     def parts(self, psi, phin, phip):
         """Per-node (G_kane, dG_tat, F) - for diagnostics."""
@@ -104,13 +104,20 @@ class LocalTunneling2D:
         G = np.where(free, G, 0.0)
         if not jacobian:
             return G, G, None, None
-        dpsi = sp.diags(np.where(free, dG_dF, 0.0)) @ dF
+        # COO over U = (psi, phin, phip) with index arrays that depend only on
+        # the mesh (explicit zeros kept, duplicates summed by the solver), so
+        # the Jacobian's sparsity pattern is the same every iteration
+        dF = dF.tocoo()
+        node = np.arange(N)
+        rows = [dF.row]
+        cols = [dF.col]
+        data = [np.where(free, dG_dF, 0.0)[dF.row] * dF.data]
         if dG_dn is not None:
             n, p = self._np(psi, phin, phip)
-            dpsi = dpsi + sp.diags(np.where(free, dG_dn * n / Vt - dG_dp * p / Vt, 0.0))
-            dphin = sp.diags(np.where(free, -dG_dn * n / Vt, 0.0))
-            dphip = sp.diags(np.where(free, dG_dp * p / Vt, 0.0))
-        else:
-            dphin = dphip = sp.csr_matrix((N, N))
-        dU = sp.hstack([dpsi, dphin, dphip]).tocsr()
+            rows += [node, node, node]
+            cols += [node, N + node, 2 * N + node]
+            data += [np.where(free, dG_dn * n / Vt - dG_dp * p / Vt, 0.0),
+                     np.where(free, -dG_dn * n / Vt, 0.0), np.where(free, dG_dp * p / Vt, 0.0)]
+        dU = sp.coo_matrix((np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+                           shape=(N, 3 * N))
         return G, G, dU, dU

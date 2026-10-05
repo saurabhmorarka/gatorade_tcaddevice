@@ -272,10 +272,13 @@ class NonlocalTunneling2D:
         if not jacobian:
             return Gn, Gp, None, None
         Vt = self.Vt
-        dpsi = sp.diags(np.where(f, d_dn * n / Vt - d_dp * p / Vt, 0.0))
-        dphin = sp.diags(np.where(f, -d_dn * n / Vt, 0.0))
-        dphip = sp.diags(np.where(f, d_dp * p / Vt, 0.0))
-        dU = sp.hstack([dpsi, dphin, dphip]).tocsr()
+        # COO with fixed (mesh-only) indices, explicit zeros kept: the
+        # Jacobian's sparsity pattern stays the same every iteration
+        node = np.arange(N)
+        dU = sp.coo_matrix((np.concatenate([np.where(f, d_dn * n / Vt - d_dp * p / Vt, 0.0),
+                                            np.where(f, -d_dn * n / Vt, 0.0), np.where(f, d_dp * p / Vt, 0.0)]),
+                            (np.tile(node, 3), np.concatenate([node, N + node, 2 * N + node]))),
+                           shape=(N, 3 * N))
         return Gn, Gp, dU, dU
 
 

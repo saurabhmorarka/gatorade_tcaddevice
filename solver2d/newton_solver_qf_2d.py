@@ -661,26 +661,26 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     # pinned oxide, so the COO->CSR mapping is computed once (an "assembly
     # plan") and every later call is a single bincount - no per-iteration
     # sort or duplicate merge. A generation term with its own sparse
-    # derivative (nonlocal tunneling) can change the pattern, so it keeps
-    # the general conversion.
-    if dGn_dU is None and dGp_dU is None:
-        J = _assemble_with_plan(mesh, is_contact, rows, cols, data, 3 * N)
-    else:
-        J = sp.coo_matrix((data, (rows, cols)), shape=(3 * N, 3 * N)).tocsr()
-        J.sort_indices()
+    # derivative (tunneling) adds entries whose pattern is usually, but not
+    # always, the same every iteration, so its plan is reused only after
+    # checking that (rows, cols) match the ones it was built from.
+    with_gen = dGn_dU is not None or dGp_dU is not None
+    J = _assemble_with_plan(mesh, is_contact, rows, cols, data, 3 * N, verify=with_gen)
     return F, J
 
 
-def _assemble_with_plan(mesh, is_contact, rows, cols, data, n):
-    key = (id(mesh), n, len(rows), is_contact.tobytes())
+def _assemble_with_plan(mesh, is_contact, rows, cols, data, n, verify=False):
+    key = (id(mesh), n, len(rows), is_contact.tobytes(), verify)
     plan = _ASSEMBLY_PLANS.get(key)
-    if plan is None or plan[0]() is not mesh:
+    if (plan is None or plan[0]() is not mesh
+            or (verify and not (np.array_equal(plan[5], rows) and np.array_equal(plan[6], cols)))):
         lin = rows.astype(np.int64) * n + cols
         uniq, slot = np.unique(lin, return_inverse=True)
         indptr = np.concatenate([[0], np.cumsum(np.bincount(uniq // n, minlength=n))])
-        plan = (weakref.ref(mesh), slot, indptr, (uniq % n).astype(np.int32), len(uniq))
+        plan = (weakref.ref(mesh), slot, indptr, (uniq % n).astype(np.int32), len(uniq),
+                rows.copy() if verify else None, cols.copy() if verify else None)
         _ASSEMBLY_PLANS[key] = plan
-    _, slot, indptr, indices, nnz = plan
+    _, slot, indptr, indices, nnz = plan[:5]
     return sp.csr_matrix((np.bincount(slot, weights=data, minlength=nnz), indices, indptr), shape=(n, n))
 
 

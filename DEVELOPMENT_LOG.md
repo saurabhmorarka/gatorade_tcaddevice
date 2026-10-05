@@ -3936,3 +3936,62 @@ the venv and the conda env.
 - Qt viewer
 - virtual fab, octree mesher
 - next 3D speed levers (better preconditioner / FP32 / fewer Newton its)
+
+## 35. Session 25: MOS-cap port and BTBT profiling (2D runtimes)
+
+Branch `3d-perf-core`. Profiled before changing anything; every change below
+was measured on its own.
+
+**MOS-cap C-V: 14 s -> 3.9 s, bit-identical output.**
+- The profile showed the time was not the linear solve (1.4 s) but the
+  Jacobian's Dirichlet-row scaling: a Python loop over contact nodes, each
+  scanning every nonzero (380k `np.any` calls, 7.8 s). Now one
+  `np.maximum.at`, giving the same matrix.
+- `solve_mos_equilibrium_2d` uses a per-mesh `core.linsolve.LinearSolver`
+  (`linear_solver="legacy"` keeps the old path) and skips the Jacobian after
+  the final accepted step (the line search already has F there).
+- The convergence test is unchanged: the remaining 3.9 s is mostly mesh
+  building and plotting, so update-based convergence would buy little.
+
+**BTBT sweep: ~54 s -> ~46 s** (8 curves; single-curve times alone: SRH 12 s,
+local 28.5 -> 17.8 s, nonlocal 30 -> 29 s).
+- `tat.tat.hurkx_gamma` was 41% of a local curve. Its 96-point quadrature
+  built the nodes, weights and `u**1.5` at full N x 96 size per call. Points
+  are now grouped by trap depth dE (one value per material): one node set per
+  group, and the two sums are BLAS matrix-vector products. 3.8x faster
+  (9.7 -> 2.6 ms per call), equal to 6e-16 relative. A per-point fallback
+  remains for many distinct dE values (graded composition).
+- The generation Jacobians in `btbt/local2d.py` and `btbt/paths2d.py` used
+  `sp.diags`/matmul/`hstack`, which drop exact zeros, so the sparsity pattern
+  changed between iterations and every assembly re-sorted. They now return
+  COO matrices with mesh-only index arrays, and
+  `newton_solver_qf_2d._assemble_with_plan` reuses its plan after checking
+  (rows, cols) match. Assembly: 2.3 -> 0.46 s per local curve.
+- Scheduling: curves are submitted longest first (nonlocal, local, SRH), and
+  default workers = performance cores (`core/parallel.py`, moved out of
+  `main2d_mosfet_sweep.py`). 6 and 8 workers now give the same wall time.
+- Tried and reverted: a neighbour-triangle walk before matplotlib's trifinder
+  in the field-line tracer. Nearly every step still needs at least one full
+  search (paths leaving the mesh or crossing vertices), so it saved nothing.
+
+**What's left in BTBT:** the two nonlocal curves are the critical path. About
+half of each is field-line tracing (`btbt/paths2d.py`): ~14k Python-level
+steps per curve at ~1 ms of numpy overhead each. That is a compiled-loop
+problem (a Rust tracer would be >10x on that part, and 3D tunneling needs the
+same tracer on tets). It is left for a decision, since there is no Rust
+toolchain on the machine yet.
+
+**Moved values:** the MOS-cap is bit-identical. BTBT: the only change above
+1e-3 is the nonlocal body current at the shared Vg = Vsub = 0 point
+(-4.057e-13 vs -4.023e-13 A/um, 0.8%). The Id-Vg and Id-Vsub curves swapped
+these two values, and both are within the nonlocal outer iteration's 1%
+stopping tolerance (`OUTER_TOL`). MOSFET timing is unchanged (7.7 s solve,
+same as the committed code under the same load).
+
+Testsuite: 1D 6/6; 2D 4/4 in both the venv and the conda env.
+
+| run | session 24 | now |
+|---|---|---|
+| 2D MOS-cap | 14 s | 3.9 s |
+| BTBT | ~54-60 s | ~46 s |
+| 2D MOSFET | 7.5 s | 7.7 s (unchanged code path) |
