@@ -94,7 +94,24 @@ To confirm everything works end to end after installing:
 
 ```bash
 python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
+python3 testsuite/test_2d_examples.py  # every bias point of the 4 2D drivers (~1.5 min)
 ```
+
+### Fast path (optional): PETSc solvers for 3D
+
+The pip environment above runs everything, using METIS-ordered SuperLU
+(`core/linsolve.py`). For 3D-sized problems, use the conda environment, which
+adds PETSc point-block ILU-GMRES (about 20x faster than SuperLU on a real 3D
+Jacobian):
+
+```bash
+conda env create -f environment.yml && conda activate tcad
+python3 main2d_mosfet_sweep.py --extrude-um 0.1 --nz 6   # 3D extruded MOSFET, full I-V (~75 s)
+```
+
+Set `TCAD_LINSOLVE=superlu|umfpack|scipy_ilu|petsc_lu|petsc_ilu` to force a
+backend (default `auto`: SuperLU below 60k unknowns, PETSc ILU above). The
+3D roadmap and measured performance are in `plans/3d_plan.md`.
 
 ## Diode (`main.py`, `configs/input_diode.yaml`)
 

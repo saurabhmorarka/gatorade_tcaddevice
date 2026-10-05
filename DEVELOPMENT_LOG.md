@@ -3854,3 +3854,85 @@ very-coarse mesh tier). Porting the same Newton/merit to the 2D QF solver
 (it has its own f_tol workarounds, see newton_solver_qf_2d.py); porting
 avalanche to 2D (driving force per edge is already how Genius does it; the
 real 2D work is refining where the peak field actually sits).
+
+---
+
+## 34. Session 24: 3D groundwork - performance core, 3D extruded MOSFET in ~75 s
+
+**Plan.** `plans/3d_plan.md` holds the 3D program and the user's decisions:
+- a self-built level-set "virtual fab" structure creator (no ViennaPS) driven by
+  a three-layer YAML: template, then process flow, then doping/contacts/cut
+- an octree mesher with 3D box-FV
+- a Qt (PySide6 + PyVista) TCAD viewer distributable via GitHub
+- analytic doping first
+- future thermal/stress/diffusion solvers, borrowing COMSOL concepts
+- gate oxide always meshed (no thin-dielectric BC)
+- runtime target: full 3D I-V in about 1 minute
+
+**Measured baseline.** The 2D MOSFET full I-V took 17.5 s, 73% of it in
+SuperLU (~60 ms/solve, ~7 Newton its/point). SuperLU on a 3D-sized Jacobian
+(84k unknowns) needs ~6.7-20 s per factorization, which rules it out for 3D.
+On a real 3D Jacobian (extruded MOSFET): MUMPS takes 0.8-1.1 s and ILU(1)-GMRES
+takes 0.33 s.
+
+**What changed:**
+- `core/linsolve.py` (new): a stateful `LinearSolver`.
+  - It reuses the latest factorization as a GMRES preconditioner across Newton
+    iterations and bias points, refactoring only when Krylov time exceeds the
+    last factorization's time.
+  - Ruiz scaling is done on the CSR values (the old diag-product equilibration
+    re-sorted indices, ~10% of an iteration).
+  - It uses its own right-preconditioned GMRES (scipy's reports convergence
+    unreliably here).
+  - Backends: SuperLU with a METIS nested-dissection ordering (pymetis, pip;
+    2.5x faster in 2D, 4x in 3D), UMFPACK (opt-in), PETSc MUMPS, and PETSc
+    ILU-GMRES with point-block (BAIJ 3x3) ILU(2) for the field-major [psi;
+    phin; phip] layout (2x faster than scalar ILU).
+  - It sets `FI_PROVIDER=tcp` before PETSc loads: conda-forge MPICH otherwise
+    busy-polls about 2 cores per IDLE process.
+- `solver2d/newton_solver_qf_2d.py`:
+  - inexact Newton (Eisenstat-Walker, cap 1e-4 for LU-type preconditioners and
+    1e-8 for ILU; a loose ILU step corrupted the quasi-Fermi levels)
+  - a fixed-pattern COO->CSR assembly plan
+  - the line search's residual is reused, so there is no wasted final assembly
+  - a quadratic-convergence prediction exit on max(psi update, density-weighted
+    quasi-Fermi update). A psi-only version stopped one off-state point with phin
+    3e-4 V off and Id 1000x too large.
+  - a `converged` flag in the result, which drivers now use instead of
+    `res_norm < 1e-4`
+  - `linear_solver=` argument (`"legacy"` keeps the old path for A/B)
+- `mesh3d/extrude.py` (new): an exact 3D box-FV prism mesh from any Mesh2D.
+  `main2d_mosfet_sweep.py --extrude-um W --nz K` runs the full I-V on it. Other
+  driver changes: `--out-dir` on all 2D drivers; segments (`--chunk-points`,
+  default off); default workers = performance-core count (M3 Pro: 6P+6E;
+  spreading onto E-cores was slower).
+- `testsuite/test_2d_examples.py` (new) and 4 goldens: every bias point of the
+  2D diode, MOS-cap, MOSFET and BTBT drivers, run into a temp dir.
+  - Tolerances follow measured convergence: rtol 1e-3, or 2e-2 for BTBT.
+  - Noise floors are measured: off-state Id below ~1e-13 A/um is
+    contact-current round-off (~4e-17 A/um), even with the old solver.
+- `environment.yml` (new, conda `tcad`: PETSc/MUMPS/UMFPACK/pymetis);
+  `requirements.txt` adds pymetis.
+
+**Results** (clean machine, M3 Pro):
+
+| run | before | after |
+|---|---|---|
+| 2D MOSFET | 17.5 s | 7.5 s |
+| BTBT | 93 s | ~60 s |
+| diode | 4.0 s | 2.8 s |
+| MOS-cap | 14 s | 14 s (not ported) |
+| **3D extruded MOSFET** (28k nodes, 84k unknowns, 138 points) | hours | **73 s** |
+
+The 3D run matches 2D on every point within 1e-3, and SS/Vt/DIBL/Ion are
+identical (the first rung of the 3D validation ladder). It is memory-bandwidth
+bound: wall time is ~75 s for 3-8 workers. Testsuite: 1D 6/6; 2D 4/4 in both
+the venv and the conda env.
+
+**Not done:**
+- MOS-cap Poisson solver port (`solver2d/poisson2d_mos.py`)
+- BTBT profiling
+- VTK export (Phase 0)
+- Qt viewer
+- virtual fab, octree mesher
+- next 3D speed levers (better preconditioner / FP32 / fewer Newton its)

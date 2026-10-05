@@ -64,7 +64,7 @@ def sweep_2d(mesh, mat, Va_list, contact_bias_role="anode", verbose=True):
                                  psi_init=prev["psi"], phin_init=prev["phin"], phip_init=prev["phip"])
             r["solve_time_s"] = time.perf_counter() - t0
             results[Va] = r
-            status = "OK" if r["res_norm"] < 1e-4 else "NOT CONVERGED"
+            status = "OK" if r.get("converged", r["res_norm"] < 1e-4) else "NOT CONVERGED"
             if verbose:
                 print(f"Va={Va:+.3f} V: iters={r['iters']:3d}, res_norm={r['res_norm']:.3e}, "
                       f"t={r['solve_time_s']:.4f}s  [{status}]")
@@ -75,6 +75,8 @@ def sweep_2d(mesh, mat, Va_list, contact_bias_role="anode", verbose=True):
 def main():
     parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D bias-sweep driver")
     parser.add_argument("config", nargs="?", default=config2d.DEFAULT_PATH)
+    parser.add_argument("--out-dir", default=None,
+                        help="output directory (default: out/<config name>)")
     parser.add_argument("--plot-bias", default="-1.0,-0.5,0.0,0.5,1.0",
                          help="Comma-separated bias values (nearest swept match) to save static field-map PNGs for")
     args = parser.parse_args()
@@ -87,6 +89,8 @@ def main():
     print(f"mesh: {len(mesh.points)} points, {len(mesh.triangles)} triangles")
 
     out_dir = os.path.join("out", os.path.splitext(os.path.basename(args.config))[0])
+    if args.out_dir:
+        out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
     print("--- 2D sweep (continuation, warm-started from Va=0 outward) ---")
@@ -94,7 +98,7 @@ def main():
     results_2d = sweep_2d(mesh, mat, Va_list)
     total_time_2d = time.perf_counter() - t0
 
-    n_failed = sum(1 for r in results_2d.values() if r["res_norm"] >= 1e-4)
+    n_failed = sum(1 for r in results_2d.values() if not r.get("converged", r["res_norm"] < 1e-4))
     print(f"2D sweep: {len(results_2d) - n_failed}/{len(results_2d)} points converged, "
           f"total {total_time_2d:.3f}s ({total_time_2d / len(results_2d):.4f}s/point avg)")
 

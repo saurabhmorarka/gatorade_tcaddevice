@@ -76,6 +76,8 @@ def build_from_config(cfg):
 def main():
     parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D MOS capacitor C-V driver")
     parser.add_argument("config", nargs="?", default=DEFAULT_PATH)
+    parser.add_argument("--out-dir", default=None,
+                        help="output directory (default: out/<config name>)")
     parser.add_argument("--plot-bias", default="-1.0,0.0,0.6,1.2,2.0",
                          help="Comma-separated VG values (nearest swept match) to save field-map PNGs for")
     args = parser.parse_args()
@@ -106,6 +108,8 @@ def main():
           f"({int(np.sum(mesh.is_insulator))} insulator points)")
 
     out_dir = os.path.join("out", os.path.splitext(os.path.basename(args.config))[0])
+    if args.out_dir:
+        out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
     print("--- 2D low-frequency C-V sweep (continuation, warm-started outward from VG list order) ---")

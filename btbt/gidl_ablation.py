@@ -111,7 +111,7 @@ def main():
         w.writerow(["variant", "Vg_V", "Id_A_per_um", "kane_surface", "tat_surface", "kane_bulk", "tat_bulk"])
         for k, ((label, _), res) in enumerate(zip(vs, results)):
             pts = res["points"]
-            n_ok = sum(p["res_norm"] < 1e-4 for p in pts.values())
+            n_ok = sum(p.get("converged", p["res_norm"] < 1e-4) for p in pts.values())
             v = np.array(sorted(pts))
             c = {key: np.array([pts[x][key] for x in v]) for key in next(iter(pts.values()))}
             for i, x in enumerate(v):

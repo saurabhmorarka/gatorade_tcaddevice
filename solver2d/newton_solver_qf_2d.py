@@ -39,12 +39,14 @@ being rebuilt anyway, so heterojunction-in-2D support is left as future
 work rather than force-fitting MaterialField here.
 """
 import warnings
+import weakref
 
 import numpy as np
 import scipy.sparse as sp
 
 from core.params import Q, Material
 from core.jacobian_scaling import equilibrated_spsolve
+from core.linsolve import LinearSolver
 from core.physics import equilibrium_bulk_potential_arr
 from core.solver import contact_values
 from core.bank_rose_damping import bank_rose_solve
@@ -53,6 +55,31 @@ MAX_QF_STEP = 5.0
 MAX_PSI_STEP = 1.0
 PSI_UPDATE_TOL = 1e-9   # V - converged once the potential update is this small...
 RES_ACCEPT = 1e-4       # ...and |F|_inf is below this (see _run_newton)
+ETA_MAX = 1e-4          # loosest inexact-Newton linear-solve tolerance (see _run_newton);
+                        # measured on the 2D MOSFET: 1e-2 doubles the Newton iterations,
+                        # 1e-6 spends it back in Krylov iterations/refactorizations
+QUAD_PREDICT_MAX = 1e-3  # V - only trust the quadratic-convergence prediction below this update
+RES_PREDICT_MAX = 1e-1   # |F|_inf sanity bound for the prediction exit (see _run_newton)
+QF_DENSITY_REF = 1.0     # cm^-3 - quasi-Fermi updates are weighted by n/(n+ref) in the prediction exit
+
+# One core.linsolve.LinearSolver per mesh per process, so a factorization
+# (and the sparsity-pattern analysis/ordering) is reused across Newton
+# iterations AND across the bias points of a sweep without any driver
+# having to manage solver state. Keyed by id(mesh), with a weak reference
+# to tell a recycled id from the same mesh.
+_LINEAR_SOLVERS = {}
+_ASSEMBLY_PLANS = {}
+
+
+def default_linear_solver(mesh):
+    key = id(mesh)
+    entry = _LINEAR_SOLVERS.get(key)
+    if entry is None or entry[0]() is not mesh:
+        # block_size=3: U = [psi; phin; phip], field-major (point-block ILU
+        # for the iterative 3D backends; ignored by the direct ones)
+        entry = (weakref.ref(mesh), LinearSolver(block_size=3))
+        _LINEAR_SOLVERS[key] = entry
+    return entry[1]
 
 
 def _uniform_clip(delta, N):
@@ -627,15 +654,47 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     rows = np.concatenate([interior_rows, dirichlet_idx])
     cols = np.concatenate([interior_cols, dirichlet_idx])
     data = np.concatenate([interior_data, dirichlet_data])
-    J = sp.coo_matrix((data, (rows, cols)), shape=(3 * N, 3 * N)).tocsc()
+    # CSR with explicit zeros kept: the sparsity pattern then never changes
+    # between iterations, which core/linsolve.py relies on to reuse its
+    # pattern analysis (ordering) and factorizations. The (rows, cols)
+    # index arrays depend only on the mesh and which nodes are contacts /
+    # pinned oxide, so the COO->CSR mapping is computed once (an "assembly
+    # plan") and every later call is a single bincount - no per-iteration
+    # sort or duplicate merge. A generation term with its own sparse
+    # derivative (nonlocal tunneling) can change the pattern, so it keeps
+    # the general conversion.
+    if dGn_dU is None and dGp_dU is None:
+        J = _assemble_with_plan(mesh, is_contact, rows, cols, data, 3 * N)
+    else:
+        J = sp.coo_matrix((data, (rows, cols)), shape=(3 * N, 3 * N)).tocsr()
+        J.sort_indices()
     return F, J
+
+
+def _assemble_with_plan(mesh, is_contact, rows, cols, data, n):
+    key = (id(mesh), n, len(rows), is_contact.tobytes())
+    plan = _ASSEMBLY_PLANS.get(key)
+    if plan is None or plan[0]() is not mesh:
+        lin = rows.astype(np.int64) * n + cols
+        uniq, slot = np.unique(lin, return_inverse=True)
+        indptr = np.concatenate([[0], np.cumsum(np.bincount(uniq // n, minlength=n))])
+        plan = (weakref.ref(mesh), slot, indptr, (uniq % n).astype(np.int32), len(uniq))
+        _ASSEMBLY_PLANS[key] = plan
+    _, slot, indptr, indices, nnz = plan
+    return sp.csr_matrix((np.bincount(slot, weights=data, minlength=nnz), indices, indptr), shape=(n, n))
+
+
+def _row_absmax(J):
+    """Largest |entry| per row of a CSR matrix with no empty rows (every
+    row of this solver's Jacobian has at least its diagonal)."""
+    return np.maximum.reduceat(np.abs(J.data), J.indptr[:-1])
 
 
 def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50, verbose=False,
                      psi_init=None, phin_init=None, phip_init=None,
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
                      damping="line_search", cold_retry=True, velocity_saturation=False,
-                     generation=None):
+                     generation=None, linear_solver="auto"):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -713,7 +772,13 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     caller). Added as -G to the
     recombination term of the electron/hole continuity rows. Only the
     default line-search damping supports it. None (default) leaves the
-    solve unchanged."""
+    solve unchanged.
+
+    linear_solver: "auto" (default) - the per-mesh cached
+    core.linsolve.LinearSolver (factorization reuse + inexact Newton, see
+    _run_newton); a LinearSolver instance - use that one; "legacy" - the
+    original equilibrated SuperLU spsolve with an exact solve every
+    iteration (kept for A/B comparisons)."""
     N = len(mesh.points)
     Vt = mat.Vt
     ni_arr, _ = _mesh_ni_edge_g(mesh, mat)
@@ -793,6 +858,14 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     poisson_scale = poisson_row_scale(mat, h_typ)
     cont_scale = continuity_row_scale(mat, h_typ)
     edge_mask = None
+    if linear_solver == "legacy":
+        lin = None
+    elif linear_solver in (None, "auto"):
+        lin = default_linear_solver(mesh)
+    else:
+        lin = linear_solver
+
+    state = {}
 
     def _run_newton(psi0, phin0, phip0):
         psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
@@ -837,15 +910,43 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         # step length t) made the raw max-norm backtracking cut every step
         # to ~1e-3 - ~100-200 crawling iterations and stalls at high
         # Vgs/Vds - while the same full steps converged in 5 iterations.
+        #
+        # Linear solves are INEXACT (Eisenstat & Walker 1996, choice 2):
+        # each Newton system is solved only to a relative residual
+        # eta_k = 0.9*(merit_k/merit_{k-1})^2, capped at ETA_MAX - loose
+        # while Newton is still far away (where an exact direction buys
+        # nothing), tightening automatically as it converges, so the local
+        # convergence rate is kept. With a reused factorization as GMRES
+        # preconditioner (core/linsolve.py) a loose solve is a few cheap
+        # triangular solves instead of a fresh factorization.
+        #
+        # The Jacobian is only assembled when another iteration will
+        # actually use it: the line search already evaluated the residual
+        # at the accepted point, so convergence is checked on that first.
         it = 0
         tiny_step_streak = 0
+        state["converged"] = False
         best_U, best_res = U, res_norm
+        merit_prev = None
+        upd_prev = None
         for it in range(1, maxiter + 1):
             if res_norm < f_tol:
                 break
-            delta = equilibrated_spsolve(J, -F)
+            row_scale = 1.0 / np.maximum(_row_absmax(J), 1e-300)
+            merit = np.linalg.norm(row_scale * F)
+            if lin is None:
+                delta = equilibrated_spsolve(J, -F)
+            else:
+                eta_cap = min(ETA_MAX, lin.max_rtol(len(F)))
+                eta = eta_cap if merit_prev is None else min(eta_cap, 0.9 * (merit / merit_prev) ** 2)
+                delta = lin.solve(J, -F, rtol=eta)
+            merit_prev = merit
             delta[N:3 * N] = np.clip(delta[N:3 * N], -MAX_QF_STEP, MAX_QF_STEP)
             max_dpsi = np.max(np.abs(delta[:N]))
+            # density-weighted quasi-Fermi update (see the prediction exit below)
+            n_cur, p_cur = _densities(U[:N], U[N:2 * N], U[2 * N:], ni_arr, Vt, _mesh_dEi(mesh))
+            max_dqf = max(np.max(np.abs(delta[N:2 * N]) * n_cur / (n_cur + QF_DENSITY_REF)),
+                          np.max(np.abs(delta[2 * N:]) * p_cur / (p_cur + QF_DENSITY_REF)))
             if max_dpsi > MAX_PSI_STEP:
                 delta = delta * (MAX_PSI_STEP / max_dpsi)
                 max_dpsi = MAX_PSI_STEP
@@ -855,29 +956,27 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             # fixed across the trial steps) - roughly "how many volts is
             # this node's equation from satisfied", comparable across an
             # n+ node and a depleted channel node alike.
-            row_scale = 1.0 / np.maximum(abs(J).max(axis=1).toarray().ravel(), 1e-300)
-            merit = np.linalg.norm(row_scale * F)
             step = 1.0
+            accepted = False
             for _ in range(20):
                 U_try = U + step * delta
                 F_try = _residual(U_try, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
                                    poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
                 merit_try = np.linalg.norm(row_scale * F_try)
                 if np.isfinite(merit_try) and merit_try < merit * (1 - 1e-4 * step):
+                    accepted = True
                     break
                 step *= 0.5
-            else:
-                U_try = U
-
-            U = U_try
-            F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                           poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
+            if accepted:
+                U, F = U_try, F_try
+            upd = step * max_dpsi if accepted else 0.0
+            upd_all = step * max(max_dpsi, max_dqf) if accepted else 0.0
             res_norm = np.max(np.abs(F))
             if res_norm < best_res:
                 best_U, best_res = U, res_norm
             if verbose:
                 print(f"  Newton(QF,2D) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}  "
-                      f"max|dpsi|={step * max_dpsi:.2e}")
+                      f"max|dpsi|={upd:.2e}  merit={merit_try if accepted else merit:.2e}")
 
             # Update-based convergence (the usual device-simulator test):
             # once Newton is in its quadratic regime the potential update
@@ -885,11 +984,46 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             # |F|_inf can sit on a ~1e-5 round-off floor set by the n+
             # rows' global ni normalization - f_tol=1e-9 alone then burns
             # ~20 more iterations that change nothing.
-            if step * max_dpsi < PSI_UPDATE_TOL and res_norm < RES_ACCEPT:
+            #
+            # Plus a quadratic-convergence PREDICTION: two consecutive full
+            # steps in the quadratic regime (e_{k+1} ~ K e_k^2, so
+            # K ~ upd/upd_prev^2) predict the next update ~ upd^3/upd_prev^2.
+            # When that is already below PSI_UPDATE_TOL, the extra iteration
+            # that would merely confirm it (an assembly + a solve per bias
+            # point) is skipped; the returned state's error is then below
+            # PSI_UPDATE_TOL instead of far below it. This exit checks |F|_inf
+            # only against the loose RES_PREDICT_MAX, not RES_ACCEPT: |F|_inf is
+            # dominated by the n+ rows (normalized by one global Q*Dn*ni/h^2,
+            # ~1e9x inflated there), and was measured at 2e-4..6e-3 - i.e. a
+            # ~1e-14 relative current imbalance at n~1e20 - on iterations
+            # whose update was already 1e-7..1e-8 V with a predicted next
+            # update of ~1e-15 V; requiring RES_ACCEPT cost one full extra
+            # iteration on most bias points for no change in the answer.
+            #
+            # The prediction tracks the quasi-Fermi updates as well as psi,
+            # weighted by n/(n+QF_DENSITY_REF) (p likewise) - the usual
+            # device-simulator trick of discounting a carrier that is
+            # essentially absent, whose quasi-Fermi level is undetermined
+            # noise. Psi alone is not enough: measured on the extruded 3D
+            # MOSFET's Vds=0.05V off-state anchor, a psi-only prediction
+            # stopped with psi right to 4e-11 V but phin still 3e-4 V off,
+            # and the off-state Id came out 1000x too large (8e-12 vs
+            # 7.6e-15 A/um).
+            converged = upd < PSI_UPDATE_TOL and accepted and res_norm < RES_ACCEPT
+            if (not converged and accepted and step == 1.0 and upd_prev is not None
+                    and upd_all < QUAD_PREDICT_MAX and upd_prev > upd_all and res_norm < RES_PREDICT_MAX):
+                converged = upd_all ** 3 / upd_prev ** 2 < PSI_UPDATE_TOL
+            upd_prev = upd_all if (accepted and step == 1.0) else None
+            if converged:
+                state["converged"] = True
                 break
             tiny_step_streak = tiny_step_streak + 1 if step < 1e-4 else 0
             if tiny_step_streak >= 2:
                 break
+            if it < maxiter:
+                F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
+                                               poisson_scale, cont_scale, edge_mask, velocity_saturation,
+                                               generation)
         if best_res < res_norm:
             U, res_norm = best_U, best_res
         return U, res_norm, it
@@ -914,5 +1048,11 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
 
     psi, phin, phip = unpack_qf(U, N)
     n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
+    # converged: the update-based/predicted test passed, or |F|_inf reached
+    # RES_ACCEPT (the criterion every driver used on its own before this
+    # flag existed). Drivers should test this flag, not res_norm: the
+    # quadratic-prediction exit can stop with |F|_inf up to RES_PREDICT_MAX.
+    converged = bool(state.get("converged")) or res_norm < RES_ACCEPT
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
-            "iters": it, "res_norm": res_norm, "velocity_saturation": velocity_saturation}
+            "iters": it, "res_norm": res_norm, "converged": converged,
+            "velocity_saturation": velocity_saturation}
