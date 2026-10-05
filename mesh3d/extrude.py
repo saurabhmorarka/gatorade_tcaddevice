@@ -84,4 +84,6 @@ def extrude_mesh(mesh, mat, width_cm, nz, eps_r_insulator=3.9):
         boundary_bc_type=list(mesh.boundary_bc_type) * nz)
     out.width_cm = width_cm          # 3D marker: currents are totals over this width
     out.n_layers = nz
+    out.base_triangles = mesh.triangles   # with z_cm, the prism (wedge) cells for output/viewing
+    out.z_cm = z
     return out

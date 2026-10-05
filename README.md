@@ -95,6 +95,7 @@ To confirm everything works end to end after installing:
 ```bash
 python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
 python3 testsuite/test_2d_examples.py  # every bias point of the 4 2D drivers (~1.5 min)
+python3 testsuite/test_vtk.py          # VTK export (also checks ParaView reads it, if installed)
 ```
 
 ### Fast path (optional): PETSc solvers for 3D
@@ -112,6 +113,29 @@ python3 main2d_mosfet_sweep.py --extrude-um 0.1 --nz 6   # 3D extruded MOSFET, f
 Set `TCAD_LINSOLVE=superlu|umfpack|scipy_ilu|petsc_lu|petsc_ilu` to force a
 backend (default `auto`: SuperLU below 60k unknowns, PETSc ILU above). The
 3D roadmap and measured performance are in `plans/3d_plan.md`.
+
+### Viewing results in ParaView (VTK export)
+
+The 2D drivers take `--vtk` and write `<out-dir>/vtk/*.vtu` plus a `.pvd`
+collection whose time axis is the swept bias:
+
+```bash
+python3 main2d_sweep.py --vtk                 # diode: the saved bias points
+python3 main2d_mos_sweep.py --vtk             # MOS-cap: the saved gate voltages
+python3 main2d_mosfet_sweep.py --vtk          # MOSFET: last point of each curve
+python3 main2d_mosfet_sweep.py --vtk all      # every bias point (~0.5 MB each in 2D, ~3 MB in 3D)
+```
+
+The files are self-contained:
+- **Point fields** use Sentaurus-style names: `ElectrostaticPotential`,
+  `eDensity`/`hDensity`, quasi-Fermi potentials and energies, band edges,
+  `DopingConcentration`, `SpaceCharge`, and `contact_id`.
+- **Cell fields:** `region_id`, `material_id` and `ElectricField`.
+- **Field data:** region, material and contact names, plus contact biases.
+
+Carrier quantities are NaN in insulators. y is depth, positive downward, so
+in ParaView look from -z with view-up (0, -1, 0). The writer is pure numpy
+(`core/vtk_io.py`), so nothing extra needs installing.
 
 ## Diode (`main.py`, `configs/input_diode.yaml`)
 

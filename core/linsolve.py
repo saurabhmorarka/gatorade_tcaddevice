@@ -151,7 +151,10 @@ class _Pattern:
             G = (G + G.T).tocsr()
             G.setdiag(0)
             G.eliminate_zeros()
-            perm, _ = _metis.nested_dissection(xadj=G.indptr, adjncy=G.indices)
+            if hasattr(_metis, "CSRAdjacency"):     # pymetis >= 2025 API
+                perm, _ = _metis.nested_dissection(_metis.CSRAdjacency(G.indptr, G.indices))
+            else:
+                perm, _ = _metis.nested_dissection(xadj=G.indptr, adjncy=G.indices)
             perm = np.asarray(perm)
             tag = sp.csr_matrix((np.arange(1, len(self.indices) + 1, dtype=float), self.indices,
                                  self.indptr), shape=(self.n, self.n))

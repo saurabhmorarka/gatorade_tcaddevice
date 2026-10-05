@@ -77,6 +77,8 @@ def main():
     parser.add_argument("config", nargs="?", default=config2d.DEFAULT_PATH)
     parser.add_argument("--out-dir", default=None,
                         help="output directory (default: out/<config name>)")
+    parser.add_argument("--vtk", action="store_true",
+                        help="also write the saved bias points as VTK (<out-dir>/vtk/*.vtu + .pvd, for ParaView)")
     parser.add_argument("--plot-bias", default="-1.0,-0.5,0.0,0.5,1.0",
                          help="Comma-separated bias values (nearest swept match) to save static field-map PNGs for")
     args = parser.parse_args()
@@ -240,6 +242,14 @@ def main():
         struct_path = os.path.join(out_dir, structure_file)
         sio.write_structure(struct_path, doc)
         print(f"wrote {struct_path} ({len(bias_points)} bias point(s) saved)")
+    if args.vtk:
+        from solver2d.vtk_export import write_sweep
+        anode = next(c.name for c in domain.contacts if c.bias_role == "anode")
+        pvd = write_sweep(os.path.join(out_dir, "vtk"), "diode2d", mesh, mat,
+                          [dict(state=results_2d[Va_sorted[i]], bias=float(Va_sorted[i]),
+                                label=f"Va={Va_sorted[i]:+.3f}V", contact_bias={anode: float(Va_sorted[i])})
+                           for i in save_idx])
+        print(f"wrote {pvd} ({len(save_idx)} state(s))")
 
 
 if __name__ == "__main__":

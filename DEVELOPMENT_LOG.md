@@ -3995,3 +3995,53 @@ Testsuite: 1D 6/6; 2D 4/4 in both the venv and the conda env.
 | 2D MOS-cap | 14 s | 3.9 s |
 | BTBT | ~54-60 s | ~46 s |
 | 2D MOSFET | 7.5 s | 7.7 s (unchanged code path) |
+
+## 36. Session 25 (cont.): Phase 0 - VTK export
+
+Branch `3d-vtk-export` (off `3d-perf-core`). This is the plan's "shared
+contract": every structure and solved state is a `.vtu`, and every sweep is a
+`.pvd`, with one naming convention. ParaView 6 is the reference viewer until
+tcadview exists.
+
+- `core/vtk_io.py` (new): pure-numpy VTK XML writer/reader (no VTK in the pip
+  env).
+  - UnstructuredGrid, one raw appended binary block, UInt64 headers, optional
+    zlib (about half the size).
+  - String FieldData for names. `.pvd` writer/reader.
+- `solver2d/vtk_export.py` (new): device mesh plus state to arrays.
+  - Cells: 2D gives triangles. Extruded 3D gives wedges (`extrude_mesh` now
+    keeps `base_triangles` and `z_cm`).
+  - `region_id` comes from a last-region-wins test at each cell centroid.
+    `material_id`/names come from matching the registry (the `Material`
+    dataclass has no name yet; the 3D YAML will name materials).
+  - Point fields use Sentaurus-style names: potential, densities, quasi-Fermi
+    potentials and energies, Ec/Ev, doping, space charge, `contact_id`.
+  - Carrier quantities are NaN in insulators, so log scales work and the
+    oxide shows as "undefined", as in Sentaurus.
+  - Cell `ElectricField` is exact for the linear (triangle) and
+    linear-x-linear (wedge) interpolant.
+  - Field data: names, contact biases, label, units.
+- Drivers: `--vtk` on the diode, MOS-cap and MOSFET drivers. The MOSFET takes
+  `--vtk last` (default) or `--vtk all`.
+  - In `all` mode the workers write their own states in parallel (files named
+    by bias, so curve segments never collide) and the main process writes one
+    `.pvd` per curve.
+  - Cost: +0.5 s for all 138 2D states (71 MB). 3D: 3.2 MB per state.
+- `testsuite/test_vtk.py` (new, 3 s, 10 tests):
+  - exact round-trips (raw, zlib, multi-block zlib)
+  - region and material assignment
+  - linear-potential field exactness on triangles and wedges
+  - NaN in the oxide
+  - ParaView's `pvpython` reading the export (skipped without ParaView)
+- Checked by hand in ParaView 6: 2D and 3D potential, log-scale electron
+  density through the Id-Vg `.pvd` (the time slider is Vgs), and a clipped 3D
+  wedge state.
+- `core/linsolve.py`: uses pymetis's `CSRAdjacency` API when available (the
+  `xadj/adjncy` call is deprecated).
+
+Regression check: 1D 6/6, 2D 4/4, VTK 10/10. The 3D extruded MOSFET is
+unchanged (71.6 s, same SS/Vt/DIBL/Ion).
+
+**Not in Phase 0 yet:** current density vectors (need edge currents
+projected to cells), a YAML schema skeleton for the virtual fab (that goes
+with Phase 3), and converting old `*_structure.json` files.
