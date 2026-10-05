@@ -14,7 +14,7 @@ performance) and `DEVELOPMENT_LOG.md` section 34.
 | run (M3 Pro, clean machine) | before | now |
 |---|---|---|
 | 2D MOSFET full I-V | 17.5 s | 7.5 s |
-| 2D BTBT sweep | 93 s | ~46 s |
+| 2D BTBT sweep | 93 s | ~38 s (Rust tracer) |
 | 2D diode | 4.0 s | 2.8 s |
 | 2D MOS-cap C-V | 14 s | 3.9 s |
 | 3D extruded MOSFET (28k nodes, 84k unknowns, 138 points) | hours | **73 s** |
@@ -41,6 +41,8 @@ is about 54 s. That still needs confirming on a real FinFET mesh.
 .venv/bin/python testsuite/test_examples.py                 # 1D, 6 tests, ~6 s
 .venv/bin/python testsuite/test_2d_examples.py -v           # 2D, 4 tests, ~70 s
 .venv/bin/python testsuite/test_vtk.py -v                   # VTK export, 10 tests, ~3 s
+.venv/bin/python testsuite/test_native.py -v                # Rust vs numpy tracer, ~9 s
+.venv/bin/python testsuite/test_tcadview.py -v              # viewer, headless, ~3 s
 ~/miniconda3/envs/tcad/bin/python testsuite/test_2d_examples.py -v
 .venv/bin/python main2d_mosfet_sweep.py --out-dir /tmp/x    # 2D timing (~7.5 s)
 ~/miniconda3/envs/tcad/bin/python main2d_mosfet_sweep.py --extrude-um 0.1 --nz 6 --out-dir /tmp/y   # 3D (~75 s)
@@ -93,18 +95,28 @@ is about 54 s. That still needs confirming on a real FinFET mesh.
 - Done on `3d-vtk-export` (`5981d0b`, branched off `3d-perf-core`): Phase 0
   VTK export, `--vtk` on the 2D drivers, `testsuite/test_vtk.py`.
   DEVELOPMENT_LOG section 36.
-- Remaining BTBT cost: field-line tracing in `btbt/paths2d.py` (~half of each
-  nonlocal curve, per-step numpy overhead). It is a Rust candidate (>10x on
-  that part). **Waiting on the user:** no Rust toolchain installed yet.
+- Done on `3d-rust-tracer` (`4ca69dd`, off `3d-vtk-export`): Rust toolchain
+  installed (user approved). `native/` crate `tcad_native` (PyO3, maturin)
+  with the field-line tracer, 8x on tracing, BTBT sweep 45.5 -> 37.6 s.
+  Optional: `core/native.py` falls back to numpy; `TCAD_NATIVE=0` forces it.
+  Built into both envs with `maturin develop --release` (unset CONDA_PREFIX
+  for the venv build). DEVELOPMENT_LOG section 37.
+- Done on `3d-viewer` (`b495361`, off `3d-rust-tracer`): Phase 2 first
+  milestone, `python3 -m tcadview <file.pvd>`. Viewer deps installed in both
+  envs. DEVELOPMENT_LOG section 38.
+- Branch chain (all local, unmerged, unpushed): `3d-perf-core` ->
+  `3d-vtk-export` -> `3d-rust-tracer` -> `3d-viewer`.
 
 ## Next steps (in order)
 
-1. **Phase 2: Qt viewer "tcadview"**. The plan was proposed to the user on
-   2026-10-05; wait for approval before building. It reads the Phase 0
-   `.vtu/.pvd` files.
-2. **Rust tracer** for nonlocal tunneling paths (2D now, 3D tets later), if
-   the user approves installing rustup + maturin. Keep the numpy tracer as
-   the fallback.
+1. **Phase 2 continued:**
+   - user feedback on tcadview
+   - linked viewports and difference plots
+   - contact highlighting
+   - current-density export plus vectors
+   - GitHub packaging (pyproject entry point, 3-OS CI, PyInstaller)
+2. **BTBT critical path** is now the local curves too (Hurkx Gamma plus
+   Newton, ~27 s under contention). Profile again before more Rust.
 3. **3D speed levers** (only after a real 3D device exists to measure on):
    - better preconditioner (AMG on the Poisson block / field-split)
    - FP32 preconditioner (half the memory traffic; Rust or GPU candidate)
