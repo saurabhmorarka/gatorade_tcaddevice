@@ -14,9 +14,9 @@ performance) and `DEVELOPMENT_LOG.md` section 34.
 | run (M3 Pro, clean machine) | before | now |
 |---|---|---|
 | 2D MOSFET full I-V | 17.5 s | 7.5 s |
-| 2D BTBT sweep | 93 s | ~60 s |
+| 2D BTBT sweep | 93 s | ~46 s |
 | 2D diode | 4.0 s | 2.8 s |
-| 2D MOS-cap C-V | 14 s | 14 s (not ported) |
+| 2D MOS-cap C-V | 14 s | 3.9 s |
 | 3D extruded MOSFET (28k nodes, 84k unknowns, 138 points) | hours | **73 s** |
 
 The 3D run matches 2D on every point within 1e-3. The user's target is a full
@@ -39,7 +39,8 @@ is about 54 s. That still needs confirming on a real FinFET mesh.
 
 ```bash
 .venv/bin/python testsuite/test_examples.py                 # 1D, 6 tests, ~6 s
-.venv/bin/python testsuite/test_2d_examples.py -v           # 2D, 4 tests, ~90 s
+.venv/bin/python testsuite/test_2d_examples.py -v           # 2D, 4 tests, ~70 s
+.venv/bin/python testsuite/test_vtk.py -v                   # VTK export, 10 tests, ~3 s
 ~/miniconda3/envs/tcad/bin/python testsuite/test_2d_examples.py -v
 .venv/bin/python main2d_mosfet_sweep.py --out-dir /tmp/x    # 2D timing (~7.5 s)
 ~/miniconda3/envs/tcad/bin/python main2d_mosfet_sweep.py --extrude-um 0.1 --nz 6 --out-dir /tmp/y   # 3D (~75 s)
@@ -84,32 +85,31 @@ is about 54 s. That still needs confirming on a real FinFET mesh.
    `core.linsolve.gmres_right`.
 10. In zsh, `$var` does not word-split in loops (use `for a b in ...`).
 
+## Progress on 2026-10-05
+
+- Done on `3d-perf-core` (`5464ad6`): MOS-cap 14 s -> 3.9 s (bit-identical);
+  BTBT ~54 s -> ~46 s (grouped Hurkx quadrature, fixed-pattern generation
+  Jacobians, longest-first scheduling). DEVELOPMENT_LOG section 35.
+- Done on `3d-vtk-export` (`5981d0b`, branched off `3d-perf-core`): Phase 0
+  VTK export, `--vtk` on the 2D drivers, `testsuite/test_vtk.py`.
+  DEVELOPMENT_LOG section 36.
+- Remaining BTBT cost: field-line tracing in `btbt/paths2d.py` (~half of each
+  nonlocal curve, per-step numpy overhead). It is a Rust candidate (>10x on
+  that part). **Waiting on the user:** no Rust toolchain installed yet.
+
 ## Next steps (in order)
 
-1. **Port the MOS-cap Poisson solver.** `solver2d/poisson2d_mos.py` still
-   calls `equilibrated_spsolve`. Give it `LinearSolver` plus the update-based
-   convergence. The driver `main2d_mos_sweep.py` is single-process: 31 points
-   at 0.34 s each. Check the 2D goldens afterwards.
-2. **Profile the BTBT sweep** (`python -m btbt.main_btbt2d_sweep`, ~60 s, 8
-   curves).
-   - The nonlocal model's sparse generation Jacobian bypasses the
-     assembly plan.
-   - 8 workers exceed the 6 P-cores.
-3. **Phase 0: VTK export.** Write `.vtu` (+ `.pvd` for bias sweeps) from 2D
-   results and the 3D extruded mesh, with region/material/contact naming as
-   in the plan.
-   - Use a pure-numpy XML writer, so no dependency in the pip env.
-   - Verify it opens in ParaView 6 (installed in /Applications).
-4. **Phase 2: Qt viewer "tcadview".** PySide6 + pyvistaqt (PyVista/VTK are in
-   the miniconda base, not yet in `.venv`/`tcad`). The feature list is in the
-   plan, Part 3. Start with regions, slices, lin/log, probe and cut-lines on
-   existing 2D and extruded-3D data. It must be distributable via GitHub
-   (pip extras, CI, PyInstaller release builds).
-5. **3D speed levers** (only after a real 3D device exists to measure on):
+1. **Phase 2: Qt viewer "tcadview"**. The plan was proposed to the user on
+   2026-10-05; wait for approval before building. It reads the Phase 0
+   `.vtu/.pvd` files.
+2. **Rust tracer** for nonlocal tunneling paths (2D now, 3D tets later), if
+   the user approves installing rustup + maturin. Keep the numpy tracer as
+   the fallback.
+3. **3D speed levers** (only after a real 3D device exists to measure on):
    - better preconditioner (AMG on the Poisson block / field-split)
    - FP32 preconditioner (half the memory traffic; Rust or GPU candidate)
    - tangent predictor
-6. Then Phase 3+: virtual fab (planar, then FinFET, then nanosheet), octree
+4. Then Phase 3+: virtual fab (planar, then FinFET, then nanosheet), octree
    mesher (a Rust candidate), the 3D validation ladder.
 
 Before merging `3d-perf-core`, the user's merge gate applies: goldens pass,
