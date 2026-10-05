@@ -17,6 +17,9 @@ dependencies:
   - mumps-mpi
   - scikit-umfpack
   - pymetis
+  - pyside6        # tcadview viewer
+  - pyvista
+  - pyvistaqt
   - pip
   - pip:
       - triangle

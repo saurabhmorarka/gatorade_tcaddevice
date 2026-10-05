@@ -4112,3 +4112,74 @@ Regression check:
 - 2D 4/4 (venv and conda env, native on; includes the BTBT golden)
 - VTK 10/10
 - native 2/2 in both environments
+
+## 38. Session 25 (cont.): Phase 2 - tcadview desktop viewer (first milestone)
+
+The user approved the Phase 2 plan. This is the first milestone: a Qt
+desktop viewer for the Phase 0 `.vtu`/`.pvd` files.
+
+**Stack:** PySide6 6.11 + pyvista 0.49 / pyvistaqt 0.13 (VTK 9.7) +
+matplotlib for the 1D panel. The dependencies are in
+`requirements-viewer.txt` and `environment.yml` (installed into the conda
+env with `--freeze-installed`, so PETSc was not touched).
+
+**Code layout**
+- `tcadview/model.py` holds the data side, with no Qt:
+  - `Session`: a `.pvd` or `.vtu` as states, loaded lazily, with a bounded
+    cache
+  - `State`: grid, regions (cached `extract_cells` per region), names,
+    contact biases, units
+  - field list, scaling (linear / log10|f| / signed log10(1+|f|)), finite
+    ranges over chosen regions (NaN ignored)
+  - probe: all fields at a point
+  - cut line: point fields interpolated, cell fields piecewise constant,
+    NaN outside the mesh
+- `tcadview/app.py` is the window:
+  - left dock:
+    - bias stepper
+    - field, scale, colormap, auto/manual range and mesh edges
+    - region tree (visibility, opacity of the selected regions)
+    - x/y/z slice sliders (3D only)
+    - cut-line entry and Pick
+  - right dock: probe table
+  - bottom dock: cut-line plot
+  - Right-click probes, or sets cut points in Pick mode.
+  - The camera puts the device the right way up (look from -z, up = -y).
+  - The camera is kept across re-renders.
+  - In 3D the default is region surfaces. With slices on, it shows the
+    slices plus each region's outline.
+- `python3 -m tcadview [file] [--field F] [--state i] [--screenshot png]`.
+
+**Headless mode.** Qt's `offscreen` platform has no OpenGL on macOS, and a
+hidden `QtInteractor` has zero size. With `off_screen=True` the window
+creates a plain off-screen `pv.Plotter` behind the same widgets. Tests and
+`--screenshot` use this, and the Linux CI planned for later in Phase 2
+can use it too.
+
+**Fixes found by looking at the screenshots**
+- `clear_actors()` dropped the scalar bar while pyvista kept it
+  registered, so the bar disappeared after the first re-render. Scalar bars
+  are now removed explicitly first.
+- The colour bar is horizontal at the bottom. Vertical, it covered the
+  device and clipped long field names.
+- Dock sizes are applied on the first show.
+
+**Checks**
+- `testsuite/test_tcadview.py` (8 tests, 2.4 s, venv and conda):
+  - session metadata
+  - scales
+  - ranges that ignore the oxide's NaN
+  - probe equal to nodal values at 25 nodes
+  - cut line (NaN in the oxide and outside the mesh)
+  - window driven headless: 2D controls, bias stepping shifting the auto
+    range by exactly the 1 V offset, manual range, 3D slices
+- The on-screen window was run with `QtInteractor` and captured: probe,
+  slices and layout work.
+- 2D goldens 4/4 in the conda env after the install.
+
+**Next in Phase 2:**
+- linked multiple viewports and difference plots
+- contact highlighting
+- current-density vectors (once Phase 0 exports them)
+- the GitHub side: pyproject with a `tcadview` entry point, CI on three
+  operating systems, PyInstaller builds on Releases

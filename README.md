@@ -97,6 +97,7 @@ python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
 python3 testsuite/test_2d_examples.py  # every bias point of the 4 2D drivers (~1.5 min)
 python3 testsuite/test_vtk.py          # VTK export (also checks ParaView reads it, if installed)
 python3 testsuite/test_native.py       # compiled kernels vs numpy (skipped if not built)
+python3 testsuite/test_tcadview.py     # viewer, headless (skipped without the viewer deps)
 ```
 
 ### Fast path (optional): PETSc solvers for 3D
@@ -155,6 +156,34 @@ The files are self-contained:
 Carrier quantities are NaN in insulators. y is depth, positive downward, so
 in ParaView look from -z with view-up (0, -1, 0). The writer is pure numpy
 (`core/vtk_io.py`), so nothing extra needs installing.
+
+### tcadview: desktop viewer (optional)
+
+`tcadview` opens the same `.vtu`/`.pvd` files in a Qt window:
+
+```bash
+pip install -r requirements-viewer.txt          # PySide6, pyvista, pyvistaqt (already in environment.yml)
+python3 main2d_mosfet_sweep.py --vtk all
+python3 -m tcadview out/input_mosfet_2d/vtk/idvg_Vds0.05.pvd
+python3 -m tcadview result.pvd --field eDensity --state -1 --screenshot shot.png   # headless
+```
+
+What it does:
+- **Regions panel:** region/material tree with show/hide and per-region
+  opacity.
+- **Field controls:** field picker with linear, log or signed-log scale,
+  auto or manual range, colormap choice and mesh edges. Densities and
+  doping default to log scales.
+- **Slices (3D):** x/y/z slice planes with sliders. Region outlines stay
+  visible while slicing.
+- **Probe:** right-click a point to list every field there and its region.
+- **Cut line:** type two points or pick them with right-clicks. The 1D
+  panel plots the field along the line and follows the bias stepper.
+- **Bias stepper:** for a sweep, a slider and prev/next buttons. The
+  camera, field and cut line are kept as you step.
+
+The device is drawn the right way up (y is depth). `testsuite/test_tcadview.py`
+drives the window headless.
 
 ## Diode (`main.py`, `configs/input_diode.yaml`)
 
