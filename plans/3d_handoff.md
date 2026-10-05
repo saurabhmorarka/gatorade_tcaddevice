@@ -119,7 +119,7 @@ is about 54 s. That still needs confirming on a real FinFET mesh.
    Newton, ~27 s under contention). Profile again before more Rust.
 3. **3D speed levers** (only after a real 3D device exists to measure on):
    - better preconditioner (AMG on the Poisson block / field-split)
-   - FP32 preconditioner (half the memory traffic; Rust or GPU candidate)
+   - FP32 preconditioner on the CPU (half the memory traffic; no GPU, see decisions)
    - tangent predictor
 4. Then Phase 3+: virtual fab (planar, then FinFET, then nanosheet), octree
    mesher (a Rust candidate), the 3D validation ladder.
@@ -137,8 +137,10 @@ moved values explained, and before/after runtimes reported.
 - Runtime is first-class: full 3D I-V in ~1 min; parallelize; report
   honestly if it can't be met.
 - Rust where it gives 5-10x (speed, CPU or memory). Profile first.
-- Apple GPU has no FP64. GPU use goes to the viewer, voxel ops, and possibly
-  an FP32 preconditioner.
+- GPU only where it cuts TOTAL runtime >3x, kept simple. No custom GPU
+  solver/Jacobian stack (PETSc has no Mac GPU backend), so the device solve
+  stays on the CPU. Candidate to evaluate: the Phase 3 virtual fab
+  (level-set/voxel), profiled end to end first. (Decided 2026-10-05.)
 - Future solvers: thermal, stress (FEM on the same tets), dopant diffusion,
   borrowing COMSOL concepts. Avalanche stays standalone.
 - Show the plan before big implementations. Feature branch per phase. Update
