@@ -15,7 +15,7 @@ TCAD1D_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, TCAD1D_ROOT)
 
 try:
-    import pyvista  # noqa: F401
+    import pyvista
     import pyvistaqt  # noqa: F401
     from PySide6 import QtCore, QtWidgets
     HAVE_VIEWER = True
@@ -114,6 +114,77 @@ class TestModel(unittest.TestCase):
 
 
 @unittest.skipIf(not HAVE_VIEWER, "viewer dependencies not installed")
+class TestSection(unittest.TestCase):
+    """Section views of an extruded 3D state: the flattened plane, and that
+    probes/cuts made in it equal the 3D samples at the same points."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tcadview.model import Session
+        cls.tmp = tempfile.TemporaryDirectory()
+        pvd, _, _ = _write_sweep(cls.tmp.name, extrude=True)
+        cls.st = Session(pvd).state(1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_mapping(self):
+        from tcadview.model import Section
+        for ax, (u, v) in (("x", (2, 1)), ("y", (0, 2)), ("z", (0, 1))):
+            sec = Section(self.st, ax, 0.037)
+            p = sec.to3d([0.011, 0.022])
+            self.assertEqual(p["xyz".index(ax)], 0.037)
+            self.assertEqual((p[u], p[v]), (0.011, 0.022))
+            np.testing.assert_array_equal(sec.to2d(p), [0.011, 0.022])
+            self.assertTrue(sec.contains(p))
+            self.assertFalse(sec.contains(p + 1e-3))
+
+    def test_flat_regions_carry_fields(self):
+        from tcadview.model import Section
+        sec = Section(self.st, "z", 0.05)
+        n = 0
+        for k in range(len(self.st.region_names)):
+            g = sec.region(k)
+            self.assertIsNotNone(g)
+            self.assertTrue(np.all(g.points[:, 2] == 0.0))
+            self.assertIn("ElectrostaticPotential", g.point_data.keys())
+            n += g.n_cells
+        self.assertGreater(n, 100)
+        self.assertIsNone(Section(self.st, "z", 5.0).region(0), "plane misses the device")
+
+    def test_section_probe_is_3d_probe(self):
+        from tcadview.model import Section
+        for ax, uv in (("z", (0.55, 0.05)), ("x", (0.03, 0.05)), ("y", (0.55, 0.06))):
+            sec = Section(self.st, ax, 0.05 if ax != "x" else 0.55)
+            p = sec.to3d(uv)
+            a = self.st.probe(p)
+            self.assertIsNotNone(a, ax)
+            # the displayed (flattened) value agrees with the 3D sample too
+            g = pyvista.PolyData(np.array([[uv[0], uv[1], 0.0]])).sample(
+                sec.region(self.st.region_names.index(a["region"])), tolerance=1e-9)
+            self.assertAlmostEqual(float(g.point_data["ElectrostaticPotential"][0]),
+                                   a["fields"]["ElectrostaticPotential"], places=6)
+
+    def test_axis_cuts(self):
+        from tcadview.model import Section, cut_axis
+        sec = Section(self.st, "z", 0.05)
+        p0, p1 = sec.axis_cut([0.55, 0.05], "v")
+        b = self.st.grid.bounds
+        np.testing.assert_allclose(p0, [0.55, b[2], 0.05])
+        np.testing.assert_allclose(p1, [0.55, b[3], 0.05])
+        self.assertEqual(cut_axis(p0, p1), 1)
+        p0, p1 = sec.axis_cut([0.55, 0.05], "h")
+        self.assertEqual(cut_axis(p0, p1), 0)
+        self.assertIsNone(cut_axis([0, 0, 0], [1, 1, 0]))
+        # the vertical cut equals the same cut entered by hand in 3D
+        d, v = self.st.cut_line(p0, p1, "eDensity", n=60)
+        d2, v2 = self.st.cut_line([b[0], 0.05, 0.05], [b[1], 0.05, 0.05], "eDensity", n=60)
+        np.testing.assert_array_equal(v, v2)
+        self.assertTrue(np.isfinite(v).sum() > 30, "inside the silicon")
+
+
+@unittest.skipIf(not HAVE_VIEWER, "viewer dependencies not installed")
 class TestWindow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -180,6 +251,73 @@ class TestWindow(unittest.TestCase):
         self.assertGreater(len(w.plotter.renderer.actors), n_surface)
         z = w._slice_origin("z")
         self.assertTrue(np.allclose(geoms[0].points[:, 2], z) or np.allclose(geoms[1].points[:, 2], z))
+
+    def test_section_view_probe_and_cuts(self):
+        w = self.window(self.pvd3)
+        self.assertFalse(w.sec_panel.isVisibleTo(w))
+        w.section_combo.setCurrentText("z")
+        self.assertTrue(w.sec_panel.isVisibleTo(w))
+        z = w._slice_origin("z")
+        self.assertEqual((w.section.axis, w.section.pos), ("z", z))
+        self.assertGreater(len(w.sec_plotter.renderer.actors), 0)
+        # right-click inside the section probes the interior (not a surface)
+        w._on_section_right_click((0.55, 0.05, 0.0))
+        np.testing.assert_allclose(w.last_probe, [0.55, 0.05, z])
+        self.assertEqual(w.probe_table.item(1, 1).text(), "substrate")
+        # vertical cut through it, plotted against depth y
+        w.field_combo.setCurrentText("ElectrostaticPotential")
+        w.vcut_btn.click()
+        p0, p1 = w.cut
+        self.assertTrue(w.section.contains(p0) and w.section.contains(p1))
+        self.assertEqual(w.cutplot.ax.get_xlabel(), "y (um)")
+        x = w.cutplot.ax.lines[0].get_xdata()
+        self.assertAlmostEqual(x[0], w.state.grid.bounds[2])
+        # hold: stepping the bias overlays curves
+        w.hold.setChecked(True)
+        w.bias_slider.setValue(2)
+        self.assertEqual(len(w.cutplot.ax.lines), 2)
+        y0, y2 = (ln.get_ydata() for ln in w.cutplot.ax.lines)
+        np.testing.assert_allclose(y2[np.isfinite(y2)], y0[np.isfinite(y0)] + 1.0, atol=1e-9)   # Vg 0 -> 1 V
+        self.assertIs(w.section.state, w.state, "section follows the bias")
+        # moving the slider moves the section; changing field drops held curves
+        w.slice_pos["z"].setValue(100)
+        self.assertAlmostEqual(w.section.pos, w._slice_origin("z"))
+        w.field_combo.setCurrentText("eDensity")
+        self.assertEqual(len(w.cutplot.ax.lines), 1)
+        # Pick in the section sets an in-plane cut
+        w.pick_btn.setChecked(True)
+        w._on_section_right_click((0.3, 0.02, 0.0))
+        w._on_section_right_click((0.8, 0.02, 0.0))
+        self.assertFalse(w.pick_btn.isChecked())
+        self.assertEqual(w.cutplot.ax.get_xlabel(), "x (um)")
+        w.section_combo.setCurrentText("off")
+        self.assertIsNone(w.section)
+        self.assertFalse(w.sec_panel.isVisibleTo(w))
+
+    def test_section_views_render(self):
+        w = self.window(self.pvd3)
+        for ax in "xyz":
+            w.section_combo.setCurrentText(ax)
+            with tempfile.TemporaryDirectory() as t:
+                png = os.path.join(t, "s.png")
+                w.sec_plotter.screenshot(png)
+                self.assertGreater(os.path.getsize(png), 5000, ax)
+
+    def test_2d_axis_cut_and_single_state_note(self):
+        w = self.window(self.pvd2)
+        w.hcut_btn.click()                          # no probe yet: just a message
+        self.assertIsNone(w.cut)
+        w.probe([0.55, 0.05, 0.0])
+        w.hcut_btn.click()
+        self.assertEqual(w.cutplot.ax.get_xlabel(), "x (um)")
+        w2 = self.window(self._first_vtu(self.pvd2))
+        self.assertFalse(w2.bias_box.isEnabled())
+        self.assertIn("--vtk all", w2.bias_label.text())
+
+    @staticmethod
+    def _first_vtu(pvd):
+        d = os.path.dirname(pvd)
+        return os.path.join(d, sorted(f for f in os.listdir(d) if f.endswith(".vtu"))[0])
 
 
 if __name__ == "__main__":

@@ -20,8 +20,12 @@ SCALES = ("linear", "log", "signed log")
 # solver2d/vtk_export.py)
 LOG_FIELDS = {"eDensity", "hDensity", "AbsElectricField"}
 SIGNED_LOG_FIELDS = {"DopingConcentration", "SpaceCharge"}
+# positive fields that vary exponentially between nodes (Scharfetter-Gummel):
+# probes and cut lines interpolate log10 of them, as the colour map does, so
+# a coarse mesh gives a smooth exponential profile, not linear cliffs
+LOG_INTERP_FIELDS = {"eDensity", "hDensity"}
 HIDDEN_FIELDS = {"region_id", "material_id", "contact_id", "vtkOriginalPointIds", "vtkOriginalCellIds",
-                 "_display"}
+                 "_display", "_log_eDensity", "_log_hDensity"}
 
 
 def default_scale(name):
@@ -121,6 +125,27 @@ class State:
         lo, hi = float(v.min()), float(v.max())
         return (lo, hi) if hi > lo else (lo - 0.5, hi + 0.5)
 
+    def _sample(self, pts):
+        """Point fields interpolated at points (N, 3): {name: values}. The
+        LOG_INTERP_FIELDS are interpolated in log10 (exact at nodes)."""
+        g = self.grid
+        for n in LOG_INTERP_FIELDS & set(g.point_data.keys()):
+            key = "_log_" + n
+            if key not in g.point_data.keys():
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    a = np.asarray(g.point_data[n], dtype=float)
+                    g.point_data[key] = np.where(a > 0, np.log10(np.where(a > 0, a, 1.0)), np.nan)
+        s = pv.PolyData(np.atleast_2d(pts)).sample(g, tolerance=1e-9)
+        out = {}
+        for n in s.point_data.keys():
+            if n.startswith("_log_"):
+                continue
+            a = np.asarray(s.point_data[n], dtype=float)
+            if "_log_" + n in s.point_data.keys():
+                a = 10.0 ** np.asarray(s.point_data["_log_" + n], dtype=float)
+            out[n] = a
+        return out
+
     def probe(self, xyz):
         """All fields interpolated at point xyz (um). Returns
         {"region": name or None, "fields": {name: value}}; None outside the
@@ -129,11 +154,11 @@ class State:
         cid = self.grid.find_containing_cell(pt.points[0])
         if cid < 0:
             return None
-        s = pt.sample(self.grid, tolerance=1e-9)
+        s = self._sample(pt.points)
         out = {}
         for n in self.fields():
-            if self.association(n) == "point" and n in s.point_data.keys():
-                v = np.asarray(s.point_data[n][0], dtype=float)
+            if self.association(n) == "point" and n in s:
+                v = s[n][0]
             else:
                 v = np.asarray(self.grid.cell_data[n][cid], dtype=float)
             out[n] = float(np.linalg.norm(v)) if v.ndim else float(v)
@@ -152,8 +177,7 @@ class State:
         cells = self.grid.find_containing_cell(pts)
         inside = cells >= 0
         if self.association(name) == "point":
-            s = pv.PolyData(pts).sample(self.grid, tolerance=1e-9)
-            a = np.asarray(s.point_data[name], dtype=float)
+            a = self._sample(pts)[name]
             v = np.linalg.norm(a, axis=1) if a.ndim == 2 else a
         else:
             v = np.full(n, np.nan)
@@ -203,3 +227,96 @@ class Session:
                 self._cache.pop(next(iter(self._cache)))
             self._cache[i] = load_state(self.states[i].path)
         return self._cache[i]
+
+
+# in-plane axes (u, v) of a section normal to x, y or z; y is depth, so the
+# x- and z-sections keep it as v and show the device the right way up
+SECTION_AXES = {"x": (2, 1), "y": (0, 2), "z": (0, 1)}
+AXIS_NAMES = "xyz"
+
+
+class Section:
+    """A planar cut of a 3D state, flattened into its own 2D mesh so it can be
+    viewed, probed and cut like a 2D result. Display only: probes and cut
+    lines map their in-plane points back to 3D and sample the full 3D grid
+    (State.probe / State.cut_line), so the section adds no interpolation."""
+
+    def __init__(self, state, axis, pos):
+        self.state, self.axis, self.pos = state, axis, float(pos)
+        self.n = AXIS_NAMES.index(axis)
+        self.u, self.v = SECTION_AXES[axis]
+        self._regions = {}
+
+    @property
+    def axis_labels(self):
+        return AXIS_NAMES[self.u], AXIS_NAMES[self.v]
+
+    def to3d(self, uv):
+        uv = np.asarray(uv, dtype=float)
+        p = np.zeros(uv.shape[:-1] + (3,))
+        p[..., self.n] = self.pos
+        p[..., self.u], p[..., self.v] = uv[..., 0], uv[..., 1]
+        return p
+
+    def to2d(self, xyz):
+        xyz = np.asarray(xyz, dtype=float)
+        return np.stack([xyz[..., self.u], xyz[..., self.v]], axis=-1)
+
+    def contains(self, xyz, tol=1e-9):
+        """True if 3D point xyz lies in the section plane."""
+        b = self.state.grid.bounds
+        scale = max(1.0, *(b[2 * i + 1] - b[2 * i] for i in range(3)))
+        return abs(float(np.asarray(xyz)[self.n]) - self.pos) <= tol * scale
+
+    def region(self, k):
+        """Region k cut by the plane, as a flat mesh in (u, v, 0) with every
+        field carried over (point fields interpolated, cell fields per cut
+        cell); None if the plane misses the region."""
+        if k not in self._regions:
+            o = [0.0, 0.0, 0.0]
+            o[self.n] = self.pos
+            g = self.state.region(k)
+            s = g.slice(normal=self.axis, origin=o) if g.n_cells else None
+            if s is not None and s.n_points:
+                s = s.copy()
+                s.points = np.column_stack([self.to2d(s.points), np.zeros(s.n_points)])
+            else:
+                s = None
+            self._regions[k] = s
+        return self._regions[k]
+
+    def bounds2d(self):
+        """(umin, umax, vmin, vmax) of the device in the section plane."""
+        b = self.state.grid.bounds
+        return b[2 * self.u], b[2 * self.u + 1], b[2 * self.v], b[2 * self.v + 1]
+
+    def outline3d(self):
+        """The section rectangle (device bounds) as 3D corner points, closed."""
+        u0, u1, v0, v1 = self.bounds2d()
+        return self.to3d(np.array([[u0, v0], [u1, v0], [u1, v1], [u0, v1], [u0, v0]]))
+
+    def axis_cut(self, uv, direction):
+        """3D end points of the cut through in-plane point uv spanning the
+        device along u ("h") or v ("v")."""
+        u0, u1, v0, v1 = self.bounds2d()
+        u, v = float(uv[0]), float(uv[1])
+        ends = [[u0, v], [u1, v]] if direction == "h" else [[u, v0], [u, v1]]
+        return self.to3d(np.array(ends))
+
+
+def device_axis_cut(state, xyz, direction):
+    """3D end points of the cut through xyz spanning a 2D device along x
+    ("h") or y ("v")."""
+    b = state.grid.bounds
+    p0, p1 = np.array(xyz, dtype=float), np.array(xyz, dtype=float)
+    i = 0 if direction == "h" else 1
+    p0[i], p1[i] = b[2 * i], b[2 * i + 1]
+    return p0, p1
+
+
+def cut_axis(p0, p1, tol=1e-12):
+    """Index of the coordinate a cut runs along if it is axis-aligned, else
+    None (then plot against distance)."""
+    d = np.abs(np.asarray(p1, float) - np.asarray(p0, float))
+    moving = np.flatnonzero(d > tol * max(1.0, float(d.max())))
+    return int(moving[0]) if len(moving) == 1 else None

@@ -4183,3 +4183,68 @@ can use it too.
 - current-density vectors (once Phase 0 exports them)
 - the GitHub side: pyproject with a `tcadview` entry point, CI on three
   operating systems, PyInstaller builds on Releases
+
+## 39. Session 26: tcadview section views (probe and cut inside a 3D device)
+
+User feedback on the first viewer milestone:
+- The bias stepper was missing. The `--vtk` flag of the drivers saves only
+  the last bias point of each curve by default (`--vtk all` saves every
+  point), and the viewer hid the Bias box for one-state files. The box is
+  now always shown, greyed out, with a note to rerun with `--vtk all`.
+- In 3D, right-click probes and picked cut lines only landed on the outer
+  surface. The user wanted to go from a slice to a 2D structure and do 1D
+  cuts there, while keeping the slices as they are for visualization.
+
+Branch `3d-viewer-sections` (off `3d-viewer`).
+
+**Section view.** Slices > "Section view" (off / x / y / z) opens a second,
+2D view to the right of the 3D one, in a draggable splitter. It shows that
+slice face-on and follows the slice slider, the bias stepper, the field and
+the colour range.
+- `model.Section`: per-region slices flattened to (u, v, 0) meshes with all
+  fields. In-plane axes: x-section (z, y), y-section (x, z) as a plan view,
+  z-section (x, y), so depth points down as in 2D.
+- `model.Section` is display only. Right-clicks in the section map back to
+  the 3D point on the plane (`to3d`), and probes and cuts sample the full 3D
+  grid (`State.probe` / `State.cut_line`), so the section adds no
+  interpolation.
+- The 3D view draws the section outline. The probe marker and the cut line
+  show in both views.
+- The section view uses pyvista's 2D style (left-drag pans, no rotation)
+  and parallel projection. The 2D main view now uses the 2D style too: the
+  docstring already promised panning, but the view still rotated.
+
+**Cut lines**
+- "H cut" / "V cut" run a cut through the last probed point, across the
+  section (its in-plane axes) or across a 2D device (x / y).
+- An axis-aligned cut is plotted against its moving coordinate (for
+  example y for a vertical cut). The title gives the fixed coordinates.
+- "Hold" keeps earlier curves, with a legend. Stepping the bias overlays
+  bias points. Changing the field or scale drops the held curves.
+
+**Log-space interpolation of carrier densities (found from a screenshot).**
+A vertical cut through the coarse bulk mesh (nodes about 40 nm apart) was a
+staircase on the log axis: linear interpolation between nodes of a density
+that varies exponentially (Scharfetter-Gummel). The colour map already
+interpolates log10(n). `State._sample` now interpolates log10 for
+`LOG_INTERP_FIELDS = {eDensity, hDensity}` in probes and cut lines.
+Values at nodes are unchanged (`test_probe_matches_nodes` still passes).
+
+**Checks**
+- `testsuite/test_tcadview.py`: 15 tests (was 8), about 3.3 s, venv and
+  conda. The new ones:
+  - the to3d / to2d mapping for all three axes
+  - flat section regions carry every field
+  - the value shown in the section equals the 3D probe (x, y and z
+    sections)
+  - an H/V cut equals the same cut typed in 3D
+  - window: open a section, right-click probe inside the device, V cut
+    plotted against y, hold across bias steps (shift exactly +1 V), the
+    slider moves the section, Pick in the section, closing it
+  - x, y and z section screenshots
+  - 2D H cut
+  - one-state note
+- Checked by eye on the 38-state extruded 3D MOSFET Id-Vg (Vds = 1 V). The
+  channel-centre V cut shows the inversion layer building from Vgs = -0.3
+  to 1.5 V. A colour-bar overlap on tall sections was fixed (camera
+  zoomed out and shifted).

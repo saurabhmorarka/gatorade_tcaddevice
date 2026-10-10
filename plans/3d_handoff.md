@@ -105,12 +105,21 @@ is about 54 s. That still needs confirming on a real FinFET mesh.
   milestone, `python3 -m tcadview <file.pvd>`. Viewer deps installed in both
   envs. DEVELOPMENT_LOG section 38.
 - Branch chain (all local, unmerged, unpushed): `3d-perf-core` ->
-  `3d-vtk-export` -> `3d-rust-tracer` -> `3d-viewer`.
+  `3d-vtk-export` -> `3d-rust-tracer` -> `3d-viewer` -> `3d-viewer-sections`.
+
+## Progress on 2026-10-10
+
+- `3d-viewer-sections` (off `3d-viewer`): section views (2D view of an
+  x/y/z slice, with probes and cuts inside the device), H/V cuts through the
+  last probe, hold, log-space density interpolation, and a one-state bias
+  note. DEVELOPMENT_LOG section 39.
+- To see a sweep in tcadview, run the driver with `--vtk all`. Plain `--vtk`
+  saves only the last bias point of each curve.
 
 ## Next steps (in order)
 
 1. **Phase 2 continued:**
-   - user feedback on tcadview
+   - user feedback on the section view (`3d-viewer-sections`)
    - linked viewports and difference plots
    - contact highlighting
    - current-density export plus vectors

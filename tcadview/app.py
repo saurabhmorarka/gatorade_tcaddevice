@@ -1,9 +1,12 @@
 """tcadview main window: a 3D view of one state of a sweep, with a region
 tree, field/scale/range controls, slice planes, a probe and a cut-line
-panel, and a bias stepper. All data handling is in tcadview/model.py.
+panel, and a bias stepper. For 3D results a "Section view" shows one slice
+face-on in a second, 2D view on the right; probes and cut lines made there
+lie inside the device. All data handling is in tcadview/model.py.
 
-Mouse: left-drag rotates (3D) or pans (2D), wheel zooms, RIGHT-click
-probes a point (or sets cut-line end points in "Pick" mode).
+Mouse: left-drag rotates (3D) or pans (2D and section views), wheel zooms,
+RIGHT-click probes a point (or sets cut-line end points in "Pick" mode).
+H cut / V cut run a cut line through the last probed point.
 """
 import os
 
@@ -39,34 +42,50 @@ def _parse_point(text, dim):
 
 
 class CutPlot(FigureCanvasQTAgg):
-    """1D panel: a field along the cut line."""
+    """1D panel: a field along the cut line. With hold on, earlier curves
+    stay (to overlay bias points or cut positions) until the field or scale
+    changes or Clear is pressed."""
 
     def __init__(self, parent=None):
         self.fig = Figure(figsize=(6, 2.2), layout="constrained")
         super().__init__(self.fig)
         self.setParent(parent)
         self.ax = self.fig.add_subplot(111)
+        self.held = []                    # [(x, v, label)]
+        self.current = None
         self.clear()
 
-    def clear(self, msg="Cut line: set two points (or Pick them with right-clicks) and press Plot"):
+    def clear(self, msg="Cut line: set two points, Pick them with right-clicks, or use an H/V cut "
+                        "through the last probe"):
+        self.held, self.current = [], None
         self.ax.clear()
         self.ax.text(0.5, 0.5, msg, ha="center", va="center", transform=self.ax.transAxes, color="gray")
         self.ax.set_xticks([])
         self.ax.set_yticks([])
         self.draw_idle()
 
-    def plot(self, d, v, name, unit, scale, title):
+    def plot(self, x, v, name, unit, scale, label, xlabel="distance along cut (um)", hold=False):
+        if hold and self.current is not None and self.current[2] != label:
+            self.held = [c for c in self.held if c[2] != self.current[2]] + [self.current]
+        elif not hold:
+            self.held = []
+        self.current = (x, v, label)
         self.ax.clear()
-        y = np.abs(v) if scale == "log" else v
-        self.ax.plot(d, y, lw=1.5)
+        curves = self.held + [self.current]
+        for cx, cv, cl in curves:
+            self.ax.plot(cx, np.abs(cv) if scale == "log" else cv, lw=1.5, label=cl)
         if scale == "log":
             self.ax.set_yscale("log")
         elif scale == "signed log":
-            fin = np.abs(v[np.isfinite(v)])
+            fin = np.abs(np.concatenate([c[1] for c in curves]))
+            fin = fin[np.isfinite(fin)]
             self.ax.set_yscale("symlog", linthresh=max(1.0, float(fin.min()) if len(fin) else 1.0))
-        self.ax.set_xlabel("distance along cut (um)")
+        self.ax.set_xlabel(xlabel)
         self.ax.set_ylabel(f"{name}" + (f" ({unit})" if unit else ""))
-        self.ax.set_title(title, fontsize=9)
+        if len(curves) > 1:
+            self.ax.legend(fontsize=7, loc="best")
+        else:
+            self.ax.set_title(label, fontsize=9)
         self.ax.grid(True, alpha=0.3)
         self.draw_idle()
 
@@ -84,18 +103,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pick_cut = []               # pending picked cut points
         self._picking = False
         self._camera_set = False
+        self._sec_camera_set = False
         self._probe_actor = None
+        self.last_probe = None            # 3D point of the last probe (um)
+        self.section = None               # model.Section shown in the right view
 
+        # 3D view on the left, 2D section view on the right (hidden until a
+        # section is chosen), in a splitter the user can drag
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.sec_panel = QtWidgets.QWidget()
+        sp = QtWidgets.QVBoxLayout(self.sec_panel)
+        sp.setContentsMargins(0, 0, 0, 0)
+        self.sec_title = QtWidgets.QLabel("-")
+        self.sec_title.setStyleSheet("padding: 3px; font-weight: bold")
+        sp.addWidget(self.sec_title)
         if off_screen:
-            # headless (tests, --screenshot): a plain off-screen VTK plotter
-            # with the same API; the Qt widgets still exist and drive it
+            # headless (tests, --screenshot): plain off-screen VTK plotters
+            # with the same API; the Qt widgets still exist and drive them
             self.plotter = pv.Plotter(off_screen=True, window_size=(1200, 800))
-            self.setCentralWidget(QtWidgets.QWidget())
+            self.sec_plotter = pv.Plotter(off_screen=True, window_size=(800, 800))
+            self.splitter.addWidget(QtWidgets.QWidget())
         else:
             self.plotter = QtInteractor(self)
-            self.setCentralWidget(self.plotter.interactor)
+            self.sec_plotter = QtInteractor(self.sec_panel)
+            self.splitter.addWidget(self.plotter.interactor)
+            sp.addWidget(self.sec_plotter.interactor, 1)
             self.plotter.track_click_position(self._on_right_click, side="right")
+            self.sec_plotter.track_click_position(self._on_section_right_click, side="right")
+            self.sec_plotter.enable_2d_style()         # 2D: left-drag pans, no rotation
+        self.splitter.addWidget(self.sec_panel)
+        self.sec_panel.setVisible(False)
+        self.setCentralWidget(self.splitter)
         self.plotter.set_background("white")
+        self.sec_plotter.set_background("white")
+        self.sec_plotter.enable_parallel_projection()
 
         self._build_menu()
         self._build_controls()
@@ -133,6 +174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prev_btn.clicked.connect(lambda: self.bias_slider.setValue(self.bias_slider.value() - 1))
         self.next_btn.clicked.connect(lambda: self.bias_slider.setValue(self.bias_slider.value() + 1))
         self.bias_label = QtWidgets.QLabel("-")
+        self.bias_label.setWordWrap(True)
         bl.addWidget(self.prev_btn, 0, 0)
         bl.addWidget(self.bias_slider, 0, 1)
         bl.addWidget(self.next_btn, 0, 2)
@@ -210,6 +252,13 @@ class MainWindow(QtWidgets.QMainWindow):
             sl.addWidget(s, r, 1)
             sl.addWidget(lbl, r, 2)
             self.slice_on[ax], self.slice_pos[ax], self.slice_lbl[ax] = cb, s, lbl
+        self.section_combo = QtWidgets.QComboBox()
+        self.section_combo.addItems(["off", "x", "y", "z"])
+        self.section_combo.setToolTip("Show the x/y/z slice face-on in a 2D view on the right, where "
+                                      "right-click probes inside the device and cut lines lie in the plane")
+        self.section_combo.currentTextChanged.connect(self._on_section)
+        sl.addWidget(QtWidgets.QLabel("Section view"), 3, 0, 1, 2)
+        sl.addWidget(self.section_combo, 3, 2)
         lay.addWidget(self.slice_box)
 
         # cut line
@@ -230,9 +279,23 @@ class MainWindow(QtWidgets.QMainWindow):
         clear_btn.clicked.connect(self._on_cut_clear)
         for b in (self.pick_btn, plot_btn, clear_btn):
             brow.addWidget(b)
+        arow = QtWidgets.QHBoxLayout()
+        self.hcut_btn = QtWidgets.QPushButton("H cut")
+        self.vcut_btn = QtWidgets.QPushButton("V cut")
+        self.hcut_btn.setToolTip("Horizontal cut through the last probed point, across the device "
+                                 "(or across the section)")
+        self.vcut_btn.setToolTip("Vertical cut through the last probed point, across the device "
+                                 "(or across the section)")
+        self.hcut_btn.clicked.connect(lambda: self.axis_cut("h"))
+        self.vcut_btn.clicked.connect(lambda: self.axis_cut("v"))
+        self.hold = QtWidgets.QCheckBox("Hold")
+        self.hold.setToolTip("Keep earlier curves (e.g. step the bias to overlay bias points)")
+        for b in (self.hcut_btn, self.vcut_btn, self.hold):
+            arow.addWidget(b)
         cl.addRow("From", self.cut_p0)
         cl.addRow("To", self.cut_p1)
         cl.addRow(brow)
+        cl.addRow(arow)
         lay.addWidget(cbox)
 
         lay.addStretch(1)
@@ -274,7 +337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session = model.Session(path)
         self.setWindowTitle(f"tcadview - {os.path.basename(path)}")
         n = len(self.session)
-        self.bias_box.setVisible(n > 1)
+        self.bias_box.setEnabled(n > 1)
         self.bias_slider.blockSignals(True)
         self.bias_slider.setRange(0, n - 1)
         self.bias_slider.setValue(0)
@@ -304,6 +367,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scale_combo.setCurrentText(model.default_scale(default))
         self.scale_combo.blockSignals(False)
         self.slice_box.setVisible(st.dim == 3)
+        self.section_combo.blockSignals(True)
+        self.section_combo.setCurrentText("off")
+        self.section_combo.blockSignals(False)
+        self.section = None
+        self.sec_panel.setVisible(False)
+        self.last_probe = None
+        self.cut = None
+        self.cutplot.clear()
+        if hasattr(self.plotter, "iren") and self.plotter.iren is not None:
+            if st.dim == 2:
+                self.plotter.enable_2d_style()
+            else:
+                self.plotter.enable_trackball_style()
         self._camera_set = False
         self._update_bias_label()
         self._update_slice_labels()
@@ -329,13 +405,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.idx = int(np.clip(i, 0, len(self.session) - 1))
         self._update_bias_label()
+        self._rebuild_section()
         self.render()
         if self.cut is not None:
             self._plot_cut()
 
     def _update_bias_label(self):
         info = self.session.states[self.idx]
-        self.bias_label.setText(f"{info.name}   [{self.idx + 1}/{len(self.session)}]")
+        if len(self.session) > 1:
+            self.bias_label.setText(f"{info.name}   [{self.idx + 1}/{len(self.session)}]")
+        else:
+            self.bias_label.setText(f"{info.name}  (only one bias point saved; for the whole sweep "
+                                    f"rerun the driver with --vtk all)")
 
     # --- rendering -------------------------------------------------------------
     def clim(self):
@@ -375,6 +456,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 out.append(s)
         return out
 
+    def _add_field(self, plotter, geom, k, lo, hi, title, bar):
+        """Draw region k's geometry `geom` coloured by the current field."""
+        st, name = self.state, self.field
+        m = geom.copy(deep=False)
+        assoc = st.association(name)
+        vals = model.scale_values(st.values(name, geom), self.scale)
+        if assoc == "point":
+            m.point_data["_display"] = vals
+        else:
+            m.cell_data["_display"] = vals
+        plotter.add_mesh(
+            m, scalars="_display", preference=assoc, cmap=self.cmap_combo.currentText(), clim=(lo, hi),
+            nan_color=NAN_COLOR, opacity=self.region_opacity.get(k, 1.0), show_edges=self.edges.isChecked(),
+            edge_color="black", line_width=0.5, show_scalar_bar=not bar,
+            scalar_bar_args=dict(title=title, vertical=False, position_x=0.2, position_y=0.03,
+                                 width=0.6, height=0.09, fmt="%.3g", color="black",
+                                 title_font_size=14, label_font_size=12, n_labels=6),
+            reset_camera=False)
+
+    @staticmethod
+    def _clear(plotter):
+        for t in list(plotter.scalar_bars.keys()):
+            plotter.remove_scalar_bar(t, render=False)
+        plotter.clear_actors()
+
+    def _add_marker(self, plotter, p):
+        plotter.add_mesh(pv.PolyData(np.asarray(p, dtype=float)[None, :]), color="black", point_size=10,
+                         render_points_as_spheres=True, name="probe", reset_camera=False)
+
     def render(self):
         if self.session is None:
             return
@@ -382,36 +492,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if not name:
             return
         lo, hi = self.clim()
-        unit = st.units.get(name, "")
-        title = model.scale_label(name, scale, unit)
+        title = model.scale_label(name, scale, st.units.get(name, ""))
         cam = self.plotter.camera_position if self._camera_set else None
-        for t in list(self.plotter.scalar_bars.keys()):
-            self.plotter.remove_scalar_bar(t, render=False)
-        self.plotter.clear_actors()
+        self._clear(self.plotter)
         bar = False
         sliced = st.dim == 3 and any(self.slice_on[a].isChecked() for a in "xyz")
         for k in self.visible_regions():
             for geom in self._display_geometry(k):
-                m = geom.copy(deep=False)
-                assoc = st.association(name)
-                if assoc == "point":
-                    m.point_data["_display"] = model.scale_values(st.values(name, geom), scale)
-                else:
-                    m.cell_data["_display"] = model.scale_values(st.values(name, geom), scale)
-                self.plotter.add_mesh(
-                    m, scalars="_display", preference=assoc, cmap=self.cmap_combo.currentText(), clim=(lo, hi),
-                    nan_color=NAN_COLOR, opacity=self.region_opacity.get(k, 1.0), show_edges=self.edges.isChecked(),
-                    edge_color="black", line_width=0.5, show_scalar_bar=not bar,
-                    scalar_bar_args=dict(title=title, vertical=False, position_x=0.2, position_y=0.03,
-                                         width=0.6, height=0.09, fmt="%.3g", color="black",
-                                         title_font_size=14, label_font_size=12, n_labels=6),
-                    reset_camera=False)
+                self._add_field(self.plotter, geom, k, lo, hi, title, bar)
                 bar = True
             if sliced:
                 self.plotter.add_mesh(st.region(k).extract_feature_edges(), color="gray", opacity=0.4,
                                       reset_camera=False)
+        if self.section is not None:
+            self.plotter.add_mesh(pv.lines_from_points(self.section.outline3d()), color="black",
+                                  line_width=2, reset_camera=False)
         if self.cut is not None:
             self.plotter.add_mesh(pv.Line(*self.cut), color="magenta", line_width=3, reset_camera=False)
+        if self.last_probe is not None:
+            self._add_marker(self.plotter, self.last_probe)
         self.plotter.add_text(st.label or self.session.states[self.idx].name, position="upper_left",
                               font_size=10, color="black", name="label")
         if cam is None:
@@ -419,6 +518,60 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.plotter.camera_position = cam
         self.plotter.render()
+        self.render_section(lo, hi, title)
+
+    def render_section(self, lo=None, hi=None, title=None):
+        """The 2D section view: the plane face-on, coloured on the same
+        range as the 3D view, with the probe and in-plane cut lines."""
+        sec = self.section
+        if sec is None:
+            return
+        if lo is None:
+            lo, hi = self.clim()
+            title = model.scale_label(self.field, self.scale, self.state.units.get(self.field, ""))
+        pl = self.sec_plotter
+        cam = pl.camera_position if self._sec_camera_set else None
+        self._clear(pl)
+        bar = False
+        for k in self.visible_regions():
+            g = sec.region(k)
+            if g is not None:
+                self._add_field(pl, g, k, lo, hi, title, bar)
+                bar = True
+                pl.add_mesh(g.extract_feature_edges(boundary_edges=True, feature_edges=False,
+                                                    manifold_edges=False, non_manifold_edges=False),
+                            color="gray", line_width=1, reset_camera=False)
+        flat = lambda p: np.append(sec.to2d(p), 0.0)                 # noqa: E731
+        if self.cut is not None and sec.contains(self.cut[0]) and sec.contains(self.cut[1]):
+            pl.add_mesh(pv.Line(flat(self.cut[0]), flat(self.cut[1])), color="magenta", line_width=3,
+                        reset_camera=False)
+        if self.last_probe is not None and sec.contains(self.last_probe):
+            self._add_marker(pl, flat(self.last_probe))
+        u, v = sec.axis_labels
+        self.sec_title.setText(f"Section {sec.axis} = {sec.pos:.4g} um      horizontal: {u}, vertical: {v} (um)"
+                               f"      right-click probes, Pick sets cut points")
+        if cam is None:
+            self._reset_section_camera()
+        else:
+            pl.camera_position = cam
+        pl.render()
+
+    def _reset_section_camera(self):
+        """Face-on. x- and z-sections have depth (y) as vertical, pointing
+        down as in 2D; the y-section is a plan view (x right, z up)."""
+        if self.section is None:
+            return
+        up = np.array((0, 1, 0) if self.section.axis == "y" else (0, -1, 0), dtype=float)
+        self.sec_plotter.view_vector((0, 0, 1) if self.section.axis == "y" else (0, 0, -1), viewup=up)
+        self.sec_plotter.reset_camera()
+        # leave the bottom ~15% for the colour bar: zoom out a little and
+        # move the camera down (the device moves up)
+        cam = self.sec_plotter.camera
+        cam.parallel_scale = cam.parallel_scale / 0.85
+        shift = -0.15 * cam.parallel_scale * up
+        cam.focal_point = tuple(np.add(cam.focal_point, shift))
+        cam.position = tuple(np.add(cam.position, shift))
+        self._sec_camera_set = True
 
     def _reset_camera(self):
         """Device the right way up: y is depth (down), so look from -z with
@@ -431,6 +584,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plotter.view_vector((1.0, -0.8, -1.4), viewup=(0, -1, 0))
         self.plotter.reset_camera()
         self._camera_set = True
+        self._reset_section_camera()
 
     # --- control callbacks ---------------------------------------------------------
     def _on_field(self, name):
@@ -442,12 +596,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_range.setChecked(True)
         self.render()
         if self.cut is not None:
+            self.cutplot.held = []        # held curves are of another field
             self._plot_cut()
 
     def _on_scale(self, _):
         self.auto_range.setChecked(True)
         self.render()
         if self.cut is not None:
+            self.cutplot.held = []
             self._plot_cut()
 
     def _on_auto(self, on):
@@ -485,8 +641,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_slice(self, ax):
         self.slice_lbl[ax].setText(f"{self._slice_origin(ax):.4g} um")
-        if self.slice_on[ax].isChecked():
+        on_section = self.section is not None and self.section.axis == ax
+        if on_section:
+            self._rebuild_section()
+        if self.slice_on[ax].isChecked() or on_section:
             self.render()
+
+    def _rebuild_section(self):
+        """(Re)cut the section for the current state and slider position."""
+        ax = self.section_combo.currentText()
+        if self.session is None or ax == "off" or self.state.dim != 3:
+            self.section = None
+        else:
+            self.section = model.Section(self.state, ax, self._slice_origin(ax))
+
+    def _on_section(self, ax):
+        self._sec_camera_set = False
+        self._rebuild_section()
+        self.sec_panel.setVisible(self.section is not None)
+        if self.section is not None:
+            w = max(self.splitter.width(), 2)
+            self.splitter.setSizes([w // 2, w - w // 2])
+        self.render()
 
     # --- probe and cut line ---------------------------------------------------------
     def _on_right_click(self, pos):
@@ -495,23 +671,37 @@ class MainWindow(QtWidgets.QMainWindow):
         p = np.array(pos, dtype=float)
         if self.state.dim == 2:
             p[2] = 0.0
+        self._use_point(p)
+
+    def _on_section_right_click(self, pos):
+        """A right-click in the section view: the in-plane point, mapped
+        back to 3D (exactly on the plane)."""
+        if self.section is None:
+            return
+        self._use_point(self.section.to3d(np.asarray(pos, dtype=float)[:2]))
+
+    def _use_point(self, p):
+        """A picked 3D point: a cut-line end in Pick mode, else a probe."""
         if self._picking:
             self._pick_cut.append(p)
-            (self.cut_p0 if len(self._pick_cut) == 1 else self.cut_p1).setText(
-                ", ".join(f"{v:.5g}" for v in (p[:2] if self.state.dim == 2 else p)))
+            (self.cut_p0 if len(self._pick_cut) == 1 else self.cut_p1).setText(self._coord_text(p))
             if len(self._pick_cut) == 2:
                 self.pick_btn.setChecked(False)
                 self._on_cut_plot()
             return
         self.probe(p)
 
+    def _coord_text(self, p):
+        return ", ".join(f"{v:.5g}" for v in (p[:2] if self.state.dim == 2 else p))
+
     def probe(self, p):
         p = np.asarray(p, dtype=float)
         res = self.state.probe(p)
-        coord = ", ".join(f"{v:.5g}" for v in (p[:2] if self.state.dim == 2 else p))
+        coord = self._coord_text(p)
         if res is None:
             self.statusBar().showMessage(f"({coord}) um: outside the mesh")
             return None
+        self.last_probe = p
         rows = [("position (um)", coord), ("region", res["region"] or "-")]
         rows += [(n + (f" ({self.state.units[n]})" if n in self.state.units else ""), _fmt(v))
                  for n, v in res["fields"].items()]
@@ -521,11 +711,41 @@ class MainWindow(QtWidgets.QMainWindow):
             self.probe_table.setItem(r, 1, QtWidgets.QTableWidgetItem(b))
         self.probe_table.resizeColumnToContents(0)
         v = res["fields"].get(self.field)
-        self.statusBar().showMessage(f"({coord}) um  {res['region']}:  {self.field} = {_fmt(v)}")
-        self.plotter.add_mesh(pv.PolyData(p[None, :]), color="black", point_size=10, render_points_as_spheres=True,
-                              name="probe", reset_camera=False)
+        self.statusBar().showMessage(f"({coord}) um  {res['region']}:  {self.field} = {_fmt(v)}"
+                                     f"      (H cut / V cut run through this point)")
+        self._add_marker(self.plotter, p)
         self.plotter.render()
+        sec = self.section
+        if sec is not None:
+            if sec.contains(p):
+                self._add_marker(self.sec_plotter, np.append(sec.to2d(p), 0.0))
+            else:
+                self.sec_plotter.remove_actor("probe")
+            self.sec_plotter.render()
         return res
+
+    def axis_cut(self, direction):
+        """Horizontal ("h") or vertical ("v") cut through the last probed
+        point, across the section if one is shown (its in-plane axes),
+        else across a 2D device (x / y)."""
+        if self.session is None:
+            return
+        p = self.last_probe
+        if p is None:
+            self.statusBar().showMessage("H/V cut: probe a point first (right-click)")
+            return
+        if self.section is not None and self.section.contains(p):
+            p0, p1 = self.section.axis_cut(self.section.to2d(p), direction)
+        elif self.state.dim == 2:
+            p0, p1 = model.device_axis_cut(self.state, p, direction)
+        else:
+            self.statusBar().showMessage("H/V cut in 3D: open a Section view and probe a point in it")
+            return
+        self.cut_p0.setText(self._coord_text(p0))
+        self.cut_p1.setText(self._coord_text(p1))
+        self.cut = (p0, p1)
+        self.render()
+        self._plot_cut()
 
     def _on_pick_toggle(self, on):
         self._picking = on
@@ -550,10 +770,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_cut()
 
     def _plot_cut(self):
+        """Plot against the moving coordinate for an axis-aligned cut (e.g.
+        depth y for a vertical cut), else against distance along the cut."""
         st = self.state
-        d, v = st.cut_line(*self.cut, self.field)
-        self.cutplot.plot(d, v, self.field, st.units.get(self.field, ""), self.scale,
-                          st.label or self.session.states[self.idx].name)
+        p0, p1 = self.cut
+        d, v = st.cut_line(p0, p1, self.field)
+        i = model.cut_axis(p0, p1)
+        nd = 2 if st.dim == 2 else 3
+        if i is not None:
+            x = p0[i] + d * np.sign(p1[i] - p0[i])
+            xlabel = f"{'xyz'[i]} (um)"
+            fixed = ", ".join(f"{'xyz'[j]}={p0[j]:.4g}" for j in range(nd) if j != i)
+        else:
+            x, xlabel = d, "distance along cut (um)"
+            fixed = f"({self._coord_text(p0)}) -> ({self._coord_text(p1)})"
+        bias = st.label or self.session.states[self.idx].name
+        self.cutplot.plot(x, v, self.field, st.units.get(self.field, ""), self.scale, f"{bias}  [{fixed}]",
+                          xlabel=xlabel, hold=self.hold.isChecked())
 
     def _on_cut_clear(self):
         self.cut = None
@@ -574,4 +807,5 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, ev):
         self.plotter.close()
+        self.sec_plotter.close()
         super().closeEvent(ev)
