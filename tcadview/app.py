@@ -116,6 +116,10 @@ class MainWindow(QtWidgets.QMainWindow):
         sp.setContentsMargins(0, 0, 0, 0)
         self.sec_title = QtWidgets.QLabel("-")
         self.sec_title.setStyleSheet("padding: 3px; font-weight: bold")
+        # wrap, and never let the title set the panel's minimum width (it
+        # used to pin the section panel at ~600 px and squeeze the 3D view)
+        self.sec_title.setWordWrap(True)
+        self.sec_title.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         sp.addWidget(self.sec_title)
         if off_screen:
             # headless (tests, --screenshot): plain off-screen VTK plotters
@@ -132,6 +136,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sec_plotter.track_click_position(self._on_section_right_click, side="right")
             self.sec_plotter.enable_2d_style()         # 2D: left-drag pans, no rotation
         self.splitter.addWidget(self.sec_panel)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.widget(0).setMinimumWidth(150)
+        self.sec_panel.setMinimumWidth(150)
         self.sec_panel.setVisible(False)
         self.setCentralWidget(self.splitter)
         self.plotter.set_background("white")
@@ -157,6 +164,8 @@ class MainWindow(QtWidgets.QMainWindow):
         a.setShortcut(QtGui.QKeySequence.Quit)
         v = self.menuBar().addMenu("&View")
         v.addAction("Reset camera", self._reset_camera)
+        v.addAction("Split 3D / section evenly", self.split_evenly)
+        self._view_menu = v                 # panel show/hide toggles are added once the docks exist
 
     def _build_controls(self):
         dock = QtWidgets.QDockWidget("Controls", self)
@@ -340,6 +349,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, p)
         self._probe_dock = p
         self._docks_sized = False
+        self._view_menu.addSeparator()
+        for dk in self.findChildren(QtWidgets.QDockWidget):
+            dk.setFeatures(dk.features() | QtWidgets.QDockWidget.DockWidgetClosable)
+            self._view_menu.addAction(dk.toggleViewAction())
 
     # --- data ----------------------------------------------------------------
     def _open_dialog(self):
@@ -564,8 +577,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.last_probe is not None and sec.contains(self.last_probe):
             self._add_marker(pl, flat(self.last_probe))
         u, v = sec.axis_labels
-        self.sec_title.setText(f"Section {sec.axis} = {sec.pos:.4g} um      horizontal: {u}, vertical: {v} (um)"
-                               f"      right-click probes, Pick sets cut points")
+        self.sec_title.setText(f"Section {sec.axis} = {sec.pos:.4g} um  ({u} across, {v} down)")
+        self.sec_title.setToolTip("Right-click probes a point inside the device; Pick 2 points and H/V cut "
+                                  "make cut lines in this plane")
         if cam is None:
             self._reset_section_camera()
         else:
@@ -674,11 +688,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_section(self, ax):
         self._sec_camera_set = False
         self._rebuild_section()
+        was_open = self.sec_panel.isVisible()
         self.sec_panel.setVisible(self.section is not None)
-        if self.section is not None:
-            w = max(self.splitter.width(), 2)
-            self.splitter.setSizes([w // 2, w - w // 2])
+        if self.section is not None and not was_open:
+            self.split_evenly()
         self.render()
+
+    def split_evenly(self):
+        w = max(self.splitter.width(), 2)
+        self.splitter.setSizes([w // 2, w - w // 2])
 
     # --- probe and cut line ---------------------------------------------------------
     def _on_right_click(self, pos):

@@ -328,6 +328,22 @@ class TestWindow(unittest.TestCase):
         d = os.path.dirname(pvd)
         return os.path.join(d, sorted(f for f in os.listdir(d) if f.endswith(".vtu"))[0])
 
+    def test_section_splitter_resizes(self):
+        """Opening a section splits the view area evenly, and the divider
+        moves both ways (the section title used to pin a ~600 px minimum)."""
+        w = self.window(self.pvd3)
+        w.resize(1400, 900)
+        w.show()
+        self.app.processEvents()
+        w.section_combo.setCurrentText("z")
+        self.app.processEvents()
+        a, b = w.splitter.sizes()
+        self.assertLessEqual(abs(a - b), 2)
+        self.assertLess(w.sec_panel.minimumSizeHint().width(), 200)
+        w.splitter.moveSplitter(int(0.75 * (a + b)), 1)
+        self.app.processEvents()
+        self.assertGreater(w.splitter.sizes()[0], 0.7 * (a + b))
+
 
 if __name__ == "__main__":
     unittest.main()

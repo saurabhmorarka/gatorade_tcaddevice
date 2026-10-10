@@ -4266,3 +4266,18 @@ Values at nodes are unchanged (`test_probe_matches_nodes` still passes).
 - Hold was renamed "Overlay curves", with a tooltip and a status message
   saying what it does.
 - After a file opens, the status bar says how to probe.
+
+**Follow-up: the 3D view was squeezed when a section opened.** The
+section's one-line title (about 600 px of text) set the section panel's
+minimum width. The 3D view got 138 of 741 px, and the divider could not
+move left of that minimum.
+- The title is now short and wraps, and never sets a minimum width.
+- The splitter does not collapse either view (150 px floor). It splits
+  50/50 when a section first opens. View > "Split 3D / section evenly"
+  does it again.
+- The Controls, Probe and Cut line panels can be closed and reopened from
+  the View menu for more room.
+- Measured: opening gives 368/369 px, and the divider drags freely
+  (550/187, 250/487). Hiding the Probe panel takes the view area from 741
+  to 1047 px. New test `test_section_splitter_resizes` (16 tests, venv and
+  conda).
