@@ -4248,3 +4248,21 @@ Values at nodes are unchanged (`test_probe_matches_nodes` still passes).
   channel-centre V cut shows the inversion layer building from Vgs = -0.3
   to 1.5 V. A colour-bar overlap on tall sections was fixed (camera
   zoomed out and shifted).
+
+**Follow-up (user feedback, same day).**
+- The H/V cut buttons were out of sight at the bottom of the scrolling
+  Controls panel. A window capture at 1400x900 confirmed it.
+  - All cut-line controls moved into the bottom "Cut line" panel, left of
+    the plot: From/To (Enter plots), H cut, V cut, Pick 2 points, Plot,
+    Clear, Overlay curves.
+  - The Regions list is more compact, so Slices is in view.
+- H/V cut after Pick did nothing. Only probes counted as "the last point",
+  and the message went to the status bar.
+  - Pick clicks now count as the last point too.
+  - With no point, the cut runs through the middle of the section or
+    device.
+  - In 3D with no section open, a dialog explains what to do.
+- Clear also empties From/To, cancels Pick and drops the overlaid curves.
+- Hold was renamed "Overlay curves", with a tooltip and a status message
+  saying what it does.
+- After a file opens, the status bar says how to probe.

@@ -223,7 +223,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.region_tree.itemChanged.connect(self._on_region_check)
         self.region_tree.itemSelectionChanged.connect(self._on_region_select)
         self.region_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.region_tree.setMinimumHeight(140)
+        self.region_tree.setMinimumHeight(90)
+        self.region_tree.setMaximumHeight(130)
         rl.addWidget(self.region_tree)
         orow = QtWidgets.QHBoxLayout()
         orow.addWidget(QtWidgets.QLabel("Opacity (selected)"))
@@ -261,43 +262,6 @@ class MainWindow(QtWidgets.QMainWindow):
         sl.addWidget(self.section_combo, 3, 2)
         lay.addWidget(self.slice_box)
 
-        # cut line
-        cbox = QtWidgets.QGroupBox("Cut line (um)")
-        cl = QtWidgets.QFormLayout(cbox)
-        self.cut_p0 = QtWidgets.QLineEdit()
-        self.cut_p1 = QtWidgets.QLineEdit()
-        self.cut_p0.setPlaceholderText("x, y[, z]")
-        self.cut_p1.setPlaceholderText("x, y[, z]")
-        brow = QtWidgets.QHBoxLayout()
-        self.pick_btn = QtWidgets.QPushButton("Pick")
-        self.pick_btn.setCheckable(True)
-        self.pick_btn.setToolTip("Right-click two points in the view")
-        self.pick_btn.toggled.connect(self._on_pick_toggle)
-        plot_btn = QtWidgets.QPushButton("Plot")
-        plot_btn.clicked.connect(self._on_cut_plot)
-        clear_btn = QtWidgets.QPushButton("Clear")
-        clear_btn.clicked.connect(self._on_cut_clear)
-        for b in (self.pick_btn, plot_btn, clear_btn):
-            brow.addWidget(b)
-        arow = QtWidgets.QHBoxLayout()
-        self.hcut_btn = QtWidgets.QPushButton("H cut")
-        self.vcut_btn = QtWidgets.QPushButton("V cut")
-        self.hcut_btn.setToolTip("Horizontal cut through the last probed point, across the device "
-                                 "(or across the section)")
-        self.vcut_btn.setToolTip("Vertical cut through the last probed point, across the device "
-                                 "(or across the section)")
-        self.hcut_btn.clicked.connect(lambda: self.axis_cut("h"))
-        self.vcut_btn.clicked.connect(lambda: self.axis_cut("v"))
-        self.hold = QtWidgets.QCheckBox("Hold")
-        self.hold.setToolTip("Keep earlier curves (e.g. step the bias to overlay bias points)")
-        for b in (self.hcut_btn, self.vcut_btn, self.hold):
-            arow.addWidget(b)
-        cl.addRow("From", self.cut_p0)
-        cl.addRow("To", self.cut_p1)
-        cl.addRow(brow)
-        cl.addRow(arow)
-        lay.addWidget(cbox)
-
         lay.addStretch(1)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidget(w)
@@ -306,11 +270,61 @@ class MainWindow(QtWidgets.QMainWindow):
         dock.setWidget(scroll)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, dock)
 
+    def _build_cut_controls(self):
+        """Cut-line controls, left of the 1D plot they drive (always in
+        view, unlike the bottom of the scrolling Controls panel)."""
+        box = QtWidgets.QWidget()
+        cl = QtWidgets.QFormLayout()
+        self.cut_p0 = QtWidgets.QLineEdit()
+        self.cut_p1 = QtWidgets.QLineEdit()
+        self.cut_p0.setPlaceholderText("x, y[, z] um")
+        self.cut_p1.setPlaceholderText("x, y[, z] um")
+        self.cut_p0.returnPressed.connect(self._on_cut_plot)
+        self.cut_p1.returnPressed.connect(self._on_cut_plot)
+        self.pick_btn = QtWidgets.QPushButton("Pick 2 points")
+        self.pick_btn.setCheckable(True)
+        self.pick_btn.setToolTip("Then right-click the start and end points (in the section view for "
+                                 "points inside a 3D device)")
+        self.pick_btn.toggled.connect(self._on_pick_toggle)
+        plot_btn = QtWidgets.QPushButton("Plot")
+        plot_btn.setToolTip("Plot the cut between the typed From and To points")
+        plot_btn.clicked.connect(self._on_cut_plot)
+        clear_btn = QtWidgets.QPushButton("Clear")
+        clear_btn.setToolTip("Remove the cut line, its points and all curves")
+        clear_btn.clicked.connect(self._on_cut_clear)
+        self.hcut_btn = QtWidgets.QPushButton("H cut")
+        self.vcut_btn = QtWidgets.QPushButton("V cut")
+        tip = ("{} cut across the whole section (or 2D device) through the last point you right-clicked "
+               "(probe or Pick); through the middle if there is none")
+        self.hcut_btn.setToolTip(tip.format("Horizontal"))
+        self.vcut_btn.setToolTip(tip.format("Vertical"))
+        self.hcut_btn.clicked.connect(lambda: self.axis_cut("h"))
+        self.vcut_btn.clicked.connect(lambda: self.axis_cut("v"))
+        self.overlay = QtWidgets.QCheckBox("Overlay curves")
+        self.overlay.setToolTip("On: each new curve is added to the plot instead of replacing it - step the "
+                                "bias or move the cut to compare. Changing field or Clear starts over.")
+        self.overlay.toggled.connect(self._on_overlay)
+        grid = QtWidgets.QGridLayout()
+        for i, b in enumerate((self.hcut_btn, self.vcut_btn, self.pick_btn, plot_btn, clear_btn)):
+            grid.addWidget(b, i // 2, i % 2)
+        cl.addRow("From", self.cut_p0)
+        cl.addRow("To", self.cut_p1)
+        cl.addRow(grid)
+        cl.addRow(self.overlay)
+        left = QtWidgets.QWidget()
+        left.setLayout(cl)
+        left.setFixedWidth(300)
+        h = QtWidgets.QHBoxLayout(box)
+        h.setContentsMargins(4, 4, 4, 4)
+        h.addWidget(left)
+        h.addWidget(self.cutplot, 1)
+        return box
+
     def _build_bottom(self):
         self.cutplot = CutPlot(self)
         self.cutplot.setMinimumHeight(160)
         d = QtWidgets.QDockWidget("Cut line", self)
-        d.setWidget(self.cutplot)
+        d.setWidget(self._build_cut_controls())
         d.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetFloatable)
         self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, d)
         self._cut_dock = d
@@ -384,6 +398,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_bias_label()
         self._update_slice_labels()
         self.render()
+        self.statusBar().showMessage("Right-click probes a point" + (
+            "; for points inside the device use Slices > Section view" if st.dim == 3 else ""))
 
     @property
     def state(self):
@@ -683,6 +699,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _use_point(self, p):
         """A picked 3D point: a cut-line end in Pick mode, else a probe."""
         if self._picking:
+            self.last_probe = p
             self._pick_cut.append(p)
             (self.cut_p0 if len(self._pick_cut) == 1 else self.cut_p1).setText(self._coord_text(p))
             if len(self._pick_cut) == 2:
@@ -730,17 +747,22 @@ class MainWindow(QtWidgets.QMainWindow):
         else across a 2D device (x / y)."""
         if self.session is None:
             return
-        p = self.last_probe
-        if p is None:
-            self.statusBar().showMessage("H/V cut: probe a point first (right-click)")
+        p, sec = self.last_probe, self.section
+        if self.state.dim == 3 and sec is None:
+            QtWidgets.QMessageBox.information(
+                self, "H/V cut", "In 3D, open a Section view first (Slices > Section view), then "
+                "right-click a point in it. The cut runs across that section.")
             return
-        if self.section is not None and self.section.contains(p):
-            p0, p1 = self.section.axis_cut(self.section.to2d(p), direction)
-        elif self.state.dim == 2:
-            p0, p1 = model.device_axis_cut(self.state, p, direction)
+        if p is None or (sec is not None and not sec.contains(p)):
+            b = self.state.grid.bounds
+            p = np.array([(b[0] + b[1]) / 2, (b[2] + b[3]) / 2, (b[4] + b[5]) / 2])
+            if sec is not None:
+                p[sec.n] = sec.pos
+            self.statusBar().showMessage("H/V cut through the middle (right-click a point to choose where)")
+        if sec is not None:
+            p0, p1 = sec.axis_cut(sec.to2d(p), direction)
         else:
-            self.statusBar().showMessage("H/V cut in 3D: open a Section view and probe a point in it")
-            return
+            p0, p1 = model.device_axis_cut(self.state, p, direction)
         self.cut_p0.setText(self._coord_text(p0))
         self.cut_p1.setText(self._coord_text(p1))
         self.cut = (p0, p1)
@@ -786,12 +808,23 @@ class MainWindow(QtWidgets.QMainWindow):
             fixed = f"({self._coord_text(p0)}) -> ({self._coord_text(p1)})"
         bias = st.label or self.session.states[self.idx].name
         self.cutplot.plot(x, v, self.field, st.units.get(self.field, ""), self.scale, f"{bias}  [{fixed}]",
-                          xlabel=xlabel, hold=self.hold.isChecked())
+                          xlabel=xlabel, hold=self.overlay.isChecked())
 
     def _on_cut_clear(self):
         self.cut = None
+        self.cut_p0.clear()
+        self.cut_p1.clear()
+        self.pick_btn.setChecked(False)
+        self._pick_cut = []
         self.cutplot.clear()
         self.render()
+
+    def _on_overlay(self, on):
+        self.statusBar().showMessage(
+            "Overlay on: new curves are added - step the bias or make another cut to compare" if on
+            else "Overlay off: each new curve replaces the plot")
+        if not on and self.cut is not None:
+            self._plot_cut()
 
     def _screenshot(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save screenshot", "tcadview.png", "PNG (*.png)")
@@ -803,7 +836,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._docks_sized:             # dock sizes only apply once shown
             self._docks_sized = True
             self.resizeDocks([self._cut_dock], [230], QtCore.Qt.Vertical)
-            self.resizeDocks([self._probe_dock], [380], QtCore.Qt.Horizontal)
+            self.resizeDocks([self._probe_dock], [300], QtCore.Qt.Horizontal)
 
     def closeEvent(self, ev):
         self.plotter.close()

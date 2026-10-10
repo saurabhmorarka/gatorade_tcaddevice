@@ -273,7 +273,7 @@ class TestWindow(unittest.TestCase):
         x = w.cutplot.ax.lines[0].get_xdata()
         self.assertAlmostEqual(x[0], w.state.grid.bounds[2])
         # hold: stepping the bias overlays curves
-        w.hold.setChecked(True)
+        w.overlay.setChecked(True)
         w.bias_slider.setValue(2)
         self.assertEqual(len(w.cutplot.ax.lines), 2)
         y0, y2 = (ln.get_ydata() for ln in w.cutplot.ax.lines)
@@ -290,6 +290,14 @@ class TestWindow(unittest.TestCase):
         w._on_section_right_click((0.8, 0.02, 0.0))
         self.assertFalse(w.pick_btn.isChecked())
         self.assertEqual(w.cutplot.ax.get_xlabel(), "x (um)")
+        # a Pick click is also the point H/V cuts run through
+        w.vcut_btn.click()
+        self.assertAlmostEqual(w.cut[0][0], 0.8)
+        self.assertEqual(w.cutplot.ax.get_xlabel(), "y (um)")
+        # Clear resets the points, the line and the curves
+        w._on_cut_clear()
+        self.assertEqual((w.cut_p0.text(), w.cut_p1.text(), w.cut), ("", "", None))
+        self.assertEqual(len(w.cutplot.ax.lines), 0)
         w.section_combo.setCurrentText("off")
         self.assertIsNone(w.section)
         self.assertFalse(w.sec_panel.isVisibleTo(w))
@@ -305,8 +313,9 @@ class TestWindow(unittest.TestCase):
 
     def test_2d_axis_cut_and_single_state_note(self):
         w = self.window(self.pvd2)
-        w.hcut_btn.click()                          # no probe yet: just a message
-        self.assertIsNone(w.cut)
+        w.hcut_btn.click()                          # no point yet: through the middle
+        b = w.state.grid.bounds
+        np.testing.assert_allclose(w.cut[0][1], (b[2] + b[3]) / 2)
         w.probe([0.55, 0.05, 0.0])
         w.hcut_btn.click()
         self.assertEqual(w.cutplot.ax.get_xlabel(), "x (um)")
