@@ -15,23 +15,49 @@
   - DEVELOPMENT_LOG entry with every commit (sections 41-43 cover
     Phase 3)
 
-**Progress on `3d-octree-mesh` (2026-10-11, DEVELOPMENT_LOG 45).**
-- `mesh3d/octree.py` works and passes its gate on real fab structures.
-- On `configs/fab_planar_tiny.yaml` it matches the rectilinear Id to
-  0.3% / 0.01%.
-- Use it with `build_device(cfg, mesher="octree")`. Compare script:
-  build both meshers and solve Vg = 0 and 0.6 V at Vds = 0.05 V.
-- Remaining:
-  1. *Node count.* Full device: 144k octree nodes against 68k
-     rectilinear. Restrict face-match to semiconductor interfaces,
-     coarser insulator/metal targets, then inspect the leaf
-     distribution.
-  2. *Speed.* Tree 165 s plus clipping 400 s in Python; move both to
-     Rust in `native/`.
-  3. *Octree VTK output.* `write_state` only handles the rectilinear
-     grid.
-  4. *Wiring.* Add `fab simulate --mesher octree`, tests, a README
-     section.
+**Progress on `3d-octree-mesh` (2026-10-11, DEVELOPMENT_LOG 45-46).**
+- `mesh3d/octree.py` is complete and gated.
+  - Rust kernels: `native/src/boxtree.rs` (`boxtree_refine`, identical
+    leaves to Python) and `native/src/voronoi.rs` (`voronoi_cells`).
+    Rebuild BOTH environments after changes (commands at the top of
+    this file).
+  - Per-axis sizing; face match at semiconductor AND conductor
+    interfaces.
+  - Full planar device: about 65k nodes, mesh 8 s, ILU solve works.
+- `fab simulate --mesher octree` works and writes VTK
+  (`write_state_octree`).
+- Tests: `testsuite/test_octree.py`. The rectilinear comparison needs
+  PETSc (SuperLU calls the rectilinear equilibrium Jacobian singular).
+- The user confirmed that metals must carry no unknowns. Verified:
+  - 0 nodes inside metal; gate surface at one potential.
+  - S/D Fermi level fixed; psi varies 5.5 mV (the ohmic
+    local-neutrality model; the Schottky contact is the real fix).
+
+**NEXT STEP (user approved): find which region drives the octree's
+on-current error before choosing defaults.**
+- Full device, Id at Vds = 50 mV, Vg = 0.6 V; converged value about
+  1.128e-5 A (fine octree 1.1297e-5 with 94k nodes, fine rectilinear
+  1.1274e-5 with 169k).
+
+| octree setting | nodes | Id(0.6) |
+|---|---|---|
+| default: h_fine (2, 0.5, 2), h_fine_other (2, 2, 2), h_max 8, growth 1.35 | 65,633 | 1.0737e-5 (-4.8%) |
+| h_fine (1, 0.5, 1) | 84,130 | -3.1% |
+| h_fine (1, 0.5, 1), h_fine_other (1, 1, 1), h_max 4 | 94,067 | +0.2% |
+| growth 1.25, h_max 6 | 295k | +0.06% (too many nodes) |
+
+- So h_max (4 vs 8) and/or h_fine_other drive it. Suspects:
+  - channel x-spacing far from the junctions (up to h_max)
+  - the gate-oxide/gate interface spacing
+- Method: vary one at a time. Candidate fixes: a semiconductor-only
+  h_max, or the gate edge as an x seed.
+- Off-current has not converged either: the fine meshes differ 5.5%.
+- Scripts (scratchpad, may be gone): `conv.py` built
+  `build_device(cfg, mesher=..., grid=dict(...))`, solved equilibrium,
+  then (Vg, Vd) = (0, 0.05) and (0.6, 0.05) with
+  `TCAD_LINSOLVE=petsc_ilu`, and printed `drain_current`.
+- Still to do after that: README section for the octree mesher; then
+  ask the user about merging `3d-fab-planar` and `3d-octree-mesh`.
 
 **Done on `3d-fab-planar` today** (DEVELOPMENT_LOG 42-43):
 - *Flat gate stack.* The gate dielectric is deposited over the whole
