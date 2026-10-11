@@ -4780,3 +4780,72 @@ tcadview.
 
 The on-current is most sensitive to h_max / h_fine_other. Next: find out
 which region drives the error before choosing defaults.
+
+## 47. Octree on-current error: tree layout, not resolution; contact-node bug fixed
+
+**The study** (`mesh3d/studies/mesher_convergence.py`; one change at a
+time from the default; Id(Vg=0.6, Vd=0.05), converged about 1.128e-5 A):
+
+| setting | nodes | Id(0.6) |
+|---|---|---|
+| default | 65,633 | -4.8% |
+| h_max 4 (all axes) | 57,549 | +2.4% |
+| h_max 4 in x only / y only / z only | 73k / 59k / 59k | +2.3% / +3.5% / -4.7% |
+| h_fine_other 1 (all, or y only) | 88.6k / 66.9k | -5.4% / no change |
+| h_max 4 capped in semiconductor only / insulator only | 74k / 71k | no change / no change |
+| default sizing, root 8-16-8 / 16-16-16 voxels | 47k / 58k | +2.4% / +3.5% |
+
+- Finer leaves anywhere did not move Id. `h_max` also sets the root box
+  (2*h_max), and the root tiling alone moved Id by up to 16% and the node
+  count from 47k to 242k (a 12-24-12 root fragments the tree).
+- Two layouts with the same sheet charge (within 0.5%) and the same
+  surface phin profile (within 0.5 mV) carried different currents.
+  Current was conserved to 1e-13 (drain = source = every x-plane), so the
+  extraction was not the problem.
+
+**Cause: contact nodes that do not touch the metal.**
+- A node was a contact node if its Voronoi cell had any volume inside a
+  conductor leaf. At a 2:1 transition, a hanging node's cell can poke into
+  the metal past the surface nodes.
+- In the 16-16-16 layout, an oxide node 0.5 nm above the channel (gate
+  oxide 1.5 nm) was pinned to the gate potential: a local 3x Cox. The
+  surface node below it had n = 2.4e20 against 5.5e19 for its
+  neighbours, and that edge carried 3x the current.
+- Count of contact nodes not on their metal: 54 gate and 11 source
+  (16-16-16); 1 gate and 2 source (default).
+- *Fix* (`_assemble`): a contact node lies ON its conductor, meaning one of
+  its 8 voxels is that metal.
+- *New quality numbers* (measured, not gated yet): `stray_metal_volume`
+  and `stray_metal_nodes`, the metal volume in cells of non-contact
+  device nodes. It is dropped now, which loses the flux across that piece
+  of metal surface. Default 1.9 nm^3 (3 nodes), 16-16-16 86 nm^3 (65),
+  fine 52 nm^3 (24). These sit mostly in the ILD next to the contact
+  sidewalls, where 1 nm thick ILD leaves with 4 nm tangential size have
+  finer neighbours.
+
+**After the fix** (no velocity saturation / with velocity saturation):
+
+| layout | nodes | Id(0.6) no vsat | Id(0.6) vsat |
+|---|---|---|---|
+| default | 65.6k | 1.422e-5 | 1.074e-5 |
+| root 8-16-8 | 47.3k | 1.411e-5 | 1.155e-5 |
+| root 16-16-16 | 57.8k | 1.350e-5 (was 1.578e-5) | 1.009e-5 (was 1.168e-5) |
+| fine | 94.1k | 1.371e-5 | 1.130e-5 |
+| rectilinear default / fine | 68k / 169k | 1.369e-5 / 1.359e-5 | 1.139e-5 / 1.127e-5 |
+
+- Without velocity saturation the layouts agree within +4% / -1%; off
+  currents within 5%.
+- With velocity saturation the spread is about 14%. The driving force is
+  dpsi / edge_length. On the diagonal edges of transition cells in the
+  inversion layer it picks up the vertical gate field. In the default
+  layout about 1 uA of 14 uA crosses mid-channel on diagonal edges, and
+  0 in the fine octree.
+- Velocity saturation cuts Id by about 20% at Vd = 50 mV on BOTH meshers,
+  far more than the lateral channel field (about 2e4 V/cm) justifies. The
+  edge-projected field also includes the built-in S/D junction fields.
+  This is a physics-model issue in shared solver code, for the user to
+  decide.
+
+Also seen: below the Si surface, leaf heights alternate 0.5 / 1 nm,
+because the label split at the surface leaves odd voxel counts and
+`_rule_size` halves 3 into 1 + 2. That costs nodes, not accuracy.

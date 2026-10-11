@@ -439,7 +439,7 @@ def build_octree_mesh(label, materials, h_nm, node_net, mat, origin_nm=(0.0, 0.0
     ids, LO, HI = tree.leaves()
     leaf_label = label[LO[:, 0], LO[:, 1], LO[:, 2]]
     dual = _dual(tree, ids, LO, HI, leaf_label, label, h, log)
-    m = _assemble(dual, materials, h, node_net, mat, np.asarray(origin_nm, float), face_contacts, label.shape)
+    m = _assemble(dual, materials, h, node_net, mat, np.asarray(origin_nm, float), face_contacts, label)
     m.leaves = (LO, HI, leaf_label)
     m.tree_time_s = t_tree
     m.build_time_s = time.perf_counter() - t0
@@ -612,7 +612,8 @@ def _clip_one_py(n_, P, kd, R, dom_hi, h, shape, owner, ids, LO, HI, leaf_label,
             emit(part, int(leaf_label[k]))
 
 
-def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, shape):
+def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
+    shape = label.shape
     N, P, node_idx = dual["N"], dual["P"], dual["node_idx"]
     kinds = np.array([m["kind"] for m in materials] + [GAS])
     eps = np.array([mat.eps if m["kind"] == SEMI else EPS0 * float(m.get("eps_r", 1.0)) for m in materials]
@@ -623,11 +624,18 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, shape):
     cv = np.bincount(VN, weights=VV * np.isin(kv, (SEMI, INSULATOR)), minlength=N)
     cv_semi = np.bincount(VN, weights=VV * (kv == SEMI), minlength=N)
     label_vol = np.bincount(VL + 1, weights=VV, minlength=len(materials) + 1)       # index 0 = gas
+    # A contact node lies ON its conductor (one of its 8 voxels is that
+    # metal). Not "its Voronoi cell reaches the metal": a hanging node's
+    # cell can poke into the metal past the surface nodes, and that rule
+    # pinned insulator nodes 0.5 nm above the channel to the gate
+    # potential (a local 3x Cox; Id off by up to 16% with the tree layout).
+    padded = np.pad(np.asarray(label), 1, constant_values=-1)
+    around = np.stack([padded[node_idx[:, 0] + a, node_idx[:, 1] + b, node_idx[:, 2] + c]
+                       for a in (0, 1) for b in (0, 1) for c in (0, 1)], axis=1)        # (N, 8) voxel labels
     touch = {}
     for l_, m_ in enumerate(materials):
         if m_["kind"] == CONDUCTOR:
-            s = np.unique(VN[(VL == l_) & (VV > 0)])
-            touch.setdefault(m_["contact"], []).append(s)
+            touch.setdefault(m_["contact"], []).append(np.flatnonzero((around == l_).any(axis=1)))
     touch = {k: np.unique(np.concatenate(v)) for k, v in touch.items()}
 
     FN, FJ, FL, FA = dual["facet"]
@@ -679,6 +687,11 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, shape):
         if clash.any():
             raise ValueError(f"{int(clash.sum())} node(s) touch both contact {names[owner[clash][0]]!r} and {name!r}")
         owner[mask] = c
+    # metal volume in the cells of device nodes that are not on that metal
+    # (a hanging node's cell poking past the surface nodes); it is dropped
+    on_metal = owner >= 0
+    stray = (kinds[VL] == CONDUCTOR) & dev[VN] & ~on_metal[VN]
+    stray_vol, stray_nodes = float(VV[stray].sum()), int(len(np.unique(VN[stray])))
     b_idx = np.concatenate([new_id[contact_nodes[nm] & dev] for nm in names]) if names else np.zeros(0, int)
     b_type = np.array(sum([[f"contact:{nm}"] * int((contact_nodes[nm] & dev).sum()) for nm in names], []),
                       dtype=object)
@@ -705,7 +718,8 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, shape):
         boundary_point_index=b_idx, boundary_bc_type=b_type, boundary_edges=set(),
         domain=SimpleNamespace(contacts=contacts), h_min_cm=float(L.min() * cm) if len(L) else 0.0,
         grid_index=node_idx[dev], node_id=new_id, dim=3,
-        quality=dict(facet_asymmetry=asym, one_sided_facets=one_sided),
+        quality=dict(facet_asymmetry=asym, one_sided_facets=one_sided, stray_metal_volume=stray_vol,
+                     stray_metal_nodes=stray_nodes),
         label_volume=label_vol, n_clipped=dual["n_clipped"])
 
 
