@@ -1,5 +1,125 @@
 # 3D program: handoff (written 2026-10-04 evening, resume 2026-10-05)
 
+## COLD START (2026-10-11): read this first if the conversation was cleared
+
+This section is meant to be enough to continue with zero chat context.
+The detailed "START HERE" passdown below has the numbers;
+DEVELOPMENT_LOG.md sections 41-46 have the full story.
+
+### 1. Working rules the user set (also in memory, MEMORY.md)
+- *Git.* Work on feature branches. Never add Claude attribution
+  (Co-Authored-By / "Generated with") to commits or PRs, and never
+  rewrite old pushed history. Confirm before any push or merge.
+- *Log.* Add a DEVELOPMENT_LOG.md entry with every commit.
+- *Plans.* Show the plan before a big implementation. The user
+  approves; then build.
+- *Mesh quality.* A mandatory gate on every build, never opt-in.
+  Non-obtuse / Voronoi-admissible meshes only.
+- *Geometry.* The user inspects 3D structures closely: no slivers,
+  ledges or voids. The viewer must show exactly what the solver sees.
+- *Physics.*
+  - Metals carry no unknowns: fixed-potential Dirichlet surfaces.
+  - Contacts are process-built metal volumes; Schottky (tunneling)
+    contacts come later.
+  - Planar devices always have finite width with STI.
+  - ILD between the spacer and the contacts; contacts as tall as or
+    taller than the gate.
+- *Speed.* Runtime matters: the full 3D I-V target is about 1 minute.
+  Use Rust (PyO3, `native/`) where it gives 5-10x or more; profile
+  first.
+- *Communication.* The user likes short, plain status updates and
+  honest numbers.
+
+### 2. Environments
+- *venv:* `.venv/bin/python`, no PETSc (SciPy SuperLU).
+- *conda:* `~/miniconda3/envs/tcad/bin/python`, with PETSc. Use it for
+  3D solves. `TCAD_LINSOLVE=petsc_ilu` or `petsc_lu`.
+- *Rust kernels* (`native/`): rebuild BOTH environments after any
+  change, from `native/`:
+  - `env -u CONDA_PREFIX VIRTUAL_ENV=$PWD/../.venv ../.venv/bin/maturin develop --release`
+  - `env -u VIRTUAL_ENV CONDA_PREFIX=$HOME/miniconda3/envs/tcad ~/miniconda3/envs/tcad/bin/maturin develop --release`
+- *Tests:*
+  - `.venv/bin/python -m unittest testsuite.test_fab testsuite.test_tcadview testsuite.test_octree`
+  - also run `test_octree` under conda (its rectilinear comparison
+    needs PETSc)
+  - 2D golden tests: `testsuite.test_2d_examples`, about 2 min. Run
+    them whenever shared solver code changes; that's the merge gate.
+
+### 3. Branches (local; `main` is pushed, nothing since)
+`main` (Phases 0-2) -> `3d-fab-planar` (Phase 3) -> `3d-octree-mesh`
+(Phase 5 mesher, current). Neither feature branch is merged or pushed;
+ask the user before doing either.
+
+### 4. Map of the 3D code
+| path | what it is |
+|---|---|
+| `fab/structure.py` | level-set virtual fab: regions, deposit/etch/implant, `cell_labels()` (gas iff union-field cell mean >= 0; `_despeckle`), `check()` structure check |
+| `fab/templates.py` | planar template: STI, flat gate dielectric, TiN gate, spacer, ILD + CMP, contact trenches + W fill |
+| `fab/flow.py`, `fab/expr.py` | YAML layers, expressions; `build()` runs `check()` every time |
+| `fab/simulate.py` | `device_voxels` -> mesh (`mesher="cartesian"` or `"octree"`) -> `solve_mosfet` sweeps; `write_state` / `write_state_octree` VTK; `python -m fab simulate cfg --mesher octree` |
+| `mesh3d/cartesian.py` | graded rectilinear box-FV mesh (the reference) |
+| `mesh3d/octree.py` | THE octree mesher: `target_spacing` (per-axis), `BoxTree` (rules: label, size, 2:1 balance, face match at semiconductor+conductor interfaces), `_dual` (box fast path + clipped cells), `_assemble`, `check_octree_mesh` (gate) |
+| `native/src/boxtree.rs`, `voronoi.rs` | Rust mirrors of `BoxTree.refine` and the Voronoi clipper |
+| `mesh3d/studies/` | `octree_transition_study.py` (why Voronoi, not tet fans), `mesher_convergence.py` (accuracy runs), `tree_leaf_stats.py`, `facet_asymmetry_debug.py` |
+| `solver2d/newton_solver_qf_2d.py` | shared DD solver. Contact `boundary_point_index` must be sorted ascending. Ohmic metal-volume contacts: insulator nodes take V + median psi_bulk. |
+| `tcadview/` | viewer. Process builds draw exact voxel faces (`voxel_surface`); "smooth surfaces" checkbox for level-set contours |
+| `configs/fab_planar.yaml`, `fab_planar_tiny.yaml` | full and small test devices |
+
+### 5. Octree design in one paragraph
+The nodes are the corners of a kd-style box tree over the fab voxels.
+The control volumes are the EXACT Voronoi diagram of those nodes,
+which is always admissible: couplings are facet areas >= 0. This is
+the 3D analogue of the 2D non-obtuse rule; tet centre-fans fail
+(about 15% negative couplings).
+- Box cells (the corner test via KD-tree) use octants: vectorized and
+  exact per material.
+- Other cells are clipped exactly in Rust. Per-material splits clip
+  against the leaf boxes.
+- Face match at semiconductor and conductor interfaces keeps nodes on
+  those surfaces.
+- The gate checks, every build, raising on failure: exact per-material
+  volumes, facet symmetry, couplings >= 0, conformity, no isolated
+  nodes, contacts present.
+
+Gotchas already hit:
+- A coplanar clip must be a no-op.
+- The facet round-off cutoff is relative (1e-8 * L^2).
+- Isotropic sizing put fine y-spacing down the STI sidewalls; sizing
+  is per-axis now.
+- A conductor surface between nodes made facets ambiguous; face match
+  now covers conductors.
+
+### 6. Exact next step (approved by the user)
+Find why the DEFAULT octree under-predicts the on-current by about 5%,
+then pick defaults.
+- Target: Id(Vg=0.6, Vd=0.05) of about 1.128e-5 A on the full planar
+  device.
+- Use `mesh3d/studies/mesher_convergence.py` and add named settings to
+  its RUNS dict, varying ONE thing at a time from "oct default":
+  - h_max 8 -> 4 alone
+  - h_fine_other 2 -> 1 alone
+  - h_fine x/z 2 -> 1 alone
+  - optionally a semiconductor-only h_max, or gate edges as x seeds
+    (the channel x-spacing far from the junctions may be the culprit)
+- Look at `tree_leaf_stats.py` output for where nodes go (the ILD had
+  11.5k small leaves).
+- Goal: within about 1% of the converged value, with at most about
+  the rectilinear default's node count (68k) if possible.
+- Then: README section for the octree mesher, update this file, and
+  ask the user about merges.
+
+### 7. Open items to raise with the user
+- Merging/pushing `3d-fab-planar` and `3d-octree-mesh`.
+- Capacitance extraction (Cgd/Cgs from terminal charge vs bias),
+  requested interest; it's possible now that contacts are volumes.
+- Device design (a design question, not numerics): Vt near 0 at 1 V,
+  DIBL 170 mV/V.
+- Schottky contacts; STI corner rounding option; Phase 4 (FinFET,
+  nanosheet), where the octree should beat the rectilinear grid.
+- The SuperLU singular equilibrium on the rectilinear mesh (PETSc is
+  fine).
+
+
 ## START HERE - passdown of 2026-10-10 night (session limit hit)
 
 **Branches.**
