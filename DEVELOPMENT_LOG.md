@@ -4616,3 +4616,18 @@ That exposed a solver bug (`solver2d/newton_solver_qf_2d.py`):
   golden tests (`test_2d_examples`) pass unchanged.
 - A Schottky contact will later set this potential from the metal work
   function.
+
+Reference 3D Id-Vg with the full stack (67,956 nodes, half width,
+PETSc LU, 434 s), against the earlier run cut 10 nm above the silicon:
+
+| | truncated (sec. 42) | full stack + ILD |
+|---|---|---|
+| Vt,cc lin -> sat | 0.214 -> 0.065 V | 0.218 -> 0.057 V |
+| DIBL | 156 mV/V | 170 mV/V |
+| SS | 87 mV/dec | 89 mV/dec |
+| Ion | 1907 uA/um | 1827 uA/um |
+| Ioff | 8.3e-7 A/um | 1.0e-6 A/um |
+
+The tall drain metal, now in the electrostatics through the spacer and
+ILD, couples more drain field into the channel. The capacitances
+themselves (Cgd, Cgs from charge vs bias) are not computed yet.
