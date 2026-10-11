@@ -89,7 +89,24 @@ Gotchas already hit:
 - A conductor surface between nodes made facets ambiguous; face match
   now covers conductors.
 
-### 6. Exact next step (approved by the user)
+### 6. Exact next step (UPDATED 2026-10-11, DEVELOPMENT_LOG 47; commit 65acd25)
+The study is done. The 5% was tree LAYOUT (the root tiling), not
+resolution. Main bug fixed: contact nodes must lie on their metal.
+Remaining, proposed to the user and waiting on answers:
+1. *A tree rule against stray metal volume.* A device leaf touching a
+   conductor gets split tangentially when a finer leaf across its far
+   face would put a hanging node closer to the metal than the surface
+   nodes are. Then gate `stray_metal_volume == 0`. This touches
+   Python + Rust `boxtree`.
+2. *Velocity-saturation driving force* (shared solver; the user decides):
+   dpsi/edge_len gives a 20% Id cut at Vd = 50 mV on both meshers, and
+   a layout-dependent cut on diagonal edges. Options: drive by the
+   quasi-Fermi gradient (convergence risk, see the edge_mobility
+   docstring), or by the edge component of the nodal current-direction
+   field.
+3. Then pick defaults (root, h_max) and write the README section.
+
+### 6a. Old next step (done)
 Find why the DEFAULT octree under-predicts the on-current by about 5%,
 then pick defaults.
 - Target: Id(Vg=0.6, Vd=0.05) of about 1.128e-5 A on the full planar
