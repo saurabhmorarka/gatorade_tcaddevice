@@ -96,10 +96,14 @@ Done:
 - the opt-in "hybrid" quasi-Fermi velocity-saturation force with an
   efield warm-up (49)
 
+Hybrid is now the DEFAULT (`true` = hybrid; section 50, commit 70cf3a7).
 Waiting on the user:
-- Make `velocity_saturation: hybrid` the default? It would go in
-  `fab/simulate.py` (3D) and the 2D configs. The 2D goldens would need
-  re-capturing, because Ion moves 0.4%.
+- Better start on a contact bias change: shift phi and psi by dV over
+  the contact's connected doped region. This would recover the 3D solve
+  time; the fallback now doubles it, 31 s -> 57 s for 3 points.
+- Speed pass toward the 1-minute full 3D I-V. Today: mesh 15 s and about
+  7-10 s per bias point (65k nodes, ILU), so a 40-60 point I-V takes
+  5-8 minutes.
 
 Then:
 1. Defaults study, with hybrid: the coarse octree is about 3.5% above the
