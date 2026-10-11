@@ -89,22 +89,25 @@ Gotchas already hit:
 - A conductor surface between nodes made facets ambiguous; face match
   now covers conductors.
 
-### 6. Exact next step (UPDATED 2026-10-11, DEVELOPMENT_LOG 47; commit 65acd25)
-The study is done. The 5% was tree LAYOUT (the root tiling), not
-resolution. Main bug fixed: contact nodes must lie on their metal.
-Remaining, proposed to the user and waiting on answers:
-1. *A tree rule against stray metal volume.* A device leaf touching a
-   conductor gets split tangentially when a finer leaf across its far
-   face would put a hanging node closer to the metal than the surface
-   nodes are. Then gate `stray_metal_volume == 0`. This touches
-   Python + Rust `boxtree`.
-2. *Velocity-saturation driving force* (shared solver; the user decides):
-   dpsi/edge_len gives a 20% Id cut at Vd = 50 mV on both meshers, and
-   a layout-dependent cut on diagonal edges. Options: drive by the
-   quasi-Fermi gradient (convergence risk, see the edge_mobility
-   docstring), or by the edge component of the nodal current-direction
-   field.
-3. Then pick defaults (root, h_max) and write the README section.
+### 6. Exact next step (UPDATED 2026-10-11 evening; DEVELOPMENT_LOG 47-49)
+Done:
+- contact nodes on their metal (47)
+- the exact stray-metal test with a refine loop, gated (48)
+- the opt-in "hybrid" quasi-Fermi velocity-saturation force with an
+  efield warm-up (49)
+
+Waiting on the user:
+- Make `velocity_saturation: hybrid` the default? It would go in
+  `fab/simulate.py` (3D) and the 2D configs. The 2D goldens would need
+  re-capturing, because Ion moves 0.4%.
+
+Then:
+1. Defaults study, with hybrid: the coarse octree is about 3.5% above the
+   fine meshes. Find the region by one-at-a-time runs as before. Candidates:
+   h_fine x/z in the channel, and the alternating 0.5/1 nm y-leaves under
+   the surface (`_rule_size` halving odd boxes).
+2. Speed: limit the stray-metal recheck to clipped cells near metal.
+3. README section for the octree mesher; then ask about merges.
 
 ### 6a. Old next step (done)
 Find why the DEFAULT octree under-predicts the on-current by about 5%,
