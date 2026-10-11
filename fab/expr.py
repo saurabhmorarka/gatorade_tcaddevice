@@ -68,8 +68,11 @@ def resolve_params(params):
                 out[k] = evaluate(v, params)
                 continue
             except ExprError:
-                if isinstance(v, str) and not re.search(r"[\d+\-*/()]", v):
-                    out[k] = v          # a plain word, e.g. a material name
+                # a single word that is not a parameter: a name (a material,
+                # "SiO2", "SiGe0.3"), not an expression
+                if isinstance(v, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", v.strip()) \
+                        and v.strip() not in params:
+                    out[k] = v
                     continue
                 raise
         out[k] = v

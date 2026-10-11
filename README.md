@@ -96,7 +96,11 @@ finite width and STI on both sides:
 7. extension implant, self-aligned to the gate
 8. nitride spacer (conformal deposit plus anisotropic etch)
 9. source/drain implant, self-aligned to the gate and spacer
-10. metal contacts (W), whole volumes
+10. ILD fill and CMP to `ild_cap` above the gate, so dielectric (never
+    gas) sits between the spacer and the contacts
+11. contact trenches etched through the ILD only, filled with W up to the
+    ILD top: whole metal volumes, taller than the gate (their sidewalls
+    facing the gate are much of the off-state capacitance)
 
 Every dimension is a parameter (`Lg`, `tox`, `spacer`, `W`, `sti_depth`,
 the implant peaks and ranges, the voxel size, ...).
@@ -130,6 +134,12 @@ the implant peaks and ranges, the voxel size, ...).
   thickness, spacer width (8.000 nm for 8 nm), STI depth, the STI flush
   with the silicon, a flat gate bottom, and the junction depth against
   the Gaussians.
+- **The viewer shows the device geometry exactly.** For a build, tcadview
+  draws each material as the voxel faces the device is built from: sharp
+  edges, and two materials share one face. The smooth level-set contours
+  are a checkbox ("smooth surfaces"). They look nicer, but bevel every
+  edge by up to a voxel and draw neighbouring materials as separate
+  surfaces.
 - **The structure check, after every build:** enclosed gas voids, detached
   fragments of a region, and layers one voxel thick are warnings in the
   build log. One-voxel flakes (the staircase of a curved surface poking

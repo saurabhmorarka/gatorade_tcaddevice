@@ -76,14 +76,21 @@ def graded_axis(fine, lo, hi, features, h_fine, h_max, growth):
     return np.array(out)
 
 
-def device_grid(st, top_nm=10.0, half_z=True, h_fine=(2.0, 0.5, 2.0), h_max=(8.0, 8.0, 8.0), growth=1.35,
+def device_grid(st, top_nm=None, half_z=True, h_fine=(2.0, 0.5, 2.0), h_max=(8.0, 8.0, 8.0), growth=1.35,
                 min_frac=0.02):
     """Graded node axes (nm) for the device solve, as subsets of the fab grid.
     The domain: the full x range, heights from the bottom up to top_nm above
-    the original surface, and half the z range when half_z."""
+    the original surface (default: the top of the solid - the whole gate,
+    contacts and ILD, whose coupling is much of the off-state
+    capacitance), and half the z range when half_z."""
     g = st.grid
     x, y, z = g.axes
-    y_lo, y_hi = -top_nm, y[-1]
+    if top_nm is None:
+        solid_rows = np.flatnonzero((st.cell_labels() >= 0).any(axis=(0, 2)))
+        y_lo = y[solid_rows[0]]
+    else:
+        y_lo = -top_nm
+    y_hi = y[-1]
     z_hi = (z[0] + z[-1]) / 2 if half_z else z[-1]
     jy = (y >= y_lo - 1e-9)
     kz = (z <= z_hi + 1e-9)
@@ -143,7 +150,7 @@ def device_materials(st):
     return out
 
 
-def build_device(cfg, top_nm=10.0, half_z=True, log=print, grid=None):
+def build_device(cfg, top_nm=None, half_z=True, log=print, grid=None):
     """Fab build -> device mesh. Returns a dict with the mesh, the silicon
     material, the gate workfunction, the structure, axes and bookkeeping."""
     t0 = time.perf_counter()
@@ -290,7 +297,7 @@ def write_state(path, d, state, bias, label):
                      compress=True)
 
 
-def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=10.0, half_z=True,
+def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
              vtk="all", workers=None, log=print):
     from solver2d.mosfet_metrics import mosfet_metrics
     # direct LU (MUMPS) for these meshes: ILU-GMRES gave Newton bad directions

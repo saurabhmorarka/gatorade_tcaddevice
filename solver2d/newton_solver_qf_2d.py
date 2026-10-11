@@ -810,12 +810,30 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     psi_bc = np.empty(len(contact_point_idx))
     phin_bc = np.empty(len(contact_point_idx))
     phip_bc = np.empty(len(contact_point_idx))
+    # An ohmic contact that is a metal VOLUME (3D virtual-fab devices) also
+    # touches insulator nodes (its sidewalls in the ILD/spacer). The metal is
+    # one equipotential: those nodes take the potential of the contact's
+    # semiconductor side (ohmic = metal at the contacted region's Fermi
+    # level, psi = V + psi_bulk), median over its semiconductor nodes; the
+    # local-neutrality formula below would divide by ni = 0 there.
+    names_arr = np.array(contact_names, dtype=object)
+    metal_psi0 = {}
+    for name in set(contact_names) - set(psi_bc_override):
+        pts = contact_point_idx[names_arr == name]
+        semi_pts = pts[~is_insulator[pts]]
+        if len(semi_pts) < len(pts):
+            if not len(semi_pts):
+                raise ValueError(f"ohmic contact {name!r} touches no semiconductor node")
+            metal_psi0[name] = float(np.median(psi_eq[semi_pts]))
     for k, (pt, name) in enumerate(zip(contact_point_idx, contact_names)):
         v_applied = bias_by_contact.get(name, 0.0)
         if name in psi_bc_override:
             psi_bc[k] = psi_bc_override[name]
             phin_bc[k] = phin_bc_override[name]
             phip_bc[k] = phip_bc_override[name]
+        elif is_insulator[pt]:
+            psi_bc[k] = metal_psi0[name] + v_applied
+            phin_bc[k] = phip_bc[k] = v_applied
         else:
             n_bc, p_bc = contact_values(mat, mesh.Cdop[pt], ni=ni_arr[pt])
             psi_bc[k] = psi_eq[pt] + v_applied

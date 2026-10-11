@@ -135,6 +135,31 @@ class State:
             self._cache[key] = s if s.n_points else None
         return self._cache[key]
 
+    def voxel_surface(self, k):
+        """Region k's boundary exactly as the device sees it: the voxel
+        faces between its cells (region_id) and any other region or gas
+        (process snapshots; cached). Sharp edges, and the face two regions
+        share is the same face in both - no bevels, seams or gaps. Point
+        fields are taken at the grid nodes, not interpolated."""
+        key = ("voxel_surface", k)
+        if key not in self._cache:
+            self._cache[key] = _voxel_boundary(self.grid, k)
+        return self._cache[key]
+
+    def voxel_slice(self, k, axis, pos):
+        """Region k on the plane normal to `axis` at `pos`, cut along its
+        voxel cells (process snapshots), or None."""
+        key = ("slice", axis, round(float(pos), 12))
+        if key not in self._cache:
+            o = [0.0, 0.0, 0.0]
+            o["xyz".index(axis)] = pos
+            self._cache[key] = self.grid.slice(normal=axis, origin=o)
+        sl = self._cache[key]
+        if not sl.n_cells or "region_id" not in sl.cell_data.keys():
+            return None
+        ids = np.flatnonzero(np.asarray(sl.cell_data["region_id"]) == k)
+        return sl.extract_cells(ids) if len(ids) else None
+
     def slice_region(self, k, axis, pos):
         """Region k on the plane normal to `axis` at `pos`, cut at its smooth
         boundary (process snapshots), or None."""
@@ -414,3 +439,50 @@ def cut_axis(p0, p1, tol=1e-12):
     d = np.abs(np.asarray(p1, float) - np.asarray(p0, float))
     moving = np.flatnonzero(d > tol * max(1.0, float(d.max())))
     return int(moving[0]) if len(moving) == 1 else None
+
+
+def _voxel_boundary(grid, k):
+    """PolyData of the voxel faces bounding the cells with region_id == k
+    (domain walls included), outward-oriented quads on the grid nodes, with
+    every point field copied from those nodes; None if region k is empty."""
+    nx, ny, nz = grid.dimensions
+    rid = np.asarray(grid.cell_data["region_id"]).reshape(nz - 1, ny - 1, nx - 1)     # [kz, jy, ix]
+    m = np.pad(rid == k, 1)
+    quads = []
+    nshape = (nz, ny, nx)
+    for a in range(3):                           # array axis 0 = z, 1 = y, 2 = x
+        lo = np.moveaxis(m, a, 0)
+        d_out = lo[:-1] & ~lo[1:]                # region below, not above: face normal +a
+        d_in = ~lo[:-1] & lo[1:]
+        for faces, flip in ((d_out, False), (d_in, True)):
+            f = np.moveaxis(faces, 0, a)         # padded-cell index frame, face plane index along a
+            idx = np.argwhere(f)
+            if not len(idx):
+                continue
+            base = idx.copy()
+            others = [b for b in range(3) if b != a]
+            base[:, others] -= 1                 # padding offset in the in-plane axes
+            # the face plane index along a is already the node index
+            corners = []
+            for du, dv in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                c = base.copy()
+                c[:, others[0]] += du
+                c[:, others[1]] += dv
+                corners.append(np.ravel_multi_index(c.T, nshape))
+            q = np.stack(corners, axis=1)
+            # array axes are (z, y, x): (u, v, a) is right-handed in xyz
+            # only for a = y, so the winding flips with the axis and side
+            if not (flip ^ (a == 1)):
+                q = q[:, ::-1]
+            quads.append(q)
+    if not quads:
+        return None
+    q = np.concatenate(quads)
+    nodes, inv = np.unique(q, return_inverse=True)
+    iz, jy, ix = np.unravel_index(nodes, nshape)
+    pts = np.asarray(grid.origin) + np.column_stack([ix, jy, iz]) * np.asarray(grid.spacing)
+    faces = np.column_stack([np.full(len(q), 4), inv.reshape(q.shape)]).ravel()
+    out = pv.PolyData(pts, faces)
+    for name in grid.point_data.keys():
+        out.point_data[name] = np.asarray(grid.point_data[name])[nodes]
+    return out

@@ -114,6 +114,36 @@ class TestModel(unittest.TestCase):
 
 
 @unittest.skipIf(not HAVE_VIEWER, "viewer dependencies not installed")
+class TestVoxelSurface(unittest.TestCase):
+    """The process view's exact surfaces: closed, outward, exact volume."""
+
+    def test_closed_outward_exact(self):
+        import pyvista as pv
+        from tcadview.model import _voxel_boundary
+        g = pv.ImageData(dimensions=(7, 6, 5), spacing=(1.0, 0.5, 2.0))
+        rid = np.full((4, 5, 6), -1)                          # [z, y, x]
+        rid[1:3, 0:3, 2:5] = 0                                # a block on the y = 0 wall
+        rid[0, 0, 0] = 0                                      # and a detached voxel
+        rid[1:3, 3:5, 2:5] = 1                                # a neighbour sharing one face
+        g.cell_data["region_id"] = rid.ravel()
+        g.point_data["f"] = np.arange(g.n_points, dtype=float)
+        s0, s1 = _voxel_boundary(g, 0), _voxel_boundary(g, 1)
+        self.assertEqual(s0.n_cells, 48)
+        open_edges = s0.triangulate().extract_feature_edges(boundary_edges=True, feature_edges=False,
+                                                            manifold_edges=False, non_manifold_edges=False)
+        self.assertEqual(open_edges.n_cells, 0)
+        P, F = s0.points, s0.faces.reshape(-1, 5)[:, 1:]
+        vol = sum(np.dot(P[q][0], np.cross(P[q][j], P[q][j + 1])) / 6 for q in F for j in (1, 2))
+        self.assertAlmostEqual(vol, 19 * 1.0 * 0.5 * 2.0)    # positive: faces point outward
+        # point fields are the node values, unchanged
+        np.testing.assert_array_equal(s0.point_data["f"],
+                                      [g.find_closest_point(p) for p in P])
+        # the shared face is the same face in both regions
+        c0 = {tuple(np.round(c, 9)) for c in s0.cell_centers().points}
+        c1 = {tuple(np.round(c, 9)) for c in s1.cell_centers().points}
+        self.assertEqual(len(c0 & c1), 2 * 3)                  # z 2 x x 3 voxel faces
+
+
 class TestSection(unittest.TestCase):
     """Section views of an extruded 3D state: the flattened plane, and that
     probes/cuts made in it equal the 3D samples at the same points."""

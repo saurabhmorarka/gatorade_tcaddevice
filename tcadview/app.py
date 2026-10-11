@@ -216,12 +216,20 @@ class MainWindow(QtWidgets.QMainWindow):
         rr.addWidget(self.rmax)
         self.edges = QtWidgets.QCheckBox("mesh edges")
         self.edges.toggled.connect(lambda _: self.render())
+        # process builds: the voxel cells the device is built from (exact,
+        # sharp, shared faces identical) or the smooth level-set contours
+        # (prettier, but every sharp edge is bevelled by up to a voxel and
+        # neighbouring materials do not share one surface)
+        self.smooth = QtWidgets.QCheckBox("smooth surfaces (level set)")
+        self.smooth.setToolTip("Off: the voxel structure the device solve uses. On: the level-set contours.")
+        self.smooth.toggled.connect(lambda _: self.render())
         fl.addRow("Field", self.field_combo)
         fl.addRow("Scale", self.scale_combo)
         fl.addRow("Colormap", self.cmap_combo)
         fl.addRow("Range", self.auto_range)
         fl.addRow("", rr)
         fl.addRow("", self.edges)
+        fl.addRow("", self.smooth)
         lay.addWidget(fbox)
 
         # regions
@@ -517,9 +525,11 @@ class MainWindow(QtWidgets.QMainWindow):
         st = self.state
         if st.is_process:
             axes = [a for a in "xyz" if self.slice_on[a].isChecked()]
+            smooth = self.smooth.isChecked()
             if not axes:
-                return [g for g in [st.surface(k)] if g is not None]
-            return [g for g in (st.slice_region(k, a, self._slice_origin(a)) for a in axes) if g is not None]
+                return [g for g in [self._process_surface(k)] if g is not None]
+            cut = st.slice_region if smooth else st.voxel_slice
+            return [g for g in (cut(k, a, self._slice_origin(a)) for a in axes) if g is not None]
         g = st.region(k)
         if st.dim == 2 or g.n_cells == 0:
             return [g]
@@ -535,6 +545,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 out.append(s)
         return out
 
+    def _process_surface(self, k):
+        st = self.state
+        return st.surface(k) if self.smooth.isChecked() else st.voxel_surface(k)
+
     def _add_field(self, plotter, geom, k, lo, hi, title, bar):
         """Draw region k's geometry `geom` coloured by the current field (or
         by its material)."""
@@ -542,7 +556,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if name == model.MATERIAL_FIELD:
             plotter.add_mesh(geom, color=model.material_color(st.region_material(k)), opacity=self._opacity(k),
                              show_edges=self.edges.isChecked(), edge_color="black", line_width=0.5,
-                             smooth_shading=geom.n_cells > 0 and st.is_process, reset_camera=False)
+                             smooth_shading=geom.n_cells > 0 and st.is_process and self.smooth.isChecked(),
+                             reset_camera=False)
             return
         m = geom.copy(deep=False)
         assoc = st.association(name)
@@ -587,7 +602,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._add_field(self.plotter, geom, k, lo, hi, title, bar)
                 bar = bar or name != model.MATERIAL_FIELD
             if sliced and st.is_process:
-                surf = st.surface(k)
+                surf = self._process_surface(k)
                 if surf is not None:                       # faint context around the slices
                     self.plotter.add_mesh(surf, color=model.material_color(st.region_material(k)), opacity=0.08,
                                           reset_camera=False)

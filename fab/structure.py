@@ -332,16 +332,24 @@ class Structure:
         return _despeckle(lab)[0] if clean else lab
 
     def _raw_cell_labels(self):
+        """Solid or gas from the cell mean of the union field (the field
+        that defines the solid); which region, from the smallest cell mean
+        of the region fields. Deciding gas from the region means alone
+        leaves "nobody's" cells where a curved surface crosses a cell: the
+        mean of a minimum is below the minimum of the means, so a filled
+        ILD (exactly the complement of the old solid at every node) and
+        the spacer it wraps can both read as outside."""
         nx, ny, nz = self.grid.shape
         lab = np.full((nx - 1, ny - 1, nz - 1), -1, dtype=np.int16)
-        best = np.zeros(lab.shape)
+        if not self.regions:
+            return lab
+        best = np.full(lab.shape, np.inf)
         for k, r in enumerate(self.regions):
-            p = r.phi
-            c = (p[:-1, :-1, :-1] + p[1:, :-1, :-1] + p[:-1, 1:, :-1] + p[:-1, :-1, 1:]
-                 + p[1:, 1:, :-1] + p[1:, :-1, 1:] + p[:-1, 1:, 1:] + p[1:, 1:, 1:]) / 8
+            c = _cell_mean(r.phi)
             take = c < best
             lab[take] = k
             best = np.where(take, c, best)
+        lab[_cell_mean(self.solid()) >= 0] = -1
         return lab
 
     def check(self):
@@ -427,3 +435,9 @@ def _thin_cells(m):
         o = np.moveaxis(out, a, 0)
         o[1:-1] |= v[1:-1] & ~v[:-2] & ~v[2:]
     return out
+
+
+def _cell_mean(p):
+    """Mean of a node field over each voxel cell's 8 corners."""
+    return (p[:-1, :-1, :-1] + p[1:, :-1, :-1] + p[:-1, 1:, :-1] + p[:-1, :-1, 1:]
+            + p[1:, 1:, :-1] + p[1:, :-1, 1:] + p[:-1, 1:, 1:] + p[1:, 1:, 1:]) / 8

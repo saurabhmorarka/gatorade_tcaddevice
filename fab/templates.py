@@ -30,9 +30,11 @@ PLANAR_DEFAULTS = {
     "sti_overfill": 10,     # STI oxide fill above silicon before CMP
     "sub_depth": 100,       # silicon below the surface in the domain
     "endcap": 15,           # gate extension over the STI
-    "contact_inset": 5,     # contact metal kept off the spacer and STI edge
-    "contact_height": 10,
-    "top_margin": 6,        # gas above the gate's spacer liner
+    "contact_inset": 5,     # contact trench kept off the spacer and STI edge (ILD in between)
+    "ild_material": "SiO2", # interlayer dielectric around the gate and contacts
+    "ild_cap": 10,          # ILD above the gate top; the contacts rise to the ILD top, above the gate
+    "ild_overfill": 5,      # ILD deposited this far above its final top, then CMP
+    "top_margin": 4,        # gas above everything deposited
     "voxel": [1.0, 0.5, 1.0],
     "sub_conc": 1e15,       # substrate doping, cm^-3
     "well_peak": 3e18, "well_rp": 25, "well_sigma": 15,
@@ -49,6 +51,7 @@ PLANAR_DERIVED = {
     "xg1": "L_sd + spacer + Lg",
     "zw0": "sti_width",
     "zw1": "sti_width + W",
+    "ild_top": "tox + gate_height + ild_cap",
 }
 
 
@@ -60,7 +63,7 @@ def planar(params):
     if p["type"] not in ("nmos", "pmos"):
         raise ValueError(f"planar type must be nmos or pmos, not {p['type']!r}")
     n = p["type"] == "nmos"
-    gm, cmat = p["gate_material"], p["contact_material"]
+    gm, cmat, ild = p["gate_material"], p["contact_material"], p["ild_material"]
     if p["gate_wf"] is None:                 # n+/p+ poly at the band edges; metals a little inside
         p["gate_wf"] = (4.05 if n else 5.17) if gm == "Poly" else (4.25 if n else 4.95)
     sub_sp, sd_sp = ("B", "As") if n else ("P", "B")
@@ -98,18 +101,28 @@ def planar(params):
         {"step": "etch", "label": "spacer etch", "mode": "anisotropic", "materials": ["SiN"], "depth": "1.15*spacer"},
         {"step": "implant", "label": "source/drain implant", "species": sd_sp, "peak": "sd_peak", "rp": "sd_rp",
          "sigma": "sd_sigma", "lateral_sigma": "sd_lateral", "blocked_by": [gm, "SiN"]},
+        # ILD: fill around the gate stack, CMP to ild_cap above the gate.
+        # Spacer and contacts are never separated by gas, and the contacts
+        # come out taller than the gate - their sidewalls facing the gate
+        # through spacer + ILD are much of the off-state capacitance.
+        {"step": "deposit", "label": "ILD deposition", "mode": "fill", "material": ild, "name": "ild",
+         "to_height": "ild_top + ild_overfill"},
+        {"step": "planarize", "label": "ILD CMP", "to_height": "ild_top"},
         {"step": "pattern", "label": "contact masks", "name": "source_ct",
          "mask": {"rect": [-1, "xg0 - spacer - contact_inset", "zw0 + contact_inset", "zw1 - contact_inset"]}},
         {"step": "pattern", "label": "contact masks", "name": "drain_ct",
          "mask": {"rect": ["xg1 + spacer + contact_inset", "Lx + 1", "zw0 + contact_inset", "zw1 - contact_inset"]}},
-        {"step": "deposit", "label": "source contact", "mode": "fill", "material": cmat, "name": "source_contact",
-         "to_height": "contact_height", "mask": "source_ct"},
-        {"step": "deposit", "label": "drain contact", "mode": "fill", "material": cmat, "name": "drain_contact",
-         "to_height": "contact_height", "mask": "drain_ct"},
+        # contact trenches through the ILD only (down to the silicon; spacer, STI untouched)
+        {"step": "etch", "label": "source contact etch", "mode": "anisotropic", "regions": ["ild"], "mask": "source_ct"},
+        {"step": "etch", "label": "drain contact etch", "mode": "anisotropic", "regions": ["ild"], "mask": "drain_ct"},
+        {"step": "deposit", "label": "source contact fill", "mode": "fill", "material": cmat, "name": "source_contact",
+         "to_height": "ild_top", "mask": "source_ct"},
+        {"step": "deposit", "label": "drain contact fill", "mode": "fill", "material": cmat, "name": "drain_contact",
+         "to_height": "ild_top", "mask": "drain_ct"},
     ]
     # headroom above the gate for the spacer liner (a deposit must not reach
     # the domain ceiling: the etches see gas only from above)
-    domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-sub_depth", "tox + gate_height + spacer + top_margin"],
+    domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-sub_depth", "ild_top + ild_overfill + top_margin"],
               "voxel": "voxel"}
     # layer 3: terminals are process regions (whole interfaces), with a type:
     # ohmic now; "schottky" (barrier + tunneling at the metal/epi interface) planned

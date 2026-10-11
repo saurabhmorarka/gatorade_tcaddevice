@@ -288,12 +288,27 @@ class TestPlanar(unittest.TestCase):
         """Every voxel is in exactly one region or gas; volumes add up."""
         lab = self.st.cell_labels()
         names = [r.name for r in self.st.regions]
-        self.assertEqual(names, ["substrate", "sti", "gate_oxide", "gate", "spacer", "source_contact",
+        self.assertEqual(names, ["substrate", "sti", "gate_oxide", "gate", "spacer", "ild", "source_contact",
                                  "drain_contact"])
         self.assertTrue(((lab >= -1) & (lab < len(names))).all())
-        g = self.st.grid
-        below = (g.axes[1][:-1] + g.h[1] / 2) > 3.0          # silicon/STI depth: no gas voxels
+        g, p = self.st.grid, self.p
+        heights = -(g.axes[1][:-1] + g.h[1] / 2)
+        below = heights < p["ild_top"]                      # ILD fills everything: no gas below its top
         self.assertEqual(int((lab[:, below, :] == -1).sum()), 0)
+        self.assertTrue((lab[:, ~below, :] == -1).all())
+
+    def test_contacts_taller_than_gate(self):
+        """Contacts rise to the ILD top, above the gate; ILD (not gas)
+        between spacer and contact."""
+        lab, g, p = self.st.cell_labels(), self.st.grid, self.p
+        k = {r.name: i for i, r in enumerate(self.st.regions)}
+        heights = -(g.axes[1][:-1] + g.h[1] / 2)
+        top = lambda name: heights[(lab == k[name]).any(axis=(0, 2))].max()
+        self.assertAlmostEqual(top("source_contact") + g.h[1] / 2, p["ild_top"], delta=1e-9)
+        self.assertGreater(top("source_contact"), top("gate") + 5)
+        x_gap = int(p["xg0"] - p["spacer"] - 2)             # between spacer and source contact
+        col = lab[x_gap, (heights > 0) & (heights < p["ild_top"]), int(g.shape[2] // 2)]
+        self.assertTrue((col == k["ild"]).all())
 
     def test_structure_check(self):
         """No voids, fragments or one-voxel layers; STI flush with the

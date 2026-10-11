@@ -4535,3 +4535,84 @@ Results:
 The rendered surfaces are separate. tcadview contours each level set
 with marching cubes, which bevels every sharp edge by up to one voxel.
 That is drawing only: the device is built from the cell labels.
+
+## 43. Phase 3 (cont.): exact device geometry in the viewer; ILD and full-height contacts
+
+**"Too many corners between materials."** After the fixes in section 42,
+the user still saw bevels and seams at every material edge. Those were
+the viewer, not the structure. tcadview drew each material as a separate
+marching-cubes contour of that material's level set, with smooth shading:
+- each sharp edge was cut by up to a voxel
+- two touching materials were two independently bevelled surfaces, so a
+  groove or seam showed where they meet
+- under the contacts there was a lip that does not exist in the labels
+
+The device is built from the voxel cell labels. Those are an exact
+partition: sharp edges, and every shared face is the same face.
+
+The viewer now draws that (`model.voxel_surface`, `model.voxel_slice`):
+- the boundary faces of each region's cells, built with numpy, closed
+  and outward-oriented
+- point fields taken at the grid nodes, not interpolated
+- the smooth contours stay behind a "smooth surfaces (level set)"
+  checkbox
+- test: watertight, positive exact volume, and a face shared by two
+  regions appears identically in both
+
+**Why sharp, staircased geometry is the right device representation.**
+- Every interface of the planar device is an axis-aligned plane on whole
+  nm, so it lies exactly on voxel faces.
+- The only curved surfaces are the conformal spacer's rounded corners.
+  They are real (radius = spacer thickness), insulator against insulator,
+  and away from the silicon.
+- The planned octree mesher snaps feature planes to cell faces anyway.
+- A rounded corner in a voxel or octree mesh is a staircase, which is
+  worse for the solver than a true sharp corner.
+- Sharp corners do concentrate field, as in a real device (corner
+  effect). That is physics to resolve with local refinement, not a
+  numerical defect. Corner rounding as a process option (STI top-corner
+  rounding oxidation) can come later.
+
+**ILD and contacts as in a real flow** (the user: there is never gas
+between spacer and contacts, and the contacts are as tall as the gate or
+taller - a big part of the off-state capacitance). After the S/D implant
+the planar template now:
+- fills an ILD (`ild_material`, SiO2) and CMPs it to `ild_cap` (10 nm)
+  above the gate
+- etches the contact trenches through the ILD region only (spacer and
+  STI untouched)
+- fills W up to the ILD top: contacts 50 nm tall, against a 41.5 nm gate
+  top
+
+Bugs found on the way:
+- *Material names in parameters.* `ild_material: SiO2` was parsed as an
+  expression (it contains a digit). A parameter that is a single word
+  and not another parameter's name is now a name.
+- *"Nobody's" cells.* With the ILD, the structure check found eight
+  4-cell gas pockets where the ILD wraps the spacer's rounded corner.
+  - At the nodes, the ILD is exactly the complement of the old solid.
+  - But a cell's mean of a minimum is below the minimum of the means,
+    so near a curved surface neither region's cell mean was negative.
+  - Fix: a cell is gas iff the cell mean of the union field (the field
+    that defines the solid) is >= 0. The region field means only choose
+    which material.
+
+**Device solve over the whole stack.** `fab simulate` cut the domain 10
+nm above the silicon, which dropped most of the gate and contact
+sidewalls and their coupling. The default is now the top of the solid
+(the ILD top).
+
+That exposed a solver bug (`solver2d/newton_solver_qf_2d.py`):
+- A metal-volume ohmic contact also touches insulator nodes (its
+  sidewalls in the ILD/spacer).
+- The local-neutrality contact formula divided by ni = 0 there. That gave
+  NaN quasi-Fermi boundary values and a metal potential at the intrinsic
+  level instead of at the n+ Fermi level. PETSc LU then failed on the
+  first factorization.
+- Fix: a metal contact is one equipotential. Its insulator nodes take
+  V + psi_bulk of the contacted region (median over the contact's
+  semiconductor nodes), with the quasi-Fermi levels at V.
+- Merge gate: only nodes that used to produce NaN are affected. The 2D
+  golden tests (`test_2d_examples`) pass unchanged.
+- A Schottky contact will later set this potential from the metal work
+  function.
