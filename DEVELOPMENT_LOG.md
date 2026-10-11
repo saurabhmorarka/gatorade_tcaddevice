@@ -5001,3 +5001,67 @@ The 2D golden tests pass (efield default unchanged).
   Octree vs rectilinear on the tiny device is 1.8% with hybrid; that is the
   default octree's resolution gap (+3.4% on the full device) and is
   tightened again after the defaults study.
+
+## 51. Hybrid vsat cost in 3D: what was tried (no code change kept)
+
+The user asked to fix the 3D slowdown that came with hybrid velocity
+saturation (section 50) using a better start on a contact bias change.
+That approach did not hold up. Everything below was measured and then
+reverted; the code is as committed in 70cf3a7, and all tests pass.
+
+**The real cost, on the real 3D I-V path** (`fab.simulate.run_curve`,
+continuation, tiny planar device, octree, PETSc ILU):
+
+| | efield | hybrid (c_ref 1e16) |
+|---|---|---|
+| mesh + equilibrium | 6.1 s | 11.6 s |
+| Id-Vg, Vds = 0.05 V, 13 points | 47 iterations, 3.7 s | 61 iterations, 6.3 s |
+| Id-Vg, Vds = 1.0 V, 13 points | 98 iterations, 9.1 s | 240 iterations, 30.7 s |
+
+The cost is intrinsic, not a start-up artifact. In the velocity-saturated
+pinch-off region electrons are above c_ref, so the quasi-Fermi drive
+applies. A saturated edge carries about q n vsat whatever its phi drop, so
+its phi-conductance collapses and Newton stiffens.
+- The hybrid equilibrium alone needs 16 iterations against 10-11 for
+  efield, with no bias jump at all.
+- The full-system Jacobian against central differences on a real 3D state
+  (semiconductor rows): efield 6e-7, hybrid 4e-3 relative. That is looser,
+  consistent with the stronger nonlinearity of the weight; no missing term.
+- (Rows of insulator nodes differ for BOTH forces in that harness, because
+  of how their rows are pinned; this is not a Jacobian error.)
+
+**Tried and reverted:**
+
+1. *Contact-region shift of the start state.* For each ohmic contact,
+   shift psi and phi by its bias change over the same-doping-sign
+   connected region; graph-based. Variants: all of psi/phin/phip; psi plus
+   the majority phi only; and psi plus majority phi weighted by
+   majority / |doping|, to keep it out of the depletion layer.
+   - Every variant broke the forward-biased 2D diode (`main2d_sweep`)
+     from Va = 0.3 V. Newton stalls: the line search finds no descent
+     (step 1e-6, zero movement), even with exact linear solves
+     (`linear_solver="legacy"`), so it is not the inexact solve.
+   - The unshifted start also needs about 8 heavily damped iterations at
+     these points. The solver's row-scaled merit is the weak spot: worth
+     its own study.
+   - In 3D (tiny device, hybrid, no fallback) the shift did not help:
+     40-iteration failures with or without it.
+   - The region detection itself was right: the diode's 241 p-well nodes.
+2. *Per-mesh memory of the start strategy* (direct vs efield warm-up,
+   whichever last worked goes first). The 2D goldens still pass, but
+   Newton work rose up to 65% (Id-Vg at 1 V: 256 -> 424 iterations). One
+   direct failure flips the mesh to warm-up-first, which costs about 2x on
+   points where direct would have worked.
+3. *c_ref 1e16 -> 1e17.* In 3D this changed Id by only 0.2% while cutting
+   the Vds = 1 V curve from 240 to 156 iterations (1e18: 130, but Id
+   -2.6%). In the 2D NMOS (1e16 body) Id moved up to 5.5%. So c_ref is a
+   real model parameter for lightly doped devices, not a free speed knob.
+
+**Options for the user** (see the handoff):
+- (a) accept the hybrid cost for now and fold it into the speed pass;
+- (b) make c_ref doping-relative, e.g. a fraction of the local |doping|
+  or of the neighbouring S/D doping, so it does not depend on the device;
+- (c) study the Newton globalization (the row-scaled merit) that stalls on
+  reasonable starts;
+- (d) keep hybrid for accuracy runs and offer efield as a fast option in
+  `fab simulate`.

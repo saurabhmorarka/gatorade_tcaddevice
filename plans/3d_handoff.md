@@ -97,13 +97,20 @@ Done:
   efield warm-up (49)
 
 Hybrid is now the DEFAULT (`true` = hybrid; section 50, commit 70cf3a7).
-Waiting on the user:
-- Better start on a contact bias change: shift phi and psi by dV over
-  the contact's connected doped region. This would recover the 3D solve
-  time; the fallback now doubles it, 31 s -> 57 s for 3 points.
+
+The user asked (2026-10-11) for a better start on a contact bias change to
+cut the hybrid 3D cost. It did NOT work (DEVELOPMENT_LOG 51). The code is
+unchanged since 70cf3a7. Measured on the real I-V path: hybrid costs
+1.7-3.4x efield in 3D (worst at high Vds). That is intrinsic stiffness,
+not a start-up artifact.
+
+Waiting on the user (who asked to wait before the next phase):
+- How to handle the hybrid cost; options (a)-(d) in log 51.
 - Speed pass toward the 1-minute full 3D I-V. Today: mesh 15 s and about
-  7-10 s per bias point (65k nodes, ILU), so a 40-60 point I-V takes
-  5-8 minutes.
+  7-10 s per point with efield (65k nodes); hybrid is 1.7-3.4x that.
+- Future physics list, in order (memory: tcad1d-physics-roadmap-after-3d-mesher):
+  Schottky S/D, Schrodinger-Poisson, mobility stack, stress, then
+  FinFET/nanosheet.
 
 Then:
 1. Defaults study, with hybrid: the coarse octree is about 3.5% above the
