@@ -15,6 +15,24 @@
   - DEVELOPMENT_LOG entry with every commit (sections 41-43 cover
     Phase 3)
 
+**Progress on `3d-octree-mesh` (2026-10-11, DEVELOPMENT_LOG 45).**
+- `mesh3d/octree.py` works and passes its gate on real fab structures.
+- On `configs/fab_planar_tiny.yaml` it matches the rectilinear Id to
+  0.3% / 0.01%.
+- Use it with `build_device(cfg, mesher="octree")`. Compare script:
+  build both meshers and solve Vg = 0 and 0.6 V at Vds = 0.05 V.
+- Remaining:
+  1. *Node count.* Full device: 144k octree nodes against 68k
+     rectilinear. Restrict face-match to semiconductor interfaces,
+     coarser insulator/metal targets, then inspect the leaf
+     distribution.
+  2. *Speed.* Tree 165 s plus clipping 400 s in Python; move both to
+     Rust in `native/`.
+  3. *Octree VTK output.* `write_state` only handles the rectilinear
+     grid.
+  4. *Wiring.* Add `fab simulate --mesher octree`, tests, a README
+     section.
+
 **Done on `3d-fab-planar` today** (DEVELOPMENT_LOG 42-43):
 - *Flat gate stack.* The gate dielectric is deposited over the whole
   flat surface; the strip etches only the `gate_oxide` region via

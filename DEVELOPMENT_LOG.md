@@ -4645,3 +4645,51 @@ design and the night's passdown are at the top of
 
 The octree transition study is saved as
 `mesh3d/studies/octree_transition_study.py`.
+
+## 45. Octree mesher, first working version (`mesh3d/octree.py`)
+
+What is implemented: the approved design in `plans/3d_handoff.md`.
+- A kd-style box tree over the fab voxels (per-axis splits).
+- Leaves are single-label. Sizing is graded from semiconductor
+  interfaces and junctions. 2:1 balance between vertex neighbours, and
+  face match across label changes.
+- The dual is the exact Voronoi diagram of all leaf corners:
+  - box fast path, decided by a KD-tree query on the 8 corners of each
+    candidate box
+  - exact half-space clipping elsewhere, nearest neighbour first with a
+    security radius
+  - per-material splits by clipping against the overlapping leaf boxes
+- A mandatory gate `check_octree_mesh` on every build.
+- `fab.simulate.build_device(..., mesher="octree")`.
+
+Bugs found by the gate:
+1. *Coplanar clip duplication.* Clipping a polyhedron with a plane that
+   one of its faces already lies in (axis-aligned cells meet leaf boxes
+   all the time) created a duplicate cut face. The divergence-theorem
+   volume then double-counted it: oxide 362.75 vs 360 nm^3. A plane
+   that cuts nothing now leaves the polyhedron unchanged.
+2. *Round-off facets.* Degenerate (cospherical) node sets gave diagonal
+   facets of about 1e-10 nm^2 on one side only. The cutoff is now
+   relative: area < 1e-8 * edge length^2 is a point or line contact.
+
+Validation on `configs/fab_planar_tiny.yaml` (Vds 0.05 V):
+
+| | octree | rectilinear |
+|---|---|---|
+| nodes | 18,791 | 20,328 |
+| Id(Vg=0) | 3.7268e-6 A | 3.7167e-6 A (0.3% apart) |
+| Id(Vg=0.6) | 1.0393e-5 A | 1.0394e-5 A |
+
+The gate passes (facet symmetry 2e-8).
+
+Not good enough yet, on the full planar device:
+- 144,370 device nodes against 67,956 rectilinear.
+- 565 s to build in Python: tree 165 s, and 400 s clipping 57,551 cells.
+
+Next:
+1. Cut the node count:
+   - face match only at semiconductor interfaces (conformity matters
+     only for carrier facets; the other splits are exact by clipping)
+   - coarser targets at insulator/metal surfaces
+   - look at where the leaves go
+2. Port the tree and the clipping to Rust.

@@ -150,13 +150,34 @@ def device_materials(st):
     return out
 
 
-def build_device(cfg, top_nm=None, half_z=True, log=print, grid=None):
+def device_voxels(st, half_z=True):
+    """The device domain as voxels of the fab grid: (labels, node net
+    doping, origin nm, voxel nm). Heights from the bottom to the top of the
+    solid; half the width (to the symmetry plane) when half_z."""
+    g = st.grid
+    lab = st.cell_labels()
+    rows = np.flatnonzero((lab >= 0).any(axis=(0, 2)))
+    j0 = int(rows[0])
+    nz = lab.shape[2]
+    if half_z and nz % 2:
+        raise ValueError("half-width solve needs an even number of voxels across z")
+    kz = nz // 2 if half_z else nz
+    net = (st.donors - st.acceptors)[:, j0:, :kz + 1]
+    origin = np.array([g.axes[0][0], g.axes[1][j0], g.axes[2][0]])
+    return lab[:, j0:, :kz], net, origin, np.asarray(g.h, float)
+
+
+def build_device(cfg, top_nm=None, half_z=True, log=print, grid=None, mesher="cartesian"):
     """Fab build -> device mesh. Returns a dict with the mesh, the silicon
-    material, the gate workfunction, the structure, axes and bookkeeping."""
+    material, the gate workfunction, the structure, axes and bookkeeping.
+    mesher: "cartesian" (graded rectilinear, the reference) or "octree"
+    (mesh3d/octree.py: adaptive boxes, exact Voronoi dual, quality gate)."""
     t0 = time.perf_counter()
     st, _ = flow.build(cfg, log=lambda *a: None)
     fl = flow.expand(cfg)
     p = resolve_params({k: v for k, v in fl["params"].items() if v is not None})
+    if mesher == "octree":
+        return _build_device_octree(st, p, half_z, log, grid or {}, t0)
     axes_nm = device_grid(st, top_nm=top_nm, half_z=half_z, **(grid or {}))
     lab, net = sample_structure(st, axes_nm)
     mats = device_materials(st)
@@ -177,6 +198,28 @@ def build_device(cfg, top_nm=None, half_z=True, log=print, grid=None):
         + f"; gate wf {wf:.2f} eV ({time.perf_counter() - t0:.1f} s)")
     return dict(mesh=mesh, mat=mat, wf=wf, Cs=Cs, st=st, axes_nm=axes_nm, cell_region=lab, half_z=half_z,
                 zmid=zmid, W_nm=W_nm, L_nm=evaluate("Lg", p) if "Lg" in p else None, params=p)
+
+
+def _build_device_octree(st, p, half_z, log, opts, t0):
+    from mesh3d.octree import build_octree_mesh
+    lab, net, origin, h = device_voxels(st, half_z)
+    mats = device_materials(st)
+    mat = _resolve_material_block({})
+    mesh = build_octree_mesh(lab, mats, h, net, mat, origin_nm=origin, face_contacts={
+        c["name"]: (1, "max") for c in st.contacts if c.get("surface") == "bottom"}, log=log, **opts)
+    gate = next(c for c in st.contacts if c.get("type") == "gate")
+    wf = evaluate(gate["workfunction_eV"], p)
+    body = next(c["name"] for c in st.contacts if c.get("surface") == "bottom")
+    body_nodes = mesh.boundary_point_index[np.array(mesh.boundary_bc_type) == f"contact:{body}"]
+    Cs = float(np.median(mesh.Cdop[body_nodes]))
+    log(f"device mesh (octree): {len(mesh.points)} nodes, {len(mesh.edges)} edges; terminals "
+        + ", ".join(f"{c.name} {int((np.array(mesh.boundary_bc_type) == 'contact:' + c.name).sum())}"
+                    for c in mesh.domain.contacts)
+        + f"; gate wf {wf:.2f} eV ({time.perf_counter() - t0:.1f} s)")
+    return dict(mesh=mesh, mat=mat, wf=wf, Cs=Cs, st=st, axes_nm=None, cell_region=None, half_z=half_z,
+                zmid=None, W_nm=evaluate("W", p) if "W" in p else None,
+                L_nm=evaluate("Lg", p) if "Lg" in p else None, params=p, mesher="octree",
+                voxels=(lab, origin, h))
 
 
 # --- solving ------------------------------------------------------------------------------
