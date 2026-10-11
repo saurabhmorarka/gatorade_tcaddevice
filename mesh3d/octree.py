@@ -193,6 +193,58 @@ class BoxTree:
         hi = np.minimum(self.hi[i] + 1, self.shape)
         return bool(self.semi_label[self.label[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]].any())
 
+    def compact(self):
+        """Drop dead boxes (the parents of split leaves) and renumber, so
+        refine() can restart from the current leaves (the Rust refine takes
+        its start boxes as roots)."""
+        ids = np.flatnonzero(self.alive)
+        new = np.full(len(self.alive), -1, dtype=np.int32)
+        new[ids] = np.arange(len(ids), dtype=np.int32)
+        self.lo = [self.lo[i] for i in ids]
+        self.hi = [self.hi[i] for i in ids]
+        self.alive = [True] * len(ids)
+        self.owner = new[self.owner]
+
+    def split_for_stray(self, nodes, is_conductor):
+        """Splits that put a metal-surface node next to each `nodes` entry
+        (voxel-grid node indices of device nodes whose Voronoi cell reaches
+        into a metal they are not on). For each node: the nearest device
+        leaves (closed box containing the node, then one and two voxels
+        further) that share a face with a conductor and whose tangential
+        extent strictly contains the node's coordinate get split there;
+        face match then carries the split into the metal leaf, so the
+        surface gains a node in line with the offender. Only geometric
+        facts are used (no orientation or layer assumptions), so it holds
+        for any gate / dielectric / contact shape. Returns the number of
+        splits made."""
+        n_split = 0
+        sh = self.shape
+        for q in np.asarray(nodes, dtype=np.int64):
+            for ring in (1, 2, 3):
+                lo = np.maximum(q - ring, 0)
+                hi = np.minimum(q + ring, sh)
+                cand = np.unique(self.owner[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]])
+                made = 0
+                for i in cand:
+                    lab = self.label[tuple(self.lo[i])]
+                    if not self.alive[i] or lab < 0 or is_conductor[lab]:
+                        continue
+                    for a in range(3):
+                        faces = [self.face_ids(i, a, side) for side in (-1, 1)]
+                        if not any(f is not None and is_conductor[f[1]].any() for f in faces):
+                            continue
+                        # split at q in each tangential axis it lies strictly inside;
+                        # one child suffices: both carry the new plane
+                        for b in range(3):
+                            if b != a and self.lo[i][b] < q[b] < self.hi[i][b]:
+                                i = self.split(i, b, int(q[b]))[0]
+                                made += 1
+                        break
+                if made:
+                    n_split += made
+                    break
+        return n_split
+
     def leaves(self):
         ids = np.flatnonzero(self.alive)
         return ids, np.array([self.lo[i] for i in ids]), np.array([self.hi[i] for i in ids])
@@ -436,9 +488,22 @@ def build_octree_mesh(label, materials, h_nm, node_net, mat, origin_nm=(0.0, 0.0
     tree = BoxTree(label, tgt, root, semi_labels=[k for k, m in enumerate(materials) if m["kind"] in (SEMI, CONDUCTOR)])
     tree.refine(log=log)
     t_tree = time.perf_counter() - t0
-    ids, LO, HI = tree.leaves()
-    leaf_label = label[LO[:, 0], LO[:, 1], LO[:, 2]]
-    dual = _dual(tree, ids, LO, HI, leaf_label, label, h, log)
+    # No device node may have Voronoi volume inside a metal it is not on
+    # (that volume would be dropped, and the flux across that piece of the
+    # metal surface lost). Exact test on the dual; where it fails, split
+    # next to the offender and rebuild. Gated in check_octree_mesh.
+    is_conductor = np.array([m["kind"] == CONDUCTOR for m in materials] + [False])     # index -1 = gas
+    for _ in range(_STRAY_PASSES):
+        ids, LO, HI = tree.leaves()
+        leaf_label = label[LO[:, 0], LO[:, 1], LO[:, 2]]
+        dual = _dual(tree, ids, LO, HI, leaf_label, label, h, log)
+        bad = _stray_nodes(dual, label, kinds, h)
+        if not len(bad) or not tree.split_for_stray(dual["node_idx"][bad], is_conductor):
+            break
+        if log:
+            log(f"  stray metal volume at {len(bad)} node(s): split next to them, refine again")
+        tree.compact()
+        tree.refine(log=log)
     m = _assemble(dual, materials, h, node_net, mat, np.asarray(origin_nm, float), face_contacts, label)
     m.leaves = (LO, HI, leaf_label)
     m.tree_time_s = t_tree
@@ -447,6 +512,32 @@ def build_octree_mesh(label, materials, h_nm, node_net, mat, origin_nm=(0.0, 0.0
     log(f"  octree mesh: {len(m.points)} device nodes, {len(m.edges)} edges, "
         f"{m.n_clipped} clipped cells; tree {t_tree:.1f} s, total {m.build_time_s:.1f} s")
     return m
+
+
+_STRAY_PASSES = 6
+
+
+def _voxels_around(label, node_idx):
+    """(N, 8) labels of the voxels around each grid node (-1 outside)."""
+    padded = np.pad(np.asarray(label), 1, constant_values=-1)
+    return np.stack([padded[node_idx[:, 0] + a, node_idx[:, 1] + b, node_idx[:, 2] + c]
+                     for a in (0, 1) for b in (0, 1) for c in (0, 1)], axis=1)
+
+
+def _stray_parts(dual, label, kinds, h):
+    """Mask over the dual's volume parts: metal volume in the cell of a
+    device node that is not on that metal."""
+    VN, VL, VV = dual["vol"]
+    kinds = np.array(list(kinds) + [GAS])
+    N = dual["N"]
+    dev = np.bincount(VN, weights=VV * np.isin(kinds[VL], (SEMI, INSULATOR)), minlength=N) > 0
+    around = _voxels_around(label, dual["node_idx"])
+    on_it = (around[VN] == VL[:, None]).any(axis=1)
+    return (kinds[VL] == CONDUCTOR) & dev[VN] & ~on_it & (VV > 1e-9 * float(np.prod(h)))
+
+
+def _stray_nodes(dual, label, kinds, h):
+    return np.unique(dual["vol"][0][_stray_parts(dual, label, kinds, h)])
 
 
 def _axis_neighbours(is_node, node_idx, shape):
@@ -629,9 +720,7 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
     # cell can poke into the metal past the surface nodes, and that rule
     # pinned insulator nodes 0.5 nm above the channel to the gate
     # potential (a local 3x Cox; Id off by up to 16% with the tree layout).
-    padded = np.pad(np.asarray(label), 1, constant_values=-1)
-    around = np.stack([padded[node_idx[:, 0] + a, node_idx[:, 1] + b, node_idx[:, 2] + c]
-                       for a in (0, 1) for b in (0, 1) for c in (0, 1)], axis=1)        # (N, 8) voxel labels
+    around = _voxels_around(label, node_idx)
     touch = {}
     for l_, m_ in enumerate(materials):
         if m_["kind"] == CONDUCTOR:
@@ -687,10 +776,8 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
         if clash.any():
             raise ValueError(f"{int(clash.sum())} node(s) touch both contact {names[owner[clash][0]]!r} and {name!r}")
         owner[mask] = c
-    # metal volume in the cells of device nodes that are not on that metal
-    # (a hanging node's cell poking past the surface nodes); it is dropped
-    on_metal = owner >= 0
-    stray = (kinds[VL] == CONDUCTOR) & dev[VN] & ~on_metal[VN]
+    # metal volume in the cells of device nodes not on that metal (gated)
+    stray = _stray_parts(dual, label, kinds[:-1], h)
     stray_vol, stray_nodes = float(VV[stray].sum()), int(len(np.unique(VN[stray])))
     b_idx = np.concatenate([new_id[contact_nodes[nm] & dev] for nm in names]) if names else np.zeros(0, int)
     b_type = np.array(sum([[f"contact:{nm}"] * int((contact_nodes[nm] & dev).sum()) for nm in names], []),
@@ -748,6 +835,9 @@ def check_octree_mesh(m, label, materials, h, log=print, vol_rtol=1e-9, facet_rt
     bad = (m.facet_length_semi > 0) & ~(semi[m.edges[:, 0]] & semi[m.edges[:, 1]])
     if bad.any():
         errs.append(f"{int(bad.sum())} edge(s) carry semiconductor facet area but join a non-semiconductor node")
+    if m.quality["stray_metal_nodes"]:
+        errs.append(f"{m.quality['stray_metal_nodes']} device node(s) have {m.quality['stray_metal_volume']:.3g} nm^3 "
+                    f"of Voronoi cell inside a metal they are not on")
     deg = np.bincount(m.edges.ravel(), minlength=len(m.points))
     if (deg == 0).any():
         errs.append(f"{int((deg == 0).sum())} isolated node(s)")
@@ -757,4 +847,4 @@ def check_octree_mesh(m, label, materials, h, log=print, vol_rtol=1e-9, facet_rt
     if errs:
         raise RuntimeError("octree mesh failed the quality gate:\n  " + "\n  ".join(errs))
     log(f"  mesh gate: OK (volumes exact per material, facet symmetry {m.quality['facet_asymmetry']:.1e}, "
-        f"couplings >= 0, conforming, no isolated nodes)")
+        f"couplings >= 0, conforming, no isolated nodes, no stray metal volume)")

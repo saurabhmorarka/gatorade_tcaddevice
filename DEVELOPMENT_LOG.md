@@ -4849,3 +4849,41 @@ time from the default; Id(Vg=0.6, Vd=0.05), converged about 1.128e-5 A):
 Also seen: below the Si surface, leaf heights alternate 0.5 / 1 nm,
 because the label split at the surface leaves odd voxel counts and
 `_rule_size` halves 3 into 1 + 2. That costs nodes, not accuracy.
+
+## 48. Octree: no stray metal volume (exact test, refinement loop, gated)
+
+The user asked for fixes that hold for every future structure (FinFET,
+nanosheet, other gate, dielectric and contact styles), not planar-only
+rules.
+
+- *Invariant.* No device node may have Voronoi cell volume inside a
+  metal it is not on. That volume would be dropped, and the flux across
+  that piece of metal surface lost.
+- *Test.* The test is the exact one, on the dual (`_stray_parts`), so it
+  makes no assumption about orientation, layers or shape.
+- *Repair* (`BoxTree.split_for_stray`). For each offending node, take the
+  nearest device leaves that share a face with a conductor and whose
+  tangential extent strictly contains the node (closed box first, then
+  rings 1-3 voxels out). Split them at the node's coordinates. Face
+  match carries the split into the metal leaf, so the surface gains a
+  node in line with the offender. Then `compact()` and refine again
+  (Rust or Python), rebuild the dual, and repeat (at most 6 passes).
+- *Gate.* `check_octree_mesh` now raises on any stray metal volume.
+
+**Results** (full planar device): every layout is clean after ONE extra
+pass.
+
+| layout | offenders | nodes added | build | Id(0.6), no vsat |
+|---|---|---|---|---|
+| default | 3 | 19 | 10 -> 15 s | 1.4222e-5 |
+| root 8-16-8 | 4 | 24 | 7 -> 9.5 s | 1.4108e-5 |
+| root 16-16-16 | 65 | 235 | 9 -> 13 s | 1.4205e-5 (1.578e-5 before 47, 1.3502e-5 after 47) |
+| fine | 24 | 32 | 13 -> 19.5 s | 1.3707e-5 |
+
+- The coarse layouts now agree within 0.8%. They sit about 3.5% above the
+  fine octree and the rectilinear meshes (1.36-1.37e-5): a resolution
+  question for choosing the defaults.
+- *Cost.* A second full dual pass. Only clipped (transition) cells can
+  reach into metal, because a box cell stops at the surface nodes, which
+  face match guarantees. So the check, and the rebuild, can later be
+  limited to the clipped cells near metal.
