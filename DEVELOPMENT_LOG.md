@@ -4751,3 +4751,32 @@ Tests: `testsuite/test_octree.py`:
   the gate catching a corrupted volume
 - the Rust tree and clipping against Python
 - octree vs rectilinear Id within 1% on the tiny device
+
+**`fab simulate --mesher octree`** (`write_state_octree`): each device
+and conductor leaf becomes a hexahedron, with point fields at the leaf
+corners (NaN inside metals) and mirroring to the full width. Tiny
+device: mesh 1.0 s, 5 bias points in 9 s with PETSc ILU; loads in
+tcadview.
+
+**Metals carry no unknowns** (the user asked; checked on the tiny device):
+- 0 of 14,773 mesh nodes lie strictly inside a metal. Metal leaves shape
+  the tree but contribute no control volume.
+- The nodes on a metal surface are Dirichlet.
+- Gate: one potential on all 705 surface nodes, Fermi level at Vg.
+- Source/drain: Fermi level exactly V on all surface nodes. The
+  electrostatic potential varies 5.5 mV over the silicon part, because
+  ohmic = local neutrality at each silicon node with its own doping. A
+  single metal potential with a barrier is the planned Schottky contact.
+
+**Sizing experiments** (full device, Id(0.6); converged value about
+1.128e-5):
+
+| octree setting | nodes | Id(0.6) |
+|---|---|---|
+| default | 65,633 | -4.8% |
+| h_fine (1, 0.5, 1) | 84,130 | -3.1% |
+| fine (also h_fine_other 1, h_max 4) | 94,067 | +0.2% |
+| growth 1.25, h_max 6 | 295,077 | +0.06% |
+
+The on-current is most sensitive to h_max / h_fine_other. Next: find out
+which region drives the error before choosing defaults.

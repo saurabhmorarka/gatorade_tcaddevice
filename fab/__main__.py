@@ -2,7 +2,7 @@
 
   python3 -m fab build configs/fab_planar.yaml [--out out/fab_planar] [--final-only]
   python3 -m fab expand configs/fab_planar.yaml > flow.yaml   # layer 1 -> editable layer 2/3
-  python3 -m fab simulate configs/fab_planar.yaml [--out out/fab_planar_sim]   # 3D Id-Vg + solved states
+  python3 -m fab simulate configs/fab_planar.yaml [--out out/fab_planar_sim] [--mesher octree]   # 3D Id-Vg
 
 Then view the build step by step:  python3 -m tcadview out/fab_planar/build.pvd
 """
@@ -30,6 +30,8 @@ def main(argv=None):
     m.add_argument("--vgs-max", type=float, default=1.2)
     m.add_argument("--vgs-step", type=float, default=0.1)
     m.add_argument("--full-width", action="store_true", help="solve the full width (default: half + symmetry)")
+    m.add_argument("--mesher", choices=("cartesian", "octree"), default="cartesian",
+                   help="device mesh: graded rectilinear (default) or octree (exact Voronoi dual)")
     args = ap.parse_args(argv)
 
     import yaml
@@ -38,7 +40,7 @@ def main(argv=None):
         from fab.simulate import simulate
         out = args.out or os.path.join("out", os.path.splitext(os.path.basename(args.config))[0] + "_sim")
         simulate(args.config, out, vds=args.vds, vgs_max=args.vgs_max, vgs_step=args.vgs_step,
-                 half_z=not args.full_width)
+                 half_z=not args.full_width, mesher=args.mesher)
         return 0
     cfg = flow.load(args.config)
     if args.cmd == "expand":

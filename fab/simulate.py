@@ -226,12 +226,12 @@ def _build_device_octree(st, p, half_z, log, opts, t0):
 _CTX = {}
 
 
-def _context(cfg_path, top_nm, half_z):
-    key = (cfg_path, top_nm, half_z)
+def _context(cfg_path, top_nm, half_z, mesher="cartesian"):
+    key = (cfg_path, top_nm, half_z, mesher)
     if key not in _CTX:
         from main2d_mosfet_sweep import solve_mosfet
         from mos.mos_params import MOSDevice
-        d = build_device(flow.load(cfg_path), top_nm=top_nm, half_z=half_z, log=lambda *a: None)
+        d = build_device(flow.load(cfg_path), top_nm=top_nm, half_z=half_z, log=lambda *a: None, mesher=mesher)
         d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
         d["eq"] = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=True)
         _CTX[key] = d
@@ -249,7 +249,7 @@ def run_curve(task):
     """One Id-Vg curve at fixed task['Vds'] (from the equilibrium state)."""
     from main2d_mosfet_sweep import continuation, solve_mosfet
     t0 = time.perf_counter()
-    d = _context(task["config"], task["top_nm"], task["half_z"])
+    d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"))
     mesh, mat, dev, Cs = d["mesh"], d["mat"], d["dev"], d["Cs"]
 
     def at(Vgs, Vds):
@@ -269,7 +269,8 @@ def run_curve(task):
     for v in sorted(states):
         if task["vtk"] == "all" or v in (0.0, max(states)):
             f = f"vds{Vds:g}_vgs{v:+.3f}.vtu"
-            write_state(os.path.join(task["vtk_dir"], f), d, states[v], {"gate": v, "drain": Vds},
+            writer = write_state_octree if d.get("mesher") == "octree" else write_state
+            writer(os.path.join(task["vtk_dir"], f), d, states[v], {"gate": v, "drain": Vds},
                         f"Vgs={v:+.3f}V Vds={Vds:+.3f}V")
             entries.append(dict(file=f, timestep=v, name=f"Vgs={v:+.3f}V Vds={Vds:+.3f}V"))
     return dict(task=task, points=pts, entries=entries, iters=it0 + it1, time_s=time.perf_counter() - t0)
@@ -340,16 +341,64 @@ def write_state(path, d, state, bias, label):
                      compress=True)
 
 
+def write_state_octree(path, d, state, bias, label):
+    """A solved state on the octree mesh as a hexahedral .vtu: every
+    device and conductor leaf a cell, point fields at the leaf corners
+    (the device nodes' values; NaN inside conductors), mirrored to the full
+    width for a half-width solve."""
+    from solver2d.vtk_export import FIELD_UNITS, state_point_data
+    mesh = d["mesh"]
+    lab, origin, h = d["voxels"]
+    LO, HI, leaf_label = mesh.leaves
+    keep = leaf_label >= 0
+    LO, HI, leaf_label = LO[keep], HI[keep], leaf_label[keep]
+    nshape = tuple(np.array(lab.shape) + 1)
+    gid = np.full(nshape, -1, dtype=np.int64)
+    gid[tuple(mesh.grid_index.T)] = np.arange(len(mesh.grid_index))
+    pd_mesh = state_point_data(mesh, d["mat"], state)
+    corners = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+    cidx = np.stack([np.stack([np.where(o[a], HI[:, a], LO[:, a]) for a in range(3)], axis=1) for o in corners],
+                    axis=1)                                             # (L, 8, 3) node grid indices
+    cells_lab = leaf_label
+    if d["half_z"]:
+        zmax = lab.shape[2]
+        mir = cidx.copy()
+        mir[:, :, 2] = 2 * zmax - mir[:, :, 2]
+        mir = mir[:, [3, 2, 1, 0, 7, 6, 5, 4]]                          # keep the hexahedra right-handed
+        cidx = np.concatenate([cidx, mir])
+        cells_lab = np.concatenate([leaf_label, leaf_label])
+    flat = cidx.reshape(-1, 3)
+    uniq, inv = np.unique(flat, axis=0, return_inverse=True)
+    src = uniq.copy()
+    if d["half_z"]:
+        src[:, 2] = np.where(src[:, 2] > lab.shape[2], 2 * lab.shape[2] - src[:, 2], src[:, 2])
+    dev = gid[tuple(src.T)]
+    pdat = {k: np.where(dev >= 0, np.asarray(v)[np.maximum(dev, 0)], np.nan) for k, v in pd_mesh.items()}
+    pts = (origin + uniq * h) * 1e-3                                    # um
+    st = d["st"]
+    materials = sorted({r.material for r in st.regions})
+    region_mat = np.array([materials.index(r.material) for r in st.regions])
+    cnames = [c.name for c in mesh.domain.contacts]
+    vtk_io.write_vtu(path, pts, inv.reshape(-1, 8), vtk_io.VTK_HEXAHEDRON, point_data=pdat,
+                     cell_data={"region_id": cells_lab.astype(np.int32),
+                                "material_id": region_mat[cells_lab].astype(np.int32)},
+                     field_data={"region_names": [r.name for r in st.regions], "material_names": materials,
+                                 "contact_names": cnames,
+                                 "contact_bias": np.array([float(bias.get(c, 0.0)) for c in cnames]),
+                                 "label": label, "field_units": [f"{k}:{v}" for k, v in FIELD_UNITS.items()]},
+                     compress=True)
+
+
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
-             vtk="all", workers=None, log=print):
+             vtk="all", workers=None, log=print, mesher="cartesian"):
     from solver2d.mosfet_metrics import mosfet_metrics
     # direct LU (MUMPS) for these meshes: ILU-GMRES gave Newton bad directions
     # (long thin cells, large insulator regions) and equilibrium never converged
     os.environ.setdefault("TCAD_LINSOLVE", "petsc_lu")
     t0 = time.perf_counter()
-    d = build_device(flow.load(config), top_nm=top_nm, half_z=half_z, log=log)
+    d = build_device(flow.load(config), top_nm=top_nm, half_z=half_z, log=log, mesher=mesher)
     vgs = list(np.round(np.arange(vgs_step, vgs_max + 1e-9, vgs_step), 6))
-    tasks = [dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
+    tasks = [dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk, mesher=mesher,
                   vtk_dir=os.path.join(out_dir, "vtk")) for v in vds]
     with ProcessPoolExecutor(max_workers=workers or len(tasks)) as ex:
         results = list(ex.map(run_curve, tasks))
