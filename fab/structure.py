@@ -30,6 +30,8 @@ from fab import levelset
 DONORS = {"P", "As", "Sb", "N"}           # N: donor in SiC; harmless for Si flows
 ACCEPTORS = {"B", "In", "Al", "Ga"}
 SEMICONDUCTORS = {"Si", "SiGe", "Ge", "SiC", "GaAs"}
+CONDUCTORS = {"Poly", "Metal", "TiN", "TaN", "W", "Al", "Cu", "Co", "NiSi", "TiSi2"}
+INSULATOR_EPS = {"SiO2": 3.9, "SiN": 7.5, "Si3N4": 7.5, "HfO2": 22.0, "Al2O3": 9.0, "SiON": 5.5}
 EPS = 2.0 ** -20                          # nm (~1e-6, exact in binary); tie-break for complements
 
 
@@ -221,15 +223,17 @@ class Structure:
             phi = np.maximum(phi, self._column(self.mask2d(mask)))
         self._add(name, material, phi)
 
-    def etch(self, mode, materials=None, depth=None, stop_on=None, mask=None, thickness=None):
+    def etch(self, mode, materials=None, depth=None, stop_on=None, mask=None, thickness=None, regions=None):
         """mode anisotropic: in each open column, remove the target materials
         above a front at `depth` below the column's top surface, never below
         the top of a `stop_on` material. mode isotropic: remove target
         material within `thickness` of the ambient (exposed surfaces).
-        Targets: `materials` (default: everything except stop_on)."""
+        Targets: `materials` and/or named `regions` (default: everything
+        except stop_on) - a region target etches one layer (e.g. the gate
+        oxide) and leaves other regions of the same material (the STI)."""
         g = self.grid
         stop = set(stop_on or ())
-        targets = self.regions_of(materials=materials) if materials else \
+        targets = self.regions_of(materials=materials, names=regions) if (materials or regions) else \
             [r for r in self.regions if r.material not in stop]
         if mode == "anisotropic":
             # removed = points with gas visible from above within `depth`
@@ -320,8 +324,14 @@ class Structure:
             best = np.where(take, r.phi, best)
         return lab
 
-    def cell_labels(self):
-        """Region index of each voxel cell, from its 8 corners' mean phi."""
+    def cell_labels(self, clean=True):
+        """Region index of each voxel cell, from its 8 corners' mean phi.
+        clean: remove one-voxel flakes (see _despeckle) - the labels the
+        device mesh is built from must not carry voxel noise."""
+        lab = self._raw_cell_labels()
+        return _despeckle(lab)[0] if clean else lab
+
+    def _raw_cell_labels(self):
         nx, ny, nz = self.grid.shape
         lab = np.full((nx - 1, ny - 1, nz - 1), -1, dtype=np.int16)
         best = np.zeros(lab.shape)
@@ -333,6 +343,38 @@ class Structure:
             lab[take] = k
             best = np.where(take, c, best)
         return lab
+
+    def check(self):
+        """Structure check (run after every build): the defects a device
+        solve must not inherit. Returns a list of warning strings (empty =
+        clean): one-voxel flakes removed from the labels, enclosed gas
+        voids, small detached fragments of a region, and layers thinner
+        than two voxels."""
+        raw = self._raw_cell_labels()
+        lab, n_flakes = _despeckle(raw)
+        out = []
+        if n_flakes:
+            out.append(f"{n_flakes} one-voxel flake cell(s) relabelled to their surroundings")
+        gas, n = ndimage.label(lab == -1)
+        open_ids = set(np.unique(gas[:, 0, :])) - {0}
+        voids = [i for i in range(1, n + 1) if i not in open_ids]
+        if voids:
+            sizes = ndimage.sum(lab == -1, gas, voids).astype(int)
+            where = [tuple(int(v) for v in np.argwhere(gas == i)[0]) for i in voids[:3]]
+            out.append(f"{len(voids)} enclosed gas void(s), sizes {sorted(sizes.tolist())[:8]} cells, "
+                       f"e.g. at cell index {where}")
+        for k, r in enumerate(self.regions):
+            m = lab == k
+            comp, nc = ndimage.label(m)
+            if nc > 1:
+                sizes = ndimage.sum(m, comp, range(1, nc + 1)).astype(int)
+                small = sizes[sizes < max(64, 0.01 * sizes.max())]
+                if len(small):
+                    out.append(f"region {r.name!r}: {len(small)} detached fragment(s) of {sorted(small.tolist())[:6]} cells")
+            thin = int(_thin_cells(m).sum())
+            if thin:
+                out.append(f"region {r.name!r}: {thin} cell(s) in a layer one voxel thick")
+        return out
 
     def semiconductor_nodes(self, labels=None):
         lab = self.node_labels() if labels is None else labels
@@ -350,3 +392,38 @@ class Structure:
         """Region volume (nm^3) from its cell count (voxel accurate)."""
         k = self.region_index(name)
         return float((self.cell_labels() == k).sum() * np.prod(self.grid.h))
+
+
+def _despeckle(lab, max_pass=4):
+    """Relabel one-voxel flakes: a cell whose two neighbours along some axis
+    carry the same label, different from its own, takes that label. A real
+    thin film keeps its cells - its two sides are different materials (the
+    gate oxide between silicon and gate) - while a flake sticking out of a
+    staircased curved surface (gas on both sides) does not. Returns (labels,
+    number of cells changed)."""
+    lab = lab.copy()
+    total = 0
+    for _ in range(max_pass):
+        changed = 0
+        for a in range(3):
+            v = np.moveaxis(lab, a, 0)                    # a view: writes go to lab
+            lo, mid, hi = v[:-2], v[1:-1], v[2:]
+            flip = (lo == hi) & (mid != lo)
+            if flip.any():
+                mid[flip] = lo[flip]
+                changed += int(flip.sum())
+        total += changed
+        if not changed:
+            break
+    return lab, total
+
+
+def _thin_cells(m):
+    """Cells of mask m in a run of exactly one cell along some axis with
+    the mask absent on both sides (a one-voxel-thick layer or fin)."""
+    out = np.zeros(m.shape, bool)
+    for a in range(3):
+        v = np.moveaxis(m, a, 0)
+        o = np.moveaxis(out, a, 0)
+        o[1:-1] |= v[1:-1] & ~v[:-2] & ~v[2:]
+    return out

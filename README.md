@@ -87,13 +87,16 @@ finite width and STI on both sides:
 1. substrate doping
 2. STI trench, fill and CMP
 3. well/Vt implant
-4. gate oxidation (on silicon only)
-5. poly, then gate etch stopping on the oxide
-6. oxide strip
-7. extension implant, self-aligned to the poly
+4. gate dielectric over the whole flat surface, so the gate bottom is
+   level over the channel and the STI alike
+5. gate metal (TiN by default; `gate_material: Poly` also works), then a
+   gate etch stopping on the dielectric
+6. strip of the exposed gate dielectric only, which leaves the STI flush
+   with the silicon (no recess step for the spacer to leave stringers in)
+7. extension implant, self-aligned to the gate
 8. nitride spacer (conformal deposit plus anisotropic etch)
-9. source/drain implant, self-aligned to the poly and spacer
-10. metal contacts
+9. source/drain implant, self-aligned to the gate and spacer
+10. metal contacts (W), whole volumes
 
 Every dimension is a parameter (`Lg`, `tox`, `spacer`, `W`, `sti_depth`,
 the implant peaks and ranges, the voxel size, ...).
@@ -124,8 +127,14 @@ the implant peaks and ranges, the voxel size, ...).
 - Each operation against analytic geometry: conformal corner radius,
   spacer width, etch stop, selective growth, implant depth and dose.
 - The planar build against its own parameters: gate edges, oxide
-  thickness, spacer width (8.000 nm for 8 nm), STI depth and recess, and
-  the junction depth against the Gaussians.
+  thickness, spacer width (8.000 nm for 8 nm), STI depth, the STI flush
+  with the silicon, a flat gate bottom, and the junction depth against
+  the Gaussians.
+- **The structure check, after every build:** enclosed gas voids, detached
+  fragments of a region, and layers one voxel thick are warnings in the
+  build log. One-voxel flakes (the staircase of a curved surface poking
+  out by a voxel) are relabelled to their surroundings and counted. A
+  thin film between two different materials is never touched.
 - A round trip through the layer-2 YAML.
 - The snapshots in the viewer.
 

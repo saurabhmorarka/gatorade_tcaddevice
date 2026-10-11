@@ -183,6 +183,20 @@ class TestOps(unittest.TestCase):
         self.assertAlmostEqual(dose / 1e13, 1.0, delta=1e-3)
 
 
+class TestDespeckle(unittest.TestCase):
+    def test_flake_removed_film_kept(self):
+        from fab.structure import _despeckle
+        lab = np.full((5, 7, 5), -1, dtype=np.int16)
+        lab[:, :3, :] = 0                      # silicon
+        lab[:, 3, :] = 1                       # one-voxel film between silicon and gate: kept
+        lab[:, 4:, :] = 2
+        lab[2, 5, 2] = -1                      # a lone gas voxel inside the gate: removed
+        out, n = _despeckle(lab)
+        self.assertEqual(n, 1)
+        self.assertTrue((out[:, 3, :] == 1).all())
+        self.assertEqual(out[2, 5, 2], 2)
+
+
 class TestExpr(unittest.TestCase):
     def test_evaluate(self):
         p = {"Lg": "30nm", "sp": 8, "W": "0.06um"}
@@ -241,8 +255,8 @@ class TestPlanar(unittest.TestCase):
         p = self.p
         z_sti = p["sti_width"] / 2
         x = p["xg0"] / 2
-        self.assertAlmostEqual(top_height(self.st, x, z_sti, ["sti"]), -1.5 * p["tox"], delta=0.05)  # strip recess
-        bottom = self.crossing("sti", 1, {0: x, 2: z_sti}, (5, p["sti_depth"] + 10))   # below the recessed top
+        self.assertAlmostEqual(top_height(self.st, x, z_sti, ["sti"]), 0.0, delta=0.05)  # flush: the strip leaves the STI alone
+        bottom = self.crossing("sti", 1, {0: x, 2: z_sti}, (5, p["sti_depth"] + 10))   # through the STI below its top
         self.assertAlmostEqual(bottom, p["sti_depth"], delta=0.05)
         y = 10.0                                    # active-area edges in z, inside the silicon
         self.assertAlmostEqual(self.crossing("sti", 2, {0: x, 1: y}, (0, p["Lz"] / 2)), p["zw0"], delta=0.05)
@@ -251,7 +265,7 @@ class TestPlanar(unittest.TestCase):
     def test_junction_depth(self):
         """Deep S/D junction far from the gate = where the analytic Gaussians
         balance (the doping is analytic, so this checks the implant depth
-        reference: the silicon surface after the oxide strip)."""
+        reference: the silicon surface after the dielectric strip)."""
         p, g = self.p, self.st.grid
         x, zc = p["xg0"] / 2, p["Lz"] / 2
         _, _, net = self.st.net_doping()
@@ -281,6 +295,22 @@ class TestPlanar(unittest.TestCase):
         below = (g.axes[1][:-1] + g.h[1] / 2) > 3.0          # silicon/STI depth: no gas voxels
         self.assertEqual(int((lab[:, below, :] == -1).sum()), 0)
 
+    def test_structure_check(self):
+        """No voids, fragments or one-voxel layers; STI flush with the
+        silicon (no recess step) and the gate bottom flat at tox."""
+        issues = [w for w in self.st.check() if "flake" not in w]
+        self.assertEqual(issues, [])
+        lab = self.st.cell_labels()
+        g = self.st.grid
+        k = {r.name: i for i, r in enumerate(self.st.regions)}
+        h = -(g.axes[1][:-1] + g.h[1] / 2)                   # cell-centre heights
+        sti_col = lab[5, :, 2]                              # under the source, in the STI
+        self.assertAlmostEqual(h[np.argmax(sti_col == k["sti"])], 0.0, delta=g.h[1])
+        gx = int(g.shape[0] // 2)
+        bottom = [h[np.argmax(lab[gx, :, z] == k["gate"])] for z in range(lab.shape[2])
+                  if (lab[gx, :, z] == k["gate"]).any()]
+        self.assertLess(max(bottom) - min(bottom), 1e-9)    # one level over channel and STI alike
+
     def test_layer2_roundtrip(self):
         """The expanded (layer 2/3) YAML rebuilds the same structure."""
         import yaml
@@ -307,7 +337,7 @@ class TestPlanar(unittest.TestCase):
             flow.build(self.cfg, on_step=w, log=lambda *a: None)
             sess = model.Session(w.finish())
             self.assertEqual(len(sess), len(flow.expand(self.cfg)["process"]))
-            self.assertTrue(sess.states[7].name.endswith("gate oxidation"))
+            self.assertTrue(sess.states[7].name.endswith("gate dielectric"))
             st0, st = sess.state(0), sess.state(len(sess) - 1)
             self.assertTrue(st.is_process)
             self.assertEqual(st0.region_names, ["substrate"])

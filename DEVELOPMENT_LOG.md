@@ -4457,3 +4457,81 @@ before threading). About 32 MB on disk, git-ignored.
 - All suites pass in the venv and the conda env:
   - 1D 6/6, 2D 4/4
   - VTK, native, tcadview 16/16, fab 21/21
+
+## 42. Phase 3 (cont.): gate metal, a reference 3D solve, and a clean structure
+
+**Gate and contacts as process volumes.** The planar template now builds a
+real gate metal (TiN by default; work function 4.25 eV for NMOS, 4.95 eV
+for PMOS, or Poly at 4.05/5.17), and its whole surface is the gate
+terminal. Source and drain contacts are whole W volumes. Layer 3 points
+each contact at a region.
+
+**A reference 3D solve on a rectilinear grid** (`mesh3d/cartesian.py`,
+`fab/simulate.py`, `python -m fab simulate`).
+- What it is: a graded tensor-product grid sampled from the voxel labels.
+  It is an exact box-FV mesh (the Voronoi cell of a rectilinear node is
+  the box between midpoints, and per-material splits are exact).
+- Half width with a symmetry plane.
+- Bug found: the solver pairs contact boundary values (in
+  `boundary_point_index` order) with `psi[is_contact]` (in node order),
+  so the contact nodes must be sorted. Unsorted, Newton converged only
+  linearly.
+- ILU does not converge on its high-aspect cells (up to about 16:1), so
+  it runs on PETSc LU.
+- Result: 57,888 nodes, Vt 0.214 V and 0.065 V, DIBL 156 mV/V, SS
+  87 mV/dec, 332 s.
+- This is a stand-in only. Refinement planes cross the whole domain and
+  there is no mandatory quality gate. It is kept as the reference for the
+  octree mesher.
+
+**Octree transition study** (for the Phase 5 mesher). On random 2:1
+balanced octrees:
+- Centre-fan tets (the 2D quadtree's construction carried to 3D) give
+  negative edge couplings on about 15% of edges: circumcentres land in
+  the neighbouring cell. Rejected.
+- The exact Voronoi dual of the octree vertices is admissible by
+  construction:
+  - volumes sum to the box, all positive
+  - cells close to 4e-9
+  - facet areas symmetric
+- Cells differ from a cube only within one fine cell of a level change.
+
+**The structure had real defects, not just rendering.** The user spotted
+many tiny corners in the 3D view. Measuring the voxel labels the solver
+is built from showed three:
+1. The oxide strip etched *all* SiO2, so it recessed the STI 2.25 nm
+   below the silicon. That exposed a silicon sidewall step along every
+   active edge.
+2. The spacer etch left nitride stringers in that step.
+3. The gate oxide grown on silicon only left the gate 1.5 nm lower over
+   the STI than over the channel. A ledge at every active edge, with
+   eight single-voxel gas voids at the gate corners.
+
+Fixes:
+- The gate dielectric is deposited over the whole (flat, post-CMP)
+  surface.
+- The strip targets the `gate_oxide` region only, via a new
+  `etch(regions=...)`.
+
+Results:
+- The STI is flush with the silicon, and the gate bottom is flat.
+- Region cell counts are exact box volumes (STI 2 x 252,000; gate
+  216,000).
+- No voids, no slivers.
+
+**Structure check after every build** (`Structure.check`, logged by
+`flow.build`):
+- Warnings: enclosed gas voids, detached fragments of a region, and
+  layers one voxel thick.
+- One-voxel flakes are relabelled to their surroundings and counted
+  (`_despeckle`). A flake is a cell whose two neighbours along an axis
+  share a different label; it comes from the staircase of a curved
+  surface poking out by a voxel. In the default planar build that is 8
+  cells at the rounded spacer corners.
+- A real film between two different materials is never relabelled.
+- Re-distancing every region before labelling was tried. It made the
+  jitter worse (16 flakes), so it was not used.
+
+The rendered surfaces are separate. tcadview contours each level set
+with marching cubes, which bevels every sharp edge by up to one voxel.
+That is drawing only: the device is built from the cell labels.

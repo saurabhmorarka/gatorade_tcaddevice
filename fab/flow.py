@@ -99,7 +99,7 @@ def run_step(st, step, p):
                    on=a.get("on"), mask=a.get("mask"))
     elif op == "etch":
         st.etch(a["mode"], materials=a.get("materials"), depth=a.get("depth"), stop_on=a.get("stop_on"),
-                mask=a.get("mask"), thickness=a.get("thickness"))
+                mask=a.get("mask"), thickness=a.get("thickness"), regions=a.get("regions"))
     elif op == "planarize":
         st.planarize(a["to_height"])
     elif op == "implant":
@@ -115,7 +115,7 @@ def build(cfg, on_step=None, log=print):
     """Run the flow. on_step(i, label, structure) is called after every
     step (the snapshot writer). Returns (structure, [(label, seconds)])."""
     flow = expand(cfg)
-    p = resolve_params(flow["params"])
+    p = resolve_params({k: v for k, v in flow["params"].items() if v is not None})
     st = Structure(make_grid(flow["domain"], p))
     st.contacts = flow["device"].get("contacts", [])
     times = []
@@ -129,4 +129,8 @@ def build(cfg, on_step=None, log=print):
         log(f"  {i:2d} {label:24s} {dt:6.2f} s")
         if on_step is not None:
             on_step(i, label, st)
+    issues = st.check()
+    log("structure check: " + ("clean" if not issues else f"{len(issues)} warning(s)"))
+    for w in issues:
+        log(f"  WARNING {w}")
     return st, times
