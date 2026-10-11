@@ -4958,3 +4958,46 @@ The 2D golden tests pass (efield default unchanged).
 - Coarse octrees remain about 3.5% above the fine meshes. That is
   resolution, for the defaults study.
 - Off-current: octree 7.8-8.2e-10, rectilinear 8.5-9.3e-10.
+
+## 50. Hybrid is the default velocity-saturation force (user approved)
+
+- `velocity_saturation: true` now means "hybrid" (`vsat_force`). The old
+  force is still available as "efield". `fab/simulate.py` and the 2D
+  configs pick up hybrid through `true`.
+- *The warm-up became a fallback.* Warm-up first (section 49) broke the
+  2D continuation sweeps: 30 of 138 high-bias points were lost. From an
+  efield state the high-Vds pinch-off differs too much, and the previous
+  hybrid point is the better start. So `newton_solve_2d`:
+  - tries the requested force directly, capped at
+    `VSAT_DIRECT_MAXITER = 15` iterations; a linear-solver breakdown counts
+    as a failure;
+  - only if that fails, converges with efield from the same start and then
+    switches to the requested force.
+- *2D NMOS* (all 138 points converge):
+  - linear-region Id rises up to +9.4% (Vds = 0.05 V, high Vgs);
+  - saturation rises 0.3-3%;
+  - subthreshold is unchanged.
+  This is the junction built-in field no longer throttling the mobility.
+- *2D BTBT.* Only the "local" Kane model at Vsub <= -2 V moves, by up to
+  +46%; none, local_1d and nonlocal are unchanged to about 1e-6.
+  - The integrated generation is IDENTICAL (kane_bulk 1.5927e-7 A/um at
+    -3 V in both).
+  - What changes is collection: about 12% of the generated pairs reach the
+    terminals and the rest recombine where they are made. The pairs pile up
+    in a high field balanced by diffusion, which efield throttled.
+    Collection rises from 12.5% to 15.4%.
+- The 2D goldens `mosfet_2d` and `btbt_2d` were re-captured after these
+  checks.
+- *3D* (full planar device, ILU): values are as in section 49, all layouts
+  converge.
+  - But the solve takes 57 s instead of 31 s. Each bias JUMP (the study
+    script does no continuation) burns its capped direct attempt before the
+    fallback.
+  - The real fix is a better start when a contact bias changes: shift
+    phi and psi by dV over the contact's connected doped region, so the
+    jump lands at the junction instead of on the first contact edge.
+    Proposed to the user.
+- `test_octree` drain-current tolerance goes from 1% to 2%, with a comment.
+  Octree vs rectilinear on the tiny device is 1.8% with hybrid; that is the
+  default octree's resolution gap (+3.4% on the full device) and is
+  tightened again after the defaults study.

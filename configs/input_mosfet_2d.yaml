@@ -67,8 +67,10 @@ material:
 
 physics:
   # Caughey-Thomas high-field mobility (vsat_n=1e7 cm/s, beta_n=2 - see
-  # core/params.py), driven by the electrostatic field along each mesh
-  # edge (solver2d/newton_solver_qf_2d.py::edge_mobility).
+  # core/params.py). true = "hybrid": driven by the carrier's quasi-Fermi
+  # gradient where it is dense, the edge field where it is sparse; or name
+  # the force: efield | hybrid | gradqf
+  # (solver2d/newton_solver_qf_2d.py::edge_mobility).
   velocity_saturation: true
 
 gate:

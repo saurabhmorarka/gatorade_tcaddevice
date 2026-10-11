@@ -217,15 +217,19 @@ VSAT_FORCES = ("efield", "hybrid", "gradqf")
 # gradient, half field - the avalanche solver's value
 # (avalanche/newton_solver_avalanche.py, DEFAULT_REF_DENSITY_CM3).
 VSAT_REF_DENSITY = 1.0e16
+# Newton iterations allowed to a quasi-Fermi-force solve from the given start
+# before falling back to the edge-field warm-up (newton_solve_2d).
+VSAT_DIRECT_MAXITER = 15
 
 
 def vsat_force(velocity_saturation):
     """None (no velocity saturation) or one of VSAT_FORCES; True means the
-    original "efield"."""
+    default, "hybrid" (DEVELOPMENT_LOG 49-50; "efield" was the default
+    before)."""
     if velocity_saturation is False or velocity_saturation is None:
         return None
     if velocity_saturation is True:
-        return "efield"
+        return "hybrid"
     if velocity_saturation not in VSAT_FORCES:
         raise ValueError(f"velocity_saturation must be a bool or one of {VSAT_FORCES}, not {velocity_saturation!r}")
     return velocity_saturation
@@ -276,7 +280,7 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
     the Caughey-Thomas high-field model (mobility_field), driven per edge by
     the force selected with velocity_saturation (see _edge_force):
 
-      * True / "efield": the electrostatic field projected on the edge,
+      * "efield": the electrostatic field projected on the edge,
         dpsi/edge_len. Not |E| at a node, which includes the large,
         current-free vertical gate field. But the edge projection still
         sees (a) the built-in field of the source/drain junctions, which is
@@ -289,8 +293,8 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
         its current. Tried first in 2D (session notes in
         DEVELOPMENT_LOG): phin is undetermined where n ~ 0, and Newton
         turned erratic ramping Vds past ~0.5 V at Vgs = 0.
-      * "hybrid": the quasi-Fermi gradient where the carrier is dense, the
-        field where it is sparse - the avalanche solver's resolution of the
+      * True / "hybrid" (the default): the quasi-Fermi gradient where the
+        carrier is dense, the field where it is sparse - the avalanche solver's resolution of the
         same trade-off (FLOOXS/Charon damp the gradient force the same way).
     In equilibrium the edge current is 0 whatever mu is."""
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
@@ -851,30 +855,47 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     original equilibrated SuperLU spsolve with an exact solve every
     iteration (kept for A/B comparisons).
 
-    velocity_saturation: False, True / "efield", "hybrid" or "gradqf" - the
+    velocity_saturation: False, "efield", True / "hybrid" or "gradqf" - the
     driving force of the high-field mobility (edge_mobility). With a
-    quasi-Fermi force (hybrid, gradqf) and vsat_warmup=True (default) the
-    point is first converged with "efield", then with the requested force
-    from there; "iters" counts both and "iters_warmup" the first."""
+    quasi-Fermi force (hybrid, gradqf) and vsat_warmup=True (default), a
+    point that does not converge within VSAT_DIRECT_MAXITER iterations is
+    redone: converged with "efield" from the same start, then with the
+    requested force from there. "iters" counts everything, "iters_warmup"
+    the iterations before the final stage (0 if the direct solve worked)."""
     if vsat_warmup and vsat_force(velocity_saturation) in ("hybrid", "gradqf"):
-        # Warm-up: converge with the edge-field force first, then switch.
-        # A new contact bias enters as a jump of phin/phip across the first
-        # edge at the contact (0.05 V over 0.5 nm ~ 1e6 V/cm); a quasi-Fermi
-        # force reads that as velocity saturation, the edge's phi-conductance
-        # collapses (a saturated edge carries ~q*c*vsat whatever its phi
-        # drop), and Newton derails (3D planar device, DEVELOPMENT_LOG 49).
-        # The edge-field force is blind to phi, so it settles phi first;
-        # from there the requested force only corrects the mobility.
-        kw = dict(f_tol=f_tol, maxiter=maxiter, verbose=verbose, psi_bc_override=psi_bc_override,
+        # A quasi-Fermi force can derail Newton from a poor start: a new
+        # contact bias enters as a jump of phin/phip across the first edge
+        # at the contact (0.05 V over 0.5 nm ~ 1e6 V/cm), the force reads
+        # that as velocity saturation, the edge's phi-conductance collapses
+        # (a saturated edge carries ~q*c*vsat whatever its phi drop), and
+        # Newton diverges (3D planar device, DEVELOPMENT_LOG 49-50).
+        # So: try the requested force directly (a good start - the previous
+        # point of a continuation - converges as usual), capped so a bad
+        # start fails fast; if it fails, converge with the edge-field force
+        # (blind to phi, so it settles phi) and continue from there. Not
+        # the warm-up first: from an efield state the high-bias pinch-off
+        # differs so much that continuation sweeps failed (2D NMOS).
+        kw = dict(f_tol=f_tol, verbose=verbose, psi_bc_override=psi_bc_override,
                   phin_bc_override=phin_bc_override, phip_bc_override=phip_bc_override, damping=damping,
                   generation=generation, linear_solver=linear_solver)
+        try:
+            r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
+                                phip_init=phip_init, maxiter=min(maxiter, VSAT_DIRECT_MAXITER), cold_retry=False,
+                                velocity_saturation=velocity_saturation, vsat_warmup=False, **kw)
+        except RuntimeError:              # e.g. an iterative linear solve that broke down on the bad start
+            r = {"converged": False, "iters": min(maxiter, VSAT_DIRECT_MAXITER)}
+        if r["converged"]:
+            r["iters_warmup"] = 0
+            return r
+        it_direct = r["iters"]
         w = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
-                            phip_init=phip_init, cold_retry=cold_retry, velocity_saturation="efield", **kw)
+                            phip_init=phip_init, maxiter=maxiter, cold_retry=cold_retry,
+                            velocity_saturation="efield", **kw)
         r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=w["psi"], phin_init=w["phin"],
-                            phip_init=w["phip"], cold_retry=False, velocity_saturation=velocity_saturation,
-                            vsat_warmup=False, **kw)
-        r["iters_warmup"] = w["iters"]
-        r["iters"] = w["iters"] + r["iters"]
+                            phip_init=w["phip"], maxiter=maxiter, cold_retry=False,
+                            velocity_saturation=velocity_saturation, vsat_warmup=False, **kw)
+        r["iters_warmup"] = it_direct + w["iters"]
+        r["iters"] = r["iters_warmup"] + r["iters"]
         return r
 
     N = len(mesh.points)
