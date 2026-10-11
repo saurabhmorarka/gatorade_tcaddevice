@@ -3854,3 +3854,430 @@ very-coarse mesh tier). Porting the same Newton/merit to the 2D QF solver
 (it has its own f_tol workarounds, see newton_solver_qf_2d.py); porting
 avalanche to 2D (driving force per edge is already how Genius does it; the
 real 2D work is refining where the peak field actually sits).
+
+---
+
+## 34. Session 24: 3D groundwork - performance core, 3D extruded MOSFET in ~75 s
+
+**Plan.** `plans/3d_plan.md` holds the 3D program and the user's decisions:
+- a self-built level-set "virtual fab" structure creator (no ViennaPS) driven by
+  a three-layer YAML: template, then process flow, then doping/contacts/cut
+- an octree mesher with 3D box-FV
+- a Qt (PySide6 + PyVista) TCAD viewer distributable via GitHub
+- analytic doping first
+- future thermal/stress/diffusion solvers, borrowing COMSOL concepts
+- gate oxide always meshed (no thin-dielectric BC)
+- runtime target: full 3D I-V in about 1 minute
+
+**Measured baseline.** The 2D MOSFET full I-V took 17.5 s, 73% of it in
+SuperLU (~60 ms/solve, ~7 Newton its/point). SuperLU on a 3D-sized Jacobian
+(84k unknowns) needs ~6.7-20 s per factorization, which rules it out for 3D.
+On a real 3D Jacobian (extruded MOSFET): MUMPS takes 0.8-1.1 s and ILU(1)-GMRES
+takes 0.33 s.
+
+**What changed:**
+- `core/linsolve.py` (new): a stateful `LinearSolver`.
+  - It reuses the latest factorization as a GMRES preconditioner across Newton
+    iterations and bias points, refactoring only when Krylov time exceeds the
+    last factorization's time.
+  - Ruiz scaling is done on the CSR values (the old diag-product equilibration
+    re-sorted indices, ~10% of an iteration).
+  - It uses its own right-preconditioned GMRES (scipy's reports convergence
+    unreliably here).
+  - Backends: SuperLU with a METIS nested-dissection ordering (pymetis, pip;
+    2.5x faster in 2D, 4x in 3D), UMFPACK (opt-in), PETSc MUMPS, and PETSc
+    ILU-GMRES with point-block (BAIJ 3x3) ILU(2) for the field-major [psi;
+    phin; phip] layout (2x faster than scalar ILU).
+  - It sets `FI_PROVIDER=tcp` before PETSc loads: conda-forge MPICH otherwise
+    busy-polls about 2 cores per IDLE process.
+- `solver2d/newton_solver_qf_2d.py`:
+  - inexact Newton (Eisenstat-Walker, cap 1e-4 for LU-type preconditioners and
+    1e-8 for ILU; a loose ILU step corrupted the quasi-Fermi levels)
+  - a fixed-pattern COO->CSR assembly plan
+  - the line search's residual is reused, so there is no wasted final assembly
+  - a quadratic-convergence prediction exit on max(psi update, density-weighted
+    quasi-Fermi update). A psi-only version stopped one off-state point with phin
+    3e-4 V off and Id 1000x too large.
+  - a `converged` flag in the result, which drivers now use instead of
+    `res_norm < 1e-4`
+  - `linear_solver=` argument (`"legacy"` keeps the old path for A/B)
+- `mesh3d/extrude.py` (new): an exact 3D box-FV prism mesh from any Mesh2D.
+  `main2d_mosfet_sweep.py --extrude-um W --nz K` runs the full I-V on it. Other
+  driver changes: `--out-dir` on all 2D drivers; segments (`--chunk-points`,
+  default off); default workers = performance-core count (M3 Pro: 6P+6E;
+  spreading onto E-cores was slower).
+- `testsuite/test_2d_examples.py` (new) and 4 goldens: every bias point of the
+  2D diode, MOS-cap, MOSFET and BTBT drivers, run into a temp dir.
+  - Tolerances follow measured convergence: rtol 1e-3, or 2e-2 for BTBT.
+  - Noise floors are measured: off-state Id below ~1e-13 A/um is
+    contact-current round-off (~4e-17 A/um), even with the old solver.
+- `environment.yml` (new, conda `tcad`: PETSc/MUMPS/UMFPACK/pymetis);
+  `requirements.txt` adds pymetis.
+
+**Results** (clean machine, M3 Pro):
+
+| run | before | after |
+|---|---|---|
+| 2D MOSFET | 17.5 s | 7.5 s |
+| BTBT | 93 s | ~60 s |
+| diode | 4.0 s | 2.8 s |
+| MOS-cap | 14 s | 14 s (not ported) |
+| **3D extruded MOSFET** (28k nodes, 84k unknowns, 138 points) | hours | **73 s** |
+
+The 3D run matches 2D on every point within 1e-3, and SS/Vt/DIBL/Ion are
+identical (the first rung of the 3D validation ladder). It is memory-bandwidth
+bound: wall time is ~75 s for 3-8 workers. Testsuite: 1D 6/6; 2D 4/4 in both
+the venv and the conda env.
+
+**Not done:**
+- MOS-cap Poisson solver port (`solver2d/poisson2d_mos.py`)
+- BTBT profiling
+- VTK export (Phase 0)
+- Qt viewer
+- virtual fab, octree mesher
+- next 3D speed levers (better preconditioner / FP32 / fewer Newton its)
+
+## 35. Session 25: MOS-cap port and BTBT profiling (2D runtimes)
+
+Branch `3d-perf-core`. Profiled before changing anything; every change below
+was measured on its own.
+
+**MOS-cap C-V: 14 s -> 3.9 s, bit-identical output.**
+- The profile showed the time was not the linear solve (1.4 s) but the
+  Jacobian's Dirichlet-row scaling: a Python loop over contact nodes, each
+  scanning every nonzero (380k `np.any` calls, 7.8 s). Now one
+  `np.maximum.at`, giving the same matrix.
+- `solve_mos_equilibrium_2d` uses a per-mesh `core.linsolve.LinearSolver`
+  (`linear_solver="legacy"` keeps the old path) and skips the Jacobian after
+  the final accepted step (the line search already has F there).
+- The convergence test is unchanged: the remaining 3.9 s is mostly mesh
+  building and plotting, so update-based convergence would buy little.
+
+**BTBT sweep: ~54 s -> ~46 s** (8 curves; single-curve times alone: SRH 12 s,
+local 28.5 -> 17.8 s, nonlocal 30 -> 29 s).
+- `tat.tat.hurkx_gamma` was 41% of a local curve. Its 96-point quadrature
+  built the nodes, weights and `u**1.5` at full N x 96 size per call. Points
+  are now grouped by trap depth dE (one value per material): one node set per
+  group, and the two sums are BLAS matrix-vector products. 3.8x faster
+  (9.7 -> 2.6 ms per call), equal to 6e-16 relative. A per-point fallback
+  remains for many distinct dE values (graded composition).
+- The generation Jacobians in `btbt/local2d.py` and `btbt/paths2d.py` used
+  `sp.diags`/matmul/`hstack`, which drop exact zeros, so the sparsity pattern
+  changed between iterations and every assembly re-sorted. They now return
+  COO matrices with mesh-only index arrays, and
+  `newton_solver_qf_2d._assemble_with_plan` reuses its plan after checking
+  (rows, cols) match. Assembly: 2.3 -> 0.46 s per local curve.
+- Scheduling: curves are submitted longest first (nonlocal, local, SRH), and
+  default workers = performance cores (`core/parallel.py`, moved out of
+  `main2d_mosfet_sweep.py`). 6 and 8 workers now give the same wall time.
+- Tried and reverted: a neighbour-triangle walk before matplotlib's trifinder
+  in the field-line tracer. Nearly every step still needs at least one full
+  search (paths leaving the mesh or crossing vertices), so it saved nothing.
+
+**What's left in BTBT:** the two nonlocal curves are the critical path. About
+half of each is field-line tracing (`btbt/paths2d.py`): ~14k Python-level
+steps per curve at ~1 ms of numpy overhead each. That is a compiled-loop
+problem (a Rust tracer would be >10x on that part, and 3D tunneling needs the
+same tracer on tets). It is left for a decision, since there is no Rust
+toolchain on the machine yet.
+
+**Moved values:** the MOS-cap is bit-identical. BTBT: the only change above
+1e-3 is the nonlocal body current at the shared Vg = Vsub = 0 point
+(-4.057e-13 vs -4.023e-13 A/um, 0.8%). The Id-Vg and Id-Vsub curves swapped
+these two values, and both are within the nonlocal outer iteration's 1%
+stopping tolerance (`OUTER_TOL`). MOSFET timing is unchanged (7.7 s solve,
+same as the committed code under the same load).
+
+Testsuite: 1D 6/6; 2D 4/4 in both the venv and the conda env.
+
+| run | session 24 | now |
+|---|---|---|
+| 2D MOS-cap | 14 s | 3.9 s |
+| BTBT | ~54-60 s | ~46 s |
+| 2D MOSFET | 7.5 s | 7.7 s (unchanged code path) |
+
+## 36. Session 25 (cont.): Phase 0 - VTK export
+
+Branch `3d-vtk-export` (off `3d-perf-core`). This is the plan's "shared
+contract": every structure and solved state is a `.vtu`, and every sweep is a
+`.pvd`, with one naming convention. ParaView 6 is the reference viewer until
+tcadview exists.
+
+- `core/vtk_io.py` (new): pure-numpy VTK XML writer/reader (no VTK in the pip
+  env).
+  - UnstructuredGrid, one raw appended binary block, UInt64 headers, optional
+    zlib (about half the size).
+  - String FieldData for names. `.pvd` writer/reader.
+- `solver2d/vtk_export.py` (new): device mesh plus state to arrays.
+  - Cells: 2D gives triangles. Extruded 3D gives wedges (`extrude_mesh` now
+    keeps `base_triangles` and `z_cm`).
+  - `region_id` comes from a last-region-wins test at each cell centroid.
+    `material_id`/names come from matching the registry (the `Material`
+    dataclass has no name yet; the 3D YAML will name materials).
+  - Point fields use Sentaurus-style names: potential, densities, quasi-Fermi
+    potentials and energies, Ec/Ev, doping, space charge, `contact_id`.
+  - Carrier quantities are NaN in insulators, so log scales work and the
+    oxide shows as "undefined", as in Sentaurus.
+  - Cell `ElectricField` is exact for the linear (triangle) and
+    linear-x-linear (wedge) interpolant.
+  - Field data: names, contact biases, label, units.
+- Drivers: `--vtk` on the diode, MOS-cap and MOSFET drivers. The MOSFET takes
+  `--vtk last` (default) or `--vtk all`.
+  - In `all` mode the workers write their own states in parallel (files named
+    by bias, so curve segments never collide) and the main process writes one
+    `.pvd` per curve.
+  - Cost: +0.5 s for all 138 2D states (71 MB). 3D: 3.2 MB per state.
+- `testsuite/test_vtk.py` (new, 3 s, 10 tests):
+  - exact round-trips (raw, zlib, multi-block zlib)
+  - region and material assignment
+  - linear-potential field exactness on triangles and wedges
+  - NaN in the oxide
+  - ParaView's `pvpython` reading the export (skipped without ParaView)
+- Checked by hand in ParaView 6: 2D and 3D potential, log-scale electron
+  density through the Id-Vg `.pvd` (the time slider is Vgs), and a clipped 3D
+  wedge state.
+- `core/linsolve.py`: uses pymetis's `CSRAdjacency` API when available (the
+  `xadj/adjncy` call is deprecated).
+
+Regression check: 1D 6/6, 2D 4/4, VTK 10/10. The 3D extruded MOSFET is
+unchanged (71.6 s, same SS/Vt/DIBL/Ion).
+
+**Not in Phase 0 yet:** current density vectors (need edge currents
+projected to cells), a YAML schema skeleton for the virtual fab (that goes
+with Phase 3), and converting old `*_structure.json` files.
+
+## 37. Session 25 (cont.): Rust field-line tracer (first compiled kernel)
+
+The user approved installing a Rust toolchain (rustup, Rust 1.99, maturin
+1.15) for components where Rust gives 5-10x. The first candidate came from
+the section 35 profile: in each nonlocal BTBT curve about half the time
+(~15 s) was field-line tracing.
+
+**What was built**
+- `native/` is a PyO3 + rust-numpy crate (`tcad_native`, abi3, so one
+  build serves Python 3.10+). Build with `maturin develop --release`.
+- `native/src/lib.rs` `trace_field_lines` mirrors
+  `FieldLineTracer.trace` step for step: RK2 midpoint steps, adaptive ds,
+  the band-edge level test, linear interpolation of the crossing, and the
+  stop rules (left the semiconductor, stalled, length cap). The start
+  triangle choice (`_first_triangle`) moved in too.
+  - Point location is an adjacency walk from the previous triangle. At a
+    boundary edge it searches the triangles around the current triangle's
+    vertices (for a short step past a concave corner), otherwise the point
+    is outside.
+  - A first version scanned all triangles at boundary exits, which cost
+    2x. The ring search replaced it.
+- `btbt/geom2d.py`: `TriGeom.neighbors` (edge adjacency) and
+  `vertex_tris` (CSR), both computed lazily.
+- `core/native.py` is the optional loader. `native` is None if the
+  extension isn't built or `TCAD_NATIVE=0`; callers keep numpy.
+- `btbt/paths2d.py` dispatches to the compiled tracer unless polylines are
+  being recorded (the generation-map figures). Those keep the numpy path.
+
+**Accuracy.** On equilibrium, Vd = 1 V and GIDL (Vg = -1.5 V, Vd = 1 V)
+states, for the Kane and both Hurkx traces (3.4k-4k paths each):
+- same set of complete paths, same end triangles
+- lengths, energy gains and bandgap integrals agree to <= 1e-13 relative
+
+`testsuite/test_native.py` checks this at rtol 1e-10.
+
+**Speed** (one trace of ~3.5k paths): numpy 33-65 ms, Rust 4-8 ms, about
+8x. That is ~7 ns per RK2 step, near the serial limit. The numpy loop was
+already vectorized across paths, so the gain is less than a naive "Python
+loop vs Rust" estimate.
+
+BTBT sweep (8 curves, 8 workers, M3 Pro), Rust vs numpy:
+
+| | numpy | Rust |
+|---|---|---|
+| idvg nonlocal | 41.4 s | 24.3 s |
+| idvsub nonlocal | 44.5 s | 28.4 s |
+| all curves wall-clock | 45.5 s | 37.6 s |
+| process total | 51.7 s | 43.5 s |
+
+The nonlocal curves are no longer the only critical path. The local curves
+(~27 s under contention, mostly Hurkx Gamma and Newton) now set it too.
+
+**Moved values.** Between the two runs, the only differences above noise are:
+- the nonlocal body current at the shared zero-bias point (0.8%, the same
+  OUTER_TOL swap seen in section 35)
+- tat_bulk at 3e-5
+
+Models that never call the tracer ("none", "local") differ by the same
+amounts between runs (Newton counts 5 vs 6, currents at the ~1e-16 A/um
+floor). That is run-to-run noise, not the tracer.
+
+Regression check:
+- 1D 6/6
+- 2D 4/4 (venv and conda env, native on; includes the BTBT golden)
+- VTK 10/10
+- native 2/2 in both environments
+
+## 38. Session 25 (cont.): Phase 2 - tcadview desktop viewer (first milestone)
+
+The user approved the Phase 2 plan. This is the first milestone: a Qt
+desktop viewer for the Phase 0 `.vtu`/`.pvd` files.
+
+**Stack:** PySide6 6.11 + pyvista 0.49 / pyvistaqt 0.13 (VTK 9.7) +
+matplotlib for the 1D panel. The dependencies are in
+`requirements-viewer.txt` and `environment.yml` (installed into the conda
+env with `--freeze-installed`, so PETSc was not touched).
+
+**Code layout**
+- `tcadview/model.py` holds the data side, with no Qt:
+  - `Session`: a `.pvd` or `.vtu` as states, loaded lazily, with a bounded
+    cache
+  - `State`: grid, regions (cached `extract_cells` per region), names,
+    contact biases, units
+  - field list, scaling (linear / log10|f| / signed log10(1+|f|)), finite
+    ranges over chosen regions (NaN ignored)
+  - probe: all fields at a point
+  - cut line: point fields interpolated, cell fields piecewise constant,
+    NaN outside the mesh
+- `tcadview/app.py` is the window:
+  - left dock:
+    - bias stepper
+    - field, scale, colormap, auto/manual range and mesh edges
+    - region tree (visibility, opacity of the selected regions)
+    - x/y/z slice sliders (3D only)
+    - cut-line entry and Pick
+  - right dock: probe table
+  - bottom dock: cut-line plot
+  - Right-click probes, or sets cut points in Pick mode.
+  - The camera puts the device the right way up (look from -z, up = -y).
+  - The camera is kept across re-renders.
+  - In 3D the default is region surfaces. With slices on, it shows the
+    slices plus each region's outline.
+- `python3 -m tcadview [file] [--field F] [--state i] [--screenshot png]`.
+
+**Headless mode.** Qt's `offscreen` platform has no OpenGL on macOS, and a
+hidden `QtInteractor` has zero size. With `off_screen=True` the window
+creates a plain off-screen `pv.Plotter` behind the same widgets. Tests and
+`--screenshot` use this, and the Linux CI planned for later in Phase 2
+can use it too.
+
+**Fixes found by looking at the screenshots**
+- `clear_actors()` dropped the scalar bar while pyvista kept it
+  registered, so the bar disappeared after the first re-render. Scalar bars
+  are now removed explicitly first.
+- The colour bar is horizontal at the bottom. Vertical, it covered the
+  device and clipped long field names.
+- Dock sizes are applied on the first show.
+
+**Checks**
+- `testsuite/test_tcadview.py` (8 tests, 2.4 s, venv and conda):
+  - session metadata
+  - scales
+  - ranges that ignore the oxide's NaN
+  - probe equal to nodal values at 25 nodes
+  - cut line (NaN in the oxide and outside the mesh)
+  - window driven headless: 2D controls, bias stepping shifting the auto
+    range by exactly the 1 V offset, manual range, 3D slices
+- The on-screen window was run with `QtInteractor` and captured: probe,
+  slices and layout work.
+- 2D goldens 4/4 in the conda env after the install.
+
+**Next in Phase 2:**
+- linked multiple viewports and difference plots
+- contact highlighting
+- current-density vectors (once Phase 0 exports them)
+- the GitHub side: pyproject with a `tcadview` entry point, CI on three
+  operating systems, PyInstaller builds on Releases
+
+## 39. Session 26: tcadview section views (probe and cut inside a 3D device)
+
+User feedback on the first viewer milestone:
+- The bias stepper was missing. The `--vtk` flag of the drivers saves only
+  the last bias point of each curve by default (`--vtk all` saves every
+  point), and the viewer hid the Bias box for one-state files. The box is
+  now always shown, greyed out, with a note to rerun with `--vtk all`.
+- In 3D, right-click probes and picked cut lines only landed on the outer
+  surface. The user wanted to go from a slice to a 2D structure and do 1D
+  cuts there, while keeping the slices as they are for visualization.
+
+Branch `3d-viewer-sections` (off `3d-viewer`).
+
+**Section view.** Slices > "Section view" (off / x / y / z) opens a second,
+2D view to the right of the 3D one, in a draggable splitter. It shows that
+slice face-on and follows the slice slider, the bias stepper, the field and
+the colour range.
+- `model.Section`: per-region slices flattened to (u, v, 0) meshes with all
+  fields. In-plane axes: x-section (z, y), y-section (x, z) as a plan view,
+  z-section (x, y), so depth points down as in 2D.
+- `model.Section` is display only. Right-clicks in the section map back to
+  the 3D point on the plane (`to3d`), and probes and cuts sample the full 3D
+  grid (`State.probe` / `State.cut_line`), so the section adds no
+  interpolation.
+- The 3D view draws the section outline. The probe marker and the cut line
+  show in both views.
+- The section view uses pyvista's 2D style (left-drag pans, no rotation)
+  and parallel projection. The 2D main view now uses the 2D style too: the
+  docstring already promised panning, but the view still rotated.
+
+**Cut lines**
+- "H cut" / "V cut" run a cut through the last probed point, across the
+  section (its in-plane axes) or across a 2D device (x / y).
+- An axis-aligned cut is plotted against its moving coordinate (for
+  example y for a vertical cut). The title gives the fixed coordinates.
+- "Hold" keeps earlier curves, with a legend. Stepping the bias overlays
+  bias points. Changing the field or scale drops the held curves.
+
+**Log-space interpolation of carrier densities (found from a screenshot).**
+A vertical cut through the coarse bulk mesh (nodes about 40 nm apart) was a
+staircase on the log axis: linear interpolation between nodes of a density
+that varies exponentially (Scharfetter-Gummel). The colour map already
+interpolates log10(n). `State._sample` now interpolates log10 for
+`LOG_INTERP_FIELDS = {eDensity, hDensity}` in probes and cut lines.
+Values at nodes are unchanged (`test_probe_matches_nodes` still passes).
+
+**Checks**
+- `testsuite/test_tcadview.py`: 15 tests (was 8), about 3.3 s, venv and
+  conda. The new ones:
+  - the to3d / to2d mapping for all three axes
+  - flat section regions carry every field
+  - the value shown in the section equals the 3D probe (x, y and z
+    sections)
+  - an H/V cut equals the same cut typed in 3D
+  - window: open a section, right-click probe inside the device, V cut
+    plotted against y, hold across bias steps (shift exactly +1 V), the
+    slider moves the section, Pick in the section, closing it
+  - x, y and z section screenshots
+  - 2D H cut
+  - one-state note
+- Checked by eye on the 38-state extruded 3D MOSFET Id-Vg (Vds = 1 V). The
+  channel-centre V cut shows the inversion layer building from Vgs = -0.3
+  to 1.5 V. A colour-bar overlap on tall sections was fixed (camera
+  zoomed out and shifted).
+
+**Follow-up (user feedback, same day).**
+- The H/V cut buttons were out of sight at the bottom of the scrolling
+  Controls panel. A window capture at 1400x900 confirmed it.
+  - All cut-line controls moved into the bottom "Cut line" panel, left of
+    the plot: From/To (Enter plots), H cut, V cut, Pick 2 points, Plot,
+    Clear, Overlay curves.
+  - The Regions list is more compact, so Slices is in view.
+- H/V cut after Pick did nothing. Only probes counted as "the last point",
+  and the message went to the status bar.
+  - Pick clicks now count as the last point too.
+  - With no point, the cut runs through the middle of the section or
+    device.
+  - In 3D with no section open, a dialog explains what to do.
+- Clear also empties From/To, cancels Pick and drops the overlaid curves.
+- Hold was renamed "Overlay curves", with a tooltip and a status message
+  saying what it does.
+- After a file opens, the status bar says how to probe.
+
+**Follow-up: the 3D view was squeezed when a section opened.** The
+section's one-line title (about 600 px of text) set the section panel's
+minimum width. The 3D view got 138 of 741 px, and the divider could not
+move left of that minimum.
+- The title is now short and wraps, and never sets a minimum width.
+- The splitter does not collapse either view (150 px floor). It splits
+  50/50 when a section first opens. View > "Split 3D / section evenly"
+  does it again.
+- The Controls, Probe and Cut line panels can be closed and reopened from
+  the View menu for more room.
+- Measured: opening gives 368/369 px, and the divider drags freely
+  (550/187, 250/487). Hiding the Probe panel takes the view area from 741
+  to 1047 px. New test `test_section_splitter_resizes` (16 tests, venv and
+  conda).

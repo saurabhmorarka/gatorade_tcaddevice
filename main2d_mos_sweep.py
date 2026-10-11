@@ -76,6 +76,10 @@ def build_from_config(cfg):
 def main():
     parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D MOS capacitor C-V driver")
     parser.add_argument("config", nargs="?", default=DEFAULT_PATH)
+    parser.add_argument("--out-dir", default=None,
+                        help="output directory (default: out/<config name>)")
+    parser.add_argument("--vtk", action="store_true",
+                        help="also write the saved bias points as VTK (<out-dir>/vtk/*.vtu + .pvd, for ParaView)")
     parser.add_argument("--plot-bias", default="-1.0,0.0,0.6,1.2,2.0",
                          help="Comma-separated VG values (nearest swept match) to save field-map PNGs for")
     args = parser.parse_args()
@@ -106,6 +110,8 @@ def main():
           f"({int(np.sum(mesh.is_insulator))} insulator points)")
 
     out_dir = os.path.join("out", os.path.splitext(os.path.basename(args.config))[0])
+    if args.out_dir:
+        out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
     print("--- 2D low-frequency C-V sweep (continuation, warm-started outward from VG list order) ---")
@@ -240,6 +246,12 @@ def main():
         struct_path = os.path.join(out_dir, structure_file)
         sio.write_structure(struct_path, doc)
         print(f"wrote {struct_path} ({len(bias_points)} bias point(s) saved)")
+    if args.vtk:
+        from solver2d.vtk_export import write_sweep
+        pvd = write_sweep(os.path.join(out_dir, "vtk"), "mos2d", mesh, mat,
+                          [dict(state=results_2d_list[i], bias=float(VG_arr[i]), label=f"VG={VG_arr[i]:+.3f}V",
+                                contact_bias={"gate": float(VG_arr[i])}) for i in save_idx])
+        print(f"wrote {pvd} ({len(save_idx)} state(s))")
 
 
 if __name__ == "__main__":

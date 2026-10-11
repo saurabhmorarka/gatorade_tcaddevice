@@ -20,6 +20,7 @@ mos/mesh.py::build_mos_grid's Cdop_gate=None case, generalized to 2D via
 mesh2d's Dirichlet contact tagging instead of a fixed node index.
 """
 import warnings
+import weakref
 
 import numpy as np
 import scipy.sparse as sp
@@ -27,8 +28,25 @@ import scipy.sparse as sp
 from core.params import Q, Material
 from core.physics import equilibrium_bulk_potential, equilibrium_bulk_potential_arr
 from core.jacobian_scaling import equilibrated_spsolve
+from core.linsolve import LinearSolver
 from mos import mos_analytic as man
 from solver2d.newton_solver_qf_2d import poisson_row_scale
+
+
+# One LinearSolver per mesh (psi-only, so not shared with
+# newton_solver_qf_2d's block_size=3 cache): the Jacobian pattern is the same
+# at every gate voltage, so the ordering/symbolic work and the latest
+# factorization (as a GMRES preconditioner) carry across the whole C-V sweep.
+_LINEAR_SOLVERS = {}
+
+
+def default_linear_solver(mesh):
+    key = id(mesh)
+    entry = _LINEAR_SOLVERS.get(key)
+    if entry is None or entry[0]() is not mesh:
+        entry = (weakref.ref(mesh), LinearSolver())
+        _LINEAR_SOLVERS[key] = entry
+    return entry[1]
 
 
 def _densities(psi, phin, phip, ni_arr, Vt):
@@ -102,25 +120,25 @@ def _residual_and_jacobian(psi, mesh, Vt, Cdop, ni_arr, phin, phip, is_contact, 
     interior_cols = np.concatenate(cols)
     interior_data = np.concatenate(data)
 
+    # Dirichlet rows: diagonal = max(1, largest |entry| in that node's column)
+    # so the contact row is on the same scale as its neighbours' couplings.
     contact_idx = node[is_contact]
-    dirichlet_rows, dirichlet_cols, dirichlet_data = [], [], []
-    for i in contact_idx:
-        col_mask = interior_cols == i
-        local_max = np.max(np.abs(interior_data[col_mask])) if np.any(col_mask) else 0.0
-        dirichlet_rows.append(i)
-        dirichlet_cols.append(i)
-        dirichlet_data.append(max(1.0, local_max))
+    col_absmax = np.zeros(N)
+    np.maximum.at(col_absmax, interior_cols, np.abs(interior_data))
+    dirichlet_data = np.maximum(1.0, col_absmax[contact_idx])
 
-    rows_all = np.concatenate([interior_rows, dirichlet_rows])
-    cols_all = np.concatenate([interior_cols, dirichlet_cols])
+    rows_all = np.concatenate([interior_rows, contact_idx])
+    cols_all = np.concatenate([interior_cols, contact_idx])
     data_all = np.concatenate([interior_data, dirichlet_data])
-    J = sp.coo_matrix((data_all, (rows_all, cols_all)), shape=(N, N)).tocsc()
+    J = sp.coo_matrix((data_all, (rows_all, cols_all)), shape=(N, N)).tocsr()
+    J.sort_indices()
     return Rpsi, J
 
 
 def solve_mos_equilibrium_2d(mesh, mat: Material, dev, Cdop_substrate, VG,
                               gate_contact_name="gate", f_tol=1e-10, maxiter=100,
-                              psi_init=None, damping_cap=0.5, verbose=False):
+                              psi_init=None, damping_cap=0.5, verbose=False,
+                              linear_solver="auto"):
     """Single-gate-voltage equilibrium solve over `mesh` (built by
     mesh2d.build_mesh2d(..., mat=mat) so it carries edge_g/ni_arr/
     is_insulator). Returns dict with psi, n, p, iters, res_norm.
@@ -131,7 +149,11 @@ def solve_mos_equilibrium_2d(mesh, mat: Material, dev, Cdop_substrate, VG,
     contact BC) - i.e. grounded, no bias swept there. The gate contact's
     Dirichlet value uses mos.mos_analytic.flatband_voltage (an ideal metal
     gate directly on the oxide, ni_arr=0 there so mesh.Cdop is moot for it,
-    matching mos/mos_solver.py's Cdop_gate=None convention)."""
+    matching mos/mos_solver.py's Cdop_gate=None convention).
+
+    `linear_solver`: "auto" = a per-mesh core.linsolve.LinearSolver (reused
+    across calls), "legacy" = core.jacobian_scaling.equilibrated_spsolve, or
+    a LinearSolver instance."""
     N = len(mesh.points)
     if mesh.edge_g is None or mesh.ni_arr is None:
         raise ValueError(
@@ -181,6 +203,12 @@ def solve_mos_equilibrium_2d(mesh, mat: Material, dev, Cdop_substrate, VG,
     h_typ = mesh.h_min_cm
     poisson_scale = poisson_row_scale(mat, h_typ)
 
+    if linear_solver == "legacy":
+        solve = lambda J, b: equilibrated_spsolve(J.tocsc(), b)
+    else:
+        lin = default_linear_solver(mesh) if linear_solver == "auto" else linear_solver
+        solve = lin.solve
+
     psi = psi0
     F, J = _residual_and_jacobian(psi, mesh, Vt, mesh.Cdop, mesh.ni_arr, phin, phip,
                                    is_contact, psi_bc_full, poisson_scale)
@@ -189,7 +217,7 @@ def solve_mos_equilibrium_2d(mesh, mat: Material, dev, Cdop_substrate, VG,
     for it in range(1, maxiter + 1):
         if res_norm < f_tol:
             break
-        delta = equilibrated_spsolve(J, -F)
+        delta = solve(J, -F)
         if damping_cap is not None:
             delta = np.clip(delta, -damping_cap, damping_cap)
 
@@ -203,14 +231,17 @@ def solve_mos_equilibrium_2d(mesh, mat: Material, dev, Cdop_substrate, VG,
                 break
             step *= 0.5
         else:
-            psi_try, res_try = psi, res_norm
+            psi_try, F_try, res_try = psi, F, res_norm
 
-        psi = psi_try
-        F, J = _residual_and_jacobian(psi, mesh, Vt, mesh.Cdop, mesh.ni_arr, phin, phip,
-                                       is_contact, psi_bc_full, poisson_scale)
-        res_norm = np.max(np.abs(F))
+        psi, F, res_norm = psi_try, F_try, res_try
         if verbose:
             print(f"  Newton(MOS,2D) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}  VG={VG:.3f}")
+        if res_norm < f_tol:
+            break
+        # the line search already evaluated F at the accepted point; only
+        # the Jacobian is new (and only needed if another iteration runs)
+        _, J = _residual_and_jacobian(psi, mesh, Vt, mesh.Cdop, mesh.ni_arr, phin, phip,
+                                      is_contact, psi_bc_full, poisson_scale)
 
     if res_norm > 1.0:
         warnings.warn(f"Newton(MOS,2D) solve did not converge at VG={VG} V (|F|_inf={res_norm:.3e})")

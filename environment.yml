@@ -1,0 +1,25 @@
+# Fast-path environment (PETSc linear solvers: ILU-GMRES, MUMPS) - see
+# plans/3d_plan.md "Part 2b". The plain `pip install -r requirements.txt`
+# environment still runs everything, through the pure-scipy solver backend,
+# only slower.
+#   conda env create -f environment.yml && conda activate tcad
+name: tcad
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - matplotlib
+  - pyyaml
+  - petsc4py
+  - petsc=*=*real*
+  - mumps-mpi
+  - scikit-umfpack
+  - pymetis
+  - pyside6        # tcadview viewer
+  - pyvista
+  - pyvistaqt
+  - pip
+  - pip:
+      - triangle

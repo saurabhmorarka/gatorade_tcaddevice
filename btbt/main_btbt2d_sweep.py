@@ -39,6 +39,7 @@ import numpy as np
 import yaml
 from matplotlib.colors import LogNorm
 
+from core.parallel import performance_cores
 from main2d_mosfet_sweep import build_from_config, gate_bc, continuation
 from mesh2d.mesh2d import build_mesh2d
 from solver2d.current import contact_current
@@ -64,6 +65,11 @@ COMP_STYLE = {"kane_surface": ("#1f6feb", "-", "Kane BTBT, surface (GIDL)"),
               "tat_surface": ("#1f6feb", "--", "trap-assisted, surface (GIDL)"),
               "kane_bulk": ("#2f9e44", "-", "Kane BTBT, bulk junction"),
               "tat_bulk": ("#2f9e44", "--", "trap-assisted, bulk junction")}
+
+
+# relative single-curve run time, for scheduling (measured: SRH-only ~12 s,
+# local ~18 s, nonlocal ~29 s per curve on one M3 Pro performance core)
+CURVE_COST = {"none": 1, "local_1d": 2, "local": 2, "nonlocal": 3}
 
 
 def load_config(path):
@@ -159,7 +165,7 @@ def _solve(ctx, model, Vg, Vds, Vsub, init):
     iters = r["iters"]
     k = 0
     for k in range(1, OUTER_MAX + 1):
-        if r["res_norm"] > 1e-4:
+        if not r.get("converged", r["res_norm"] < 1e-4):
             break
         old = _gen_totals(ctx, model, r)
         model.prepare(r["psi"], r["phin"], r["phip"])
@@ -277,7 +283,7 @@ def run_curve(task):
             if "frozen" in holder:
                 g = dict(g, frozen=holder["frozen"])
             r = _solve(ctx, model, args["Vg"], args["Vd"], args["Vs"], g)
-            if r["res_norm"] < 1e-4 and "frozen" in r:
+            if r.get("converged", r["res_norm"] < 1e-4) and "frozen" in r:
                 holder["frozen"] = r["frozen"]
             return r
         return f
@@ -315,7 +321,7 @@ def run_curve(task):
         if p not in wanted:
             continue
         points[p] = dict(**terminal(ctx, r), **components(ctx, model, r), iters=r["iters"], outer=r["outer"],
-                         res_norm=r["res_norm"])
+                         res_norm=r["res_norm"], converged=r.get("converged", r["res_norm"] < 1e-4))
     maps = {}
     for p_map in task.get("map_at", []):
         if p_map in states:
@@ -546,7 +552,9 @@ def _grid(start, stop, step):
 def main():
     ap = argparse.ArgumentParser(description="2D NMOS GIDL / junction tunneling leakage")
     ap.add_argument("config", nargs="?", default=DEFAULT_PATH)
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--out-dir", default=None,
+                        help="output directory (default: out/<config name>)")
+    ap.add_argument("--workers", type=int, default=performance_cores())
     ap.add_argument("--models", default=",".join(MODELS))
     args = ap.parse_args()
     cfg = load_config(args.config)
@@ -571,16 +579,24 @@ def main():
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
         os.environ[var] = "1"
     t0 = time.perf_counter()
+    # longest curves first (nonlocal > local > SRH only), so the slowest
+    # ones never wait behind short ones for a free worker
+    order = sorted(range(len(tasks)), key=lambda i: -CURVE_COST.get(tasks[i]["model"], 1))
     with ProcessPoolExecutor(max_workers=min(args.workers, len(tasks))) as pool:
-        results = list(pool.map(run_curve, tasks))
+        done = list(pool.map(run_curve, [tasks[i] for i in order]))
+    results = [None] * len(tasks)
+    for i, res in zip(order, done):
+        results[i] = res
     wall = time.perf_counter() - t0
 
     out_dir = os.path.join(ROOT, "out", "btbt", os.path.splitext(os.path.basename(args.config))[0])
+    if args.out_dir:
+        out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
     for res in results:
         t = res["task"]
         pts = res["points"]
-        n_ok = sum(p["res_norm"] < 1e-4 for p in pts.values())
+        n_ok = sum(p.get("converged", p["res_norm"] < 1e-4) for p in pts.values())
         outer = [p["outer"] for p in pts.values()]
         print(f"  {t['kind']:6s} {t['model']:9s}: {n_ok}/{len(t['values'])} points converged, "
               f"{sum(p['iters'] for p in pts.values())} Newton its"

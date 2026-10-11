@@ -156,6 +156,7 @@ class HurkxTATModel:
 
 
 _GL_X, _GL_W = np.polynomial.legendre.leggauss(96)
+_HURKX_MAX_GROUPS = 16
 
 
 def hurkx_gamma(F_abs, T, model: HurkxTATModel, dE_eV=None):
@@ -182,6 +183,12 @@ def hurkx_gamma(F_abs, T, model: HurkxTATModel, dE_eV=None):
     integrand is smooth, and its width is always >= ~K^(-2/3). dGamma/dF
     comes from the same quadrature, since dK/dF = -K/F:
         dGamma/dF = integral exp(u - K u^1.5) * K u^1.5 / F du.
+
+    dE usually takes only a few distinct values (one per material), so the
+    points are grouped by dE: each group shares one set of quadrature nodes,
+    and its two sums are matrix-vector products. Only when dE has many
+    distinct values (e.g. a graded composition) is the node set built per
+    point. Both paths agree to round-off.
     """
     F = np.asarray(F_abs, dtype=float)
     m_t = model.m_t_over_m0 * _M0
@@ -189,15 +196,35 @@ def hurkx_gamma(F_abs, T, model: HurkxTATModel, dE_eV=None):
     F_Gamma = np.sqrt(24.0 * m_t * kT ** 3) / (_Q_SI * _HBAR) / 100.0   # V/cm
     if dE_eV is None:
         dE_eV = 0.5 * model.Eg_eV - abs(model.Et_minus_Ei_eV)
-    umax = np.asarray(dE_eV, dtype=float)[..., None] * _Q_SI / kT     # per point allowed
-    u = 0.5 * umax * (_GL_X + 1.0)
-    w = 0.5 * umax * _GL_W
+    dE = np.broadcast_to(np.asarray(dE_eV, dtype=float), F.shape)
     F_safe = np.where(F > 0, F, 1.0)
     K = (4.0 / (3.0 * np.sqrt(12.0))) * F_Gamma / F_safe
-    u15 = u ** 1.5
-    E = np.exp(u - K[..., None] * u15)
-    Gamma = np.sum(E * w, axis=-1)
-    dGamma_dF = np.sum(E * u15 * w, axis=-1) * K / F_safe
+    vals, inv = np.unique(dE.ravel(), return_inverse=True)
+    if len(vals) <= _HURKX_MAX_GROUPS:
+        Kf = K.ravel()
+        Gamma = np.empty(F.size)
+        dGamma = np.empty(F.size)
+        for k, v in enumerate(vals):
+            sel = (inv == k) if len(vals) > 1 else slice(None)
+            umax = v * _Q_SI / kT
+            u = 0.5 * umax * (_GL_X + 1.0)
+            w = 0.5 * umax * _GL_W
+            u15 = u ** 1.5
+            E = np.multiply.outer(Kf[sel], -u15)
+            E += u
+            np.exp(E, out=E)
+            Gamma[sel] = E @ w
+            dGamma[sel] = E @ (u15 * w)
+        Gamma = Gamma.reshape(F.shape)
+        dGamma_dF = dGamma.reshape(F.shape) * K / F_safe
+    else:
+        umax = dE[..., None] * _Q_SI / kT     # per point allowed
+        u = 0.5 * umax * (_GL_X + 1.0)
+        w = 0.5 * umax * _GL_W
+        u15 = u ** 1.5
+        E = np.exp(u - K[..., None] * u15)
+        Gamma = np.sum(E * w, axis=-1)
+        dGamma_dF = np.sum(E * u15 * w, axis=-1) * K / F_safe
     zero = F <= 0
     return np.where(zero, 0.0, Gamma), np.where(zero, 0.0, dGamma_dF)
 

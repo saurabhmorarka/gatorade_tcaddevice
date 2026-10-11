@@ -94,7 +94,96 @@ To confirm everything works end to end after installing:
 
 ```bash
 python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
+python3 testsuite/test_2d_examples.py  # every bias point of the 4 2D drivers (~1.5 min)
+python3 testsuite/test_vtk.py          # VTK export (also checks ParaView reads it, if installed)
+python3 testsuite/test_native.py       # compiled kernels vs numpy (skipped if not built)
+python3 testsuite/test_tcadview.py     # viewer, headless (skipped without the viewer deps)
 ```
+
+### Fast path (optional): PETSc solvers for 3D
+
+The pip environment above runs everything, using METIS-ordered SuperLU
+(`core/linsolve.py`). For 3D-sized problems, use the conda environment, which
+adds PETSc point-block ILU-GMRES (about 20x faster than SuperLU on a real 3D
+Jacobian):
+
+```bash
+conda env create -f environment.yml && conda activate tcad
+python3 main2d_mosfet_sweep.py --extrude-um 0.1 --nz 6   # 3D extruded MOSFET, full I-V (~75 s)
+```
+
+Set `TCAD_LINSOLVE=superlu|umfpack|scipy_ilu|petsc_lu|petsc_ilu` to force a
+backend (default `auto`: SuperLU below 60k unknowns, PETSc ILU above). The
+3D roadmap and measured performance are in `plans/3d_plan.md`.
+
+### Compiled kernels (optional, Rust)
+
+Hot loops that numpy can't vectorize well have a Rust version in `native/`.
+So far that is the nonlocal-tunneling field-line tracer, about 8x faster
+than numpy, which cuts each nonlocal BTBT curve from ~43 s to ~26 s.
+Everything runs without it: `core/native.py` falls back to numpy when the
+extension isn't installed, and `TCAD_NATIVE=0` forces the fallback.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # Rust toolchain
+pip install maturin
+cd native && maturin develop --release && cd ..   # builds into the active env
+python3 testsuite/test_native.py                    # compiled vs numpy, to round-off
+```
+
+If both a venv and conda are active, maturin refuses to guess. Unset one
+first (for example `env -u CONDA_PREFIX maturin develop --release`).
+
+### Viewing results in ParaView (VTK export)
+
+The 2D drivers take `--vtk` and write `<out-dir>/vtk/*.vtu` plus a `.pvd`
+collection whose time axis is the swept bias:
+
+```bash
+python3 main2d_sweep.py --vtk                 # diode: the saved bias points
+python3 main2d_mos_sweep.py --vtk             # MOS-cap: the saved gate voltages
+python3 main2d_mosfet_sweep.py --vtk          # MOSFET: last point of each curve
+python3 main2d_mosfet_sweep.py --vtk all      # every bias point (~0.5 MB each in 2D, ~3 MB in 3D)
+```
+
+The files are self-contained:
+- **Point fields** use Sentaurus-style names: `ElectrostaticPotential`,
+  `eDensity`/`hDensity`, quasi-Fermi potentials and energies, band edges,
+  `DopingConcentration`, `SpaceCharge`, and `contact_id`.
+- **Cell fields:** `region_id`, `material_id` and `ElectricField`.
+- **Field data:** region, material and contact names, plus contact biases.
+
+Carrier quantities are NaN in insulators. y is depth, positive downward, so
+in ParaView look from -z with view-up (0, -1, 0). The writer is pure numpy
+(`core/vtk_io.py`), so nothing extra needs installing.
+
+### tcadview: desktop viewer (optional)
+
+`tcadview` opens the same `.vtu`/`.pvd` files in a Qt window:
+
+```bash
+pip install -r requirements-viewer.txt          # PySide6, pyvista, pyvistaqt (already in environment.yml)
+python3 main2d_mosfet_sweep.py --vtk all
+python3 -m tcadview out/input_mosfet_2d/vtk/idvg_Vds0.05.pvd
+python3 -m tcadview result.pvd --field eDensity --state -1 --screenshot shot.png   # headless
+```
+
+What it does:
+- **Regions panel:** region/material tree with show/hide and per-region
+  opacity.
+- **Field controls:** field picker with linear, log or signed-log scale,
+  auto or manual range, colormap choice and mesh edges. Densities and
+  doping default to log scales.
+- **Slices (3D):** x/y/z slice planes with sliders. Region outlines stay
+  visible while slicing.
+- **Probe:** right-click a point to list every field there and its region.
+- **Cut line:** type two points or pick them with right-clicks. The 1D
+  panel plots the field along the line and follows the bias stepper.
+- **Bias stepper:** for a sweep, a slider and prev/next buttons. The
+  camera, field and cut line are kept as you step.
+
+The device is drawn the right way up (y is depth). `testsuite/test_tcadview.py`
+drives the window headless.
 
 ## Diode (`main.py`, `configs/input_diode.yaml`)
 

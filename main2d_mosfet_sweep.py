@@ -42,6 +42,7 @@ import yaml
 from core import structure_io as sio
 from core.config import _resolve_material_block
 from core.field_save import resolve_save_points
+from core.parallel import performance_cores
 from core.physics import equilibrium_bulk_potential
 from mesh2d.config2d import build_domain_from_config
 from mesh2d.mesh2d import build_mesh2d
@@ -130,7 +131,7 @@ def solve_mosfet(mesh, mat, dev, Cdop_substrate, Vgs, Vds, psi_init=None, phin_i
 
 
 def _converged(r):
-    return r["res_norm"] < 1e-4
+    return r.get("converged", r["res_norm"] < 1e-4)
 
 
 _FIELDS = ("psi", "phin", "phip")
@@ -188,8 +189,12 @@ def continuation(solve_at, p0, s0, targets, prev=None, log=None):
 _CTX = {}
 
 
-def _context(config_path):
-    if config_path not in _CTX:
+def _context(config_path, extrude=None):
+    """extrude=(width_um, nz): run the SAME device as a 3D mesh extruded in
+    z (mesh3d/extrude.py) - the 3D performance testbed and the first rung
+    of the 3D validation ladder (Id per um of width must match 2D)."""
+    key = (config_path, tuple(extrude) if extrude else None)
+    if key not in _CTX:
         cfg = load_config(config_path)
         domain, mat, dev, Cs, mesh_opts, bias_cfg, output_cfg = build_from_config(cfg)
         with warnings.catch_warnings():
@@ -197,19 +202,30 @@ def _context(config_path):
             mesh = build_mesh2d(domain, mat=mat, **mesh_opts)
         vsat = bool((cfg.get("physics") or {}).get("velocity_saturation", False))
         eq = solve_mosfet(mesh, mat, dev, Cs, 0.0, 0.0, velocity_saturation=vsat)
-        _CTX[config_path] = (mesh, mat, dev, Cs, eq, vsat)
-    return _CTX[config_path]
+        if extrude:
+            from mesh3d.extrude import extrude_mesh
+            width_um, nz = extrude
+            mesh = extrude_mesh(mesh, mat, width_um * _UM_TO_CM, int(nz))
+            g = {k: np.tile(eq[k], int(nz)) for k in _FIELDS}   # z-invariant: exact start
+            eq = solve_mosfet(mesh, mat, dev, Cs, 0.0, 0.0, psi_init=g["psi"], phin_init=g["phin"],
+                              phip_init=g["phip"], velocity_saturation=vsat)
+        _CTX[key] = (mesh, mat, dev, Cs, eq, vsat)
+    return _CTX[key]
 
 
 def _id_per_um(mesh, mat, r):
-    return contact_current(mesh, mat, r, "drain") * 1e-4   # A/cm of depth -> A/um of width
+    I = contact_current(mesh, mat, r, "drain")
+    width_cm = getattr(mesh, "width_cm", None)
+    if width_cm:                      # 3D: total current (A) over the extruded width
+        return I / (width_cm * _CM_TO_UM)
+    return I * 1e-4                   # 2D: A/cm of depth -> A/um of width
 
 
 def run_curve(task):
     """One Id-Vg (task['kind']=='idvg', fixed task['Vds']) or Id-Vd
     ('idvd', fixed task['Vgs']) curve, from the equilibrium anchor."""
     t0 = time.perf_counter()
-    mesh, mat, dev, Cs, eq, vsat = _context(task["config"])
+    mesh, mat, dev, Cs, eq, vsat = _context(task["config"], task.get("extrude"))
     log_lines = []
     log = log_lines.append
 
@@ -244,12 +260,83 @@ def run_curve(task):
         states, it, _ = continuation(at(Vgs, None), 0.0, ramp[Vgs], vds, log=log)
         total_it += it
         states[0.0] = ramp[Vgs]
-    points = {p: dict(Id=_id_per_um(mesh, mat, r), iters=r["iters"], res_norm=r["res_norm"])
+    points = {p: dict(Id=_id_per_um(mesh, mat, r), iters=r["iters"], res_norm=r["res_norm"],
+                      converged=_converged(r))
               for p, r in sorted(states.items()) if p in set(map(float, task["values"])) or p == 0.0}
     last = max(p for p in states if p in points)
+    vtk_entries = []
+    if task.get("vtk") == "all":
+        # each worker writes its own states (files are named by bias, so
+        # segments of one curve never collide); main() writes the .pvd
+        from solver2d.vtk_export import write_states
+        vtk_entries = write_states(task["vtk_dir"], curve_stem(task), mesh, mat,
+                                   [dict(state=states[p], bias=p, **_vtk_meta(task, p)) for p in points])
     return dict(task=task, points=points, newton_iters=total_it, log=log_lines,
                 time_s=time.perf_counter() - t0,
-                last_state={k: states[last][k] for k in ("psi", "n", "p", "phin", "phip")}, last_bias=last)
+                last_state={k: states[last][k] for k in ("psi", "n", "p", "phin", "phip")}, last_bias=last,
+                vtk_entries=vtk_entries)
+
+
+def curve_stem(task):
+    return f"idvg_Vds{task['Vds']:g}" if task["kind"] == "idvg" else f"idvd_Vgs{task['Vgs']:g}"
+
+
+def _vtk_meta(task, p):
+    """VTK label and contact biases of the point at swept value p."""
+    Vgs, Vds = (p, task["Vds"]) if task["kind"] == "idvg" else (task["Vgs"], p)
+    return dict(label=f"Vgs={Vgs:+.3f}V Vds={Vds:+.3f}V", contact_bias={"gate": Vgs, "drain": Vds})
+
+
+def split_task(task, curve_index, chunk_points):
+    """Split one curve task into segments of at most chunk_points bias
+    values, each in its own continuation order (Id-Vg: the Vgs<0 branch and
+    the Vgs>0 branch walk away from 0 separately, so they split separately).
+    Every segment is a complete run_curve task on its own: it repeats the
+    cheap anchor (equilibrium -> drain/gate ramp) and walks from the anchor
+    to its first value with adaptive steps whose states are not recorded.
+    That duplicated walk is the price of using every core instead of one
+    per curve - the long Id-Vg curves otherwise set the wall-clock time."""
+    vals = sorted(float(v) for v in task["values"])
+    if task["kind"] == "idvg":
+        branches = [[v for v in vals if v > 0], sorted((v for v in vals if v < 0), reverse=True)]
+    else:
+        branches = [[v for v in vals if v > 0]]
+    segs = []
+    for br in branches:
+        if not br:
+            continue
+        n = len(br) if chunk_points <= 0 else chunk_points
+        k = -(-len(br) // n)                          # number of chunks
+        size = -(-len(br) // k)                        # balanced chunk size
+        for c in range(k):
+            chunk = br[c * size:(c + 1) * size]
+            if chunk:
+                segs.append(dict(task, values=chunk + [0.0], curve=curve_index))
+    return segs or [dict(task, curve=curve_index)]
+
+
+def merge_segments(tasks, segments, seg_results):
+    """Reassemble per-curve results (same shape run_curve returns for a
+    whole curve) from the segment results."""
+    merged = []
+    for i, task in enumerate(tasks):
+        parts = [r for s, r in zip(segments, seg_results) if s["curve"] == i]
+        points, log, its, vtk_entries = {}, [], 0, {}
+        for r in parts:
+            for p, v in r["points"].items():
+                points.setdefault(p, v)
+            log += r["log"]
+            its += r["newton_iters"]
+            for e in r.get("vtk_entries", []):
+                vtk_entries.setdefault(e["timestep"], e)
+        with_state = [r for r in parts if r["last_state"] is not None]
+        last = max(with_state, key=lambda r: r["last_bias"]) if with_state else None
+        merged.append(dict(task=task, points=points, newton_iters=its, log=log,
+                           time_s=max(r["time_s"] for r in parts),
+                           last_state=last["last_state"] if last else None,
+                           last_bias=last["last_bias"] if last else None,
+                           vtk_entries=list(vtk_entries.values())))
+    return merged
 
 
 # --- plotting ---------------------------------------------------------------
@@ -325,7 +412,19 @@ def _grid(start, stop, step):
 def main():
     parser = argparse.ArgumentParser(description="gatorade_tcaddevice 2D planar NMOS driver")
     parser.add_argument("config", nargs="?", default=DEFAULT_PATH)
-    parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument("--out-dir", default=None,
+                        help="output directory (default: out/<config name>)")
+    parser.add_argument("--workers", type=int, default=performance_cores())
+    parser.add_argument("--chunk-points", type=int, default=0,
+                        help="split each curve into segments of at most this many bias points, "
+                             "run as separate parallel tasks (0 = one task per curve)")
+    parser.add_argument("--extrude-um", type=float, default=None,
+                        help="run the device as a 3D mesh extruded over this width (um)")
+    parser.add_argument("--nz", type=int, default=6, help="number of z layers with --extrude-um")
+    parser.add_argument("--vtk", nargs="?", const="last", choices=["last", "all"], default=None,
+                        help="also write VTK (<out-dir>/vtk/*.vtu + one .pvd per curve, for ParaView): "
+                             "'last' (default) = the last point of each curve, 'all' = every bias point "
+                             "(written by the workers; ~2 MB per point for a 3D mesh)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -340,18 +439,31 @@ def main():
                      bias_cfg.get("vds_step_V", 0.1))
     vgs_output = [float(v) for v in bias_cfg.get("vgs_for_output_V", [0.9, 1.1, 1.3, 1.5])]
 
-    tasks = ([dict(kind="idvg", Vds=v, values=vgs_list, config=args.config) for v in vds_transfer] +
-             [dict(kind="idvd", Vgs=v, values=vds_list, config=args.config) for v in vgs_output])
+    extrude = (args.extrude_um, args.nz) if args.extrude_um else None
+    out_dir = os.path.join("out", os.path.splitext(os.path.basename(args.config))[0])
+    if args.out_dir:
+        out_dir = args.out_dir
+    vtk_dir = os.path.join(out_dir, "vtk")
+    tasks = ([dict(kind="idvg", Vds=v, values=vgs_list, config=args.config, extrude=extrude)
+              for v in vds_transfer] +
+             [dict(kind="idvd", Vgs=v, values=vds_list, config=args.config, extrude=extrude)
+              for v in vgs_output])
+    for t in tasks:
+        t.update(vtk=args.vtk, vtk_dir=vtk_dir)
 
     # One BLAS thread per worker - the workers are the parallelism.
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
         os.environ[var] = "1"
     t0 = time.perf_counter()
-    with ProcessPoolExecutor(max_workers=min(args.workers, len(tasks))) as pool:
-        results = list(pool.map(run_curve, tasks))
+    segments = [seg for i, t in enumerate(tasks) for seg in split_task(t, i, args.chunk_points)]
+    # Longest segments first, so the pool never ends waiting on one big
+    # segment that started last.
+    order = sorted(range(len(segments)), key=lambda k: -len(segments[k]["values"]))
+    with ProcessPoolExecutor(max_workers=min(args.workers, len(segments))) as pool:
+        seg_results = dict(zip(order, pool.map(run_curve, [segments[k] for k in order])))
+    results = merge_segments(tasks, segments, [seg_results[k] for k in range(len(segments))])
     wall = time.perf_counter() - t0
 
-    out_dir = os.path.join("out", os.path.splitext(os.path.basename(args.config))[0])
     os.makedirs(out_dir, exist_ok=True)
     for res in results:
         t = res["task"]
@@ -362,7 +474,7 @@ def main():
         for line in res["log"]:
             print(line)
     vsat_on = bool((cfg.get("physics") or {}).get("velocity_saturation", False))
-    print(f"all curves: {wall:.1f}s wall-clock ({len(tasks)} curves in parallel), "
+    print(f"all curves: {wall:.1f}s wall-clock ({len(tasks)} curves as {len(segments)} parallel segments), "
           f"velocity saturation {'ON' if vsat_on else 'OFF'}")
 
     transfer = []
@@ -400,9 +512,24 @@ def main():
     plot_output(output, os.path.join(out_dir, "ids_vds.png"))
     print(f"wrote {out_dir}/ids_vgs.png, ids_vds.png, ids_vgs.csv, ids_vds.csv")
 
+    if args.vtk:
+        from solver2d.vtk_export import write_states, write_pvd
+        n_files = 0
+        for res in results:
+            entries = res["vtk_entries"]
+            if args.vtk == "last" and res["last_state"] is not None:
+                mesh_v, mat_v = _context(args.config, extrude)[:2]
+                entries = write_states(vtk_dir, curve_stem(res["task"]), mesh_v, mat_v,
+                                       [dict(state=res["last_state"], bias=res["last_bias"],
+                                             **_vtk_meta(res["task"], res["last_bias"]))])
+            if entries:
+                write_pvd(vtk_dir, curve_stem(res["task"]), entries)
+                n_files += len(entries)
+        print(f"wrote {vtk_dir}/*.pvd ({len(results)} curves, {n_files} states)")
+
     # Structure+fields JSON: the last point of the low-Vds transfer curve.
     structure_file = output_cfg.get("structure_file")
-    if structure_file:
+    if structure_file and not extrude:
         mesh = _context(args.config)[0]
         res = results[0]
         r = res["last_state"]

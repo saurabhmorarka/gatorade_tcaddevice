@@ -1,0 +1,4 @@
+# Optional: the tcadview desktop viewer (python3 -m tcadview)
+pyside6
+pyvista
+pyvistaqt
