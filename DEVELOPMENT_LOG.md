@@ -4693,3 +4693,61 @@ Next:
    - coarser targets at insulator/metal surfaces
    - look at where the leaves go
 2. Port the tree and the clipping to Rust.
+
+## 46. Octree mesher: Rust kernels, per-axis sizing, full-device validation
+
+**Speed: Rust kernels in `native/`.**
+- `boxtree_refine` (`boxtree.rs`) mirrors `BoxTree.refine` rule for rule
+  and in the same queue order. The leaves are identical (test). Small
+  device: 9.0 s -> 0.19 s (47x).
+- `voronoi_cells` (`voronoi.rs`) mirrors the Python clipper, threaded
+  over cells; it matches the Python reference to 5e-9 relative
+  (round-off from operation order).
+- The box fast path and the edge/volume assembly are vectorized numpy
+  (array keys instead of dictionaries).
+- Full planar device mesh build: 565 s -> 8.3 s (tree 2.5 s).
+
+**Node count: per-axis sizing.** The spacing along axis a is now graded
+only from interfaces and junctions crossed along a. An isotropic
+distance had put 0.5 nm y-spacing down the whole 50 nm STI sidewall.
+Full device: 144k -> 67.9k nodes (rectilinear: 68.0k).
+
+**Face match also at conductor surfaces.** The full device first failed
+the gate: facet area differed by 55% between the two sides of 6 edges at
+the gate's bottom corners. The face-match rule had been limited to
+semiconductor interfaces, so the gate metal / oxide plane fell between
+two nodes (y = 99 and 101), and each side gave the facet on that plane
+to a different material. A terminal is a Dirichlet surface and must
+carry nodes, so face match now applies at semiconductor and conductor
+interfaces. The gate passes, with facet symmetry 3e-12.
+
+**Validation on the full planar device** (half width, PETSc ILU, Id at
+Vds = 50 mV):
+
+| mesh | nodes | Id(Vg=0) | Id(Vg=0.6) | mesh / solve |
+|---|---|---|---|---|
+| rectilinear default | 67,956 | 8.38e-10 | 1.1394e-5 | 2.7 / 23 s |
+| octree default | 65,633 | 7.62e-10 | 1.0737e-5 | 8.3 / 29 s |
+| rectilinear fine | 168,808 | 7.88e-10 | 1.1274e-5 | 3.4 / 68 s |
+| octree fine | 94,067 | 7.47e-10 | 1.1297e-5 | 14 / 50 s |
+
+- The fine meshes agree to 0.2% on Id(0.6): converged near 1.128e-5 A.
+  At fine resolution the octree reaches it with 44% fewer nodes.
+- The default octree is 4.8% low on Id(0.6) and the default rectilinear
+  1.0% high. The defaults need tuning.
+- ILU now converges on the rectilinear mesh too. Its earlier failure
+  was most likely the NaN contact boundary values fixed in section 43,
+  not the 16:1 cells.
+
+**Known issue.** With SciPy SuperLU (the venv without PETSc), the
+rectilinear mesh's equilibrium Jacobian is "exactly singular" on the
+tiny device; the octree mesh solves. No node lacks carrier or Poisson
+coupling, so it is not structural. The likely cause is the known flat
+degeneracy of the first equilibrium Newton step, which PETSc's pivoting
+survives. The octree-vs-rectilinear test needs PETSc.
+
+Tests: `testsuite/test_octree.py`:
+- the gate on a synthetic device: exact volumes, sorted terminals, and
+  the gate catching a corrupted volume
+- the Rust tree and clipping against Python
+- octree vs rectilinear Id within 1% on the tiny device

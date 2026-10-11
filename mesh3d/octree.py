@@ -90,49 +90,32 @@ def target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growt
     dev = semi | (kind == INSULATOR)
     big = 1e9
 
-    def changes(mask_a, mask_b):
-        """Voxels of a with a face neighbour in b (and vice versa)."""
-        out = np.zeros(label.shape, bool)
-        for a in range(3):
-            sl0 = [slice(None)] * 3
-            sl1 = [slice(None)] * 3
-            sl0[a], sl1[a] = slice(0, -1), slice(1, None)
-            sl0, sl1 = tuple(sl0), tuple(sl1)
-            hit = (mask_a[sl0] & mask_b[sl1]) | (mask_b[sl0] & mask_a[sl1])
-            out[sl0] |= hit
-            out[sl1] |= hit
-        return out
-
     def dist(seed):
         if not seed.any():
             return np.full(label.shape, big)
         return ndimage.distance_transform_edt(~seed, sampling=h)
 
-    # semiconductor interfaces (to anything) and junctions
-    seed = changes(semi, ~semi)
+    # Per axis: the spacing ALONG axis a is graded from the interfaces and
+    # junctions crossed along a (faces normal to a) - the Si/oxide surface
+    # needs fine y, an STI sidewall fine z, a junction fine spacing across
+    # it; an isotropic distance would put 0.5 nm y-spacing down the whole
+    # sidewall (the rectilinear mesher's per-axis lines do this right).
     s = np.sign(cell_net) * semi
-    for a in range(3):
-        sl0 = [slice(None)] * 3
-        sl1 = [slice(None)] * 3
-        sl0[a], sl1[a] = slice(0, -1), slice(1, None)
-        flip = (s[tuple(sl0)] * s[tuple(sl1)]) < 0
-        seed[tuple(sl0)] |= flip
-        seed[tuple(sl1)] |= flip
-    d_semi = dist(seed)
-    # other device interfaces: a label change with a device voxel on one side
-    other = np.zeros(label.shape, bool)
+    tgt = np.empty((3,) + label.shape)
     for a in range(3):
         sl0 = [slice(None)] * 3
         sl1 = [slice(None)] * 3
         sl0[a], sl1[a] = slice(0, -1), slice(1, None)
         sl0, sl1 = tuple(sl0), tuple(sl1)
+        seed_s = np.zeros(label.shape, bool)
+        hit = (semi[sl0] != semi[sl1]) | ((s[sl0] * s[sl1]) < 0)
+        seed_s[sl0] |= hit
+        seed_s[sl1] |= hit
+        seed_o = np.zeros(label.shape, bool)
         hit = (label[sl0] != label[sl1]) & (dev[sl0] | dev[sl1])
-        other[sl0] |= hit
-        other[sl1] |= hit
-    d_other = dist(other)
-    tgt = np.empty((3,) + label.shape)
-    for a in range(3):
-        t = np.minimum(h_fine[a] + (growth - 1.0) * d_semi, h_fine_other[a] + (growth - 1.0) * d_other)
+        seed_o[sl0] |= hit
+        seed_o[sl1] |= hit
+        t = np.minimum(h_fine[a] + (growth - 1.0) * dist(seed_s), h_fine_other[a] + (growth - 1.0) * dist(seed_o))
         t = np.minimum(t, h_max[a])
         tgt[a] = np.where(dev, t, big) / h[a]
     return np.maximum(tgt, 1.0)
@@ -143,8 +126,12 @@ class BoxTree:
     """Leaves as integer boxes [lo, hi) in voxel units, with an owner array
     (leaf id per voxel) for point location and neighbour lookup."""
 
-    def __init__(self, label, tgt, root):
+    def __init__(self, label, tgt, root, semi_labels=()):
         self.label = label
+        # semi_label[l] for l in -1..: is label l a semiconductor (index -1 = gas)
+        self.semi_label = np.zeros(int(label.max()) + 2, bool)
+        for l in semi_labels:
+            self.semi_label[l] = True
         self.tgt = tgt
         self.shape = np.array(label.shape)
         self.lo, self.hi = [], []
@@ -201,6 +188,11 @@ class BoxTree:
         sl = (slice(lo[0], hi[0]), slice(lo[1], hi[1]), slice(lo[2], hi[2]))
         return self.owner[sl], self.label[sl]
 
+    def has_semi_nbr(self, i):
+        lo = np.maximum(self.lo[i] - 1, 0)
+        hi = np.minimum(self.hi[i] + 1, self.shape)
+        return bool(self.semi_label[self.label[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]].any())
+
     def leaves(self):
         ids = np.flatnonzero(self.alive)
         return ids, np.array([self.lo[i] for i in ids]), np.array([self.hi[i] for i in ids])
@@ -248,14 +240,25 @@ class BoxTree:
         return None
 
     def _rule_face(self, i):
+        """Face match only across interfaces with a semiconductor or a
+        conductor on one side (`semi_label` marks both): carrier facets
+        must join semiconductor nodes, and a terminal surface must carry
+        nodes. Elsewhere (insulator / insulator, gas) the per-material
+        split is exact by clipping, and matching would spread refinement
+        for nothing."""
         my = self.label[self.lo[i][0], self.lo[i][1], self.lo[i][2]]
+        if not self.semi_label[my] and not self.has_semi_nbr(i):
+            return None
         for axis in range(3):
             for side in (-1, 1):
                 f = self.face_ids(i, axis, side)
                 if f is None:
                     continue
                 own, lab = f
-                for n in np.unique(own[lab != my]):
+                diff = lab != my
+                if not self.semi_label[my]:
+                    diff &= self.semi_label[lab]
+                for n in np.unique(own[diff]):
                     for b in range(3):
                         if b == axis:
                             continue
@@ -265,7 +268,19 @@ class BoxTree:
                             return b, int(self.hi[n][b])
         return None
 
-    def refine(self, log=None):
+    def refine(self, log=None, use_native=True):
+        from core.native import native
+        if use_native and native is not None and hasattr(native, "boxtree_refine"):
+            lo, hi, alive, owner, n_split = native.boxtree_refine(
+                np.ascontiguousarray(self.label, dtype=np.int32), np.ascontiguousarray(self.tgt, dtype=float),
+                np.ascontiguousarray(self.semi_label[:-1]), np.array(self.lo, dtype=np.int64),
+                np.array(self.hi, dtype=np.int64))
+            self.lo, self.hi = list(lo), list(hi)
+            self.alive = list(alive)
+            self.owner = owner.astype(np.int32)
+            if log:
+                log(f"  tree: {int(np.sum(self.alive))} leaves after {n_split} splits")
+            return
         queue = list(np.flatnonzero(self.alive))
         queued = set(queue)
         n_split = 0
@@ -415,7 +430,10 @@ def build_octree_mesh(label, materials, h_nm, node_net, mat, origin_nm=(0.0, 0.0
     tgt = target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growth)
     if root is None:
         root = [max(1, int(round(2 * h_max[a] / h[a]))) for a in range(3)]
-    tree = BoxTree(label, tgt, root)
+    # face match across semiconductor interfaces (carrier facets must join
+    # semiconductor nodes) and conductor surfaces (a terminal is a Dirichlet
+    # surface: it must carry nodes, not lie between them)
+    tree = BoxTree(label, tgt, root, semi_labels=[k for k, m in enumerate(materials) if m["kind"] in (SEMI, CONDUCTOR)])
     tree.refine(log=log)
     t_tree = time.perf_counter() - t0
     ids, LO, HI = tree.leaves()
@@ -427,13 +445,39 @@ def build_octree_mesh(label, materials, h_nm, node_net, mat, origin_nm=(0.0, 0.0
     m.build_time_s = time.perf_counter() - t0
     check_octree_mesh(m, label, materials, h, log=log)
     log(f"  octree mesh: {len(m.points)} device nodes, {len(m.edges)} edges, "
-        f"{dual['n_clipped']} clipped cells; tree {t_tree:.1f} s, total {m.build_time_s:.1f} s")
+        f"{m.n_clipped} clipped cells; tree {t_tree:.1f} s, total {m.build_time_s:.1f} s")
     return m
 
 
+def _axis_neighbours(is_node, node_idx, shape):
+    """Grid index of the nearest node along -a and +a from every node (-1
+    if none)."""
+    nshape = is_node.shape
+    N = len(node_idx)
+    nb = np.full((N, 3, 2), -1, dtype=np.int64)
+    for a in range(3):
+        pos = np.arange(nshape[a]).reshape([-1 if b == a else 1 for b in range(3)])
+        big = nshape[a] + 1
+        nxt = np.flip(np.minimum.accumulate(np.flip(np.where(is_node, pos, big), axis=a), axis=a), axis=a)
+        prv = np.maximum.accumulate(np.where(is_node, pos, -1), axis=a)
+        lo_sl = [slice(None)] * 3
+        hi_sl = [slice(None)] * 3
+        lo_sl[a], hi_sl[a] = slice(0, -1), slice(1, None)
+        nxt_s = np.full(nshape, big)
+        nxt_s[tuple(lo_sl)] = nxt[tuple(hi_sl)]
+        prv_s = np.full(nshape, -1)
+        prv_s[tuple(hi_sl)] = prv[tuple(lo_sl)]
+        f = nxt_s[tuple(node_idx.T)]
+        nb[:, a, 1] = np.where(f < big, f, -1)
+        nb[:, a, 0] = prv_s[tuple(node_idx.T)]
+    return nb
+
+
 def _dual(tree, ids, LO, HI, leaf_label, label, h, log):
-    """Voronoi cells of all leaf corners: per node and per label the volume,
-    and per (node, neighbour, label) the facet area."""
+    """Voronoi cells of all leaf corners, as flat arrays: volumes
+    (node, label, nm^3) and facet parts (node, neighbour, label, nm^2),
+    each seen from the node's own cell (both cells of an edge report its
+    facet; the gate compares them)."""
     shape = np.array(label.shape)
     nshape = tuple(shape + 1)
     corners = np.concatenate([np.stack([np.where(o[a], HI[:, a], LO[:, a]) for a in range(3)], axis=1)
@@ -444,43 +488,13 @@ def _dual(tree, ids, LO, HI, leaf_label, label, h, log):
     N = len(node_idx)
     node_id = np.full(nshape, -1, dtype=np.int64)
     node_id[tuple(node_idx.T)] = np.arange(N)
-    P = node_idx * h                                                    # nm, relative to the grid origin
+    P = node_idx * h                                                    # nm from the grid origin
     dom_hi = shape * h
-
-    # nearest node along each axis direction (grid index), -1 if none
-    nb = np.full((N, 3, 2), -1, dtype=np.int64)
-    for a in range(3):
-        idx = np.where(is_node, np.arange(nshape[a]).reshape([-1 if b == a else 1 for b in range(3)]), -1)
-        big = nshape[a] + 1
-        fwd = np.where(idx >= 0, idx, big)
-        nxt = np.flip(np.minimum.accumulate(np.flip(fwd, axis=a), axis=a), axis=a)
-        sl = [slice(None)] * 3
-        sl[a] = slice(1, None)
-        nxt_strict = np.full(nshape, big)
-        dst = [slice(None)] * 3
-        dst[a] = slice(0, -1)
-        nxt_strict[tuple(dst)] = nxt[tuple(sl)]
-        bwd = np.where(idx >= 0, idx, -1)
-        prv = np.maximum.accumulate(bwd, axis=a)
-        prv_strict = np.full(nshape, -1)
-        dst2 = [slice(None)] * 3
-        dst2[a] = slice(1, None)
-        sl2 = [slice(None)] * 3
-        sl2[a] = slice(0, -1)
-        prv_strict[tuple(dst2)] = prv[tuple(sl2)]
-        f = nxt_strict[tuple(node_idx.T)]
-        b = prv_strict[tuple(node_idx.T)]
-        nb[:, a, 1] = np.where(f < big, f, -1)
-        nb[:, a, 0] = b
-    # half widths (nm) of the candidate box; a node on the domain wall has 0
+    nb = _axis_neighbours(is_node, node_idx, shape)
     half = np.zeros((N, 3, 2))
     ok = np.ones(N, bool)
     for a in range(3):
-        on_lo = node_idx[:, a] == 0
-        on_hi = node_idx[:, a] == shape[a]
-        lo_ok = (nb[:, a, 0] >= 0) | on_lo
-        hi_ok = (nb[:, a, 1] >= 0) | on_hi
-        ok &= lo_ok & hi_ok
+        ok &= ((nb[:, a, 0] >= 0) | (node_idx[:, a] == 0)) & ((nb[:, a, 1] >= 0) | (node_idx[:, a] == shape[a]))
         half[:, a, 0] = np.where(nb[:, a, 0] >= 0, (node_idx[:, a] - nb[:, a, 0]) * h[a] / 2, 0.0)
         half[:, a, 1] = np.where(nb[:, a, 1] >= 0, (nb[:, a, 1] - node_idx[:, a]) * h[a] / 2, 0.0)
     kd = cKDTree(P)
@@ -491,94 +505,111 @@ def _dual(tree, ids, LO, HI, leaf_label, label, h, log):
         ok &= d_min >= d_own - 1e-7 * (1.0 + d_own)
     box = np.flatnonzero(ok)
     clipped = np.flatnonzero(~ok)
+    VN, VL, VV, FN, FJ, FL, FA = [], [], [], [], [], [], []
 
-    vol = {}                    # (node, label) -> nm^3
-    facet = {}                  # (node, nbr node, label) -> nm^2 (from the node's own cell)
-
-    # fast path: octants
-    def lab_at(pt_units):
-        v = np.clip(np.floor(pt_units).astype(np.int64), 0, shape - 1)
-        return label[v[:, 0], v[:, 1], v[:, 2]]
-
+    # fast path: the box cell's octants, each inside one leaf
     octant_lab = {}
     for o in itertools.product((0, 1), repeat=3):
-        w = np.stack([half[box, a, o[a]] for a in range(3)], axis=1)          # nm
+        w = np.stack([half[box, a, o[a]] for a in range(3)], axis=1)
         sign = np.array([1 if o[a] else -1 for a in range(3)])
-        cen_units = node_idx[box] + sign * (w / 2) / h
-        lab = lab_at(cen_units)
+        cen = node_idx[box] + sign * (w / 2) / h
+        v = np.clip(np.floor(cen).astype(np.int64), 0, shape - 1)
+        lab = label[v[:, 0], v[:, 1], v[:, 2]]
         octant_lab[o] = lab
-        v = w.prod(axis=1)
-        for n_, l_, v_ in zip(box[v > 0], lab[v > 0], v[v > 0]):
-            vol[(n_, l_)] = vol.get((n_, l_), 0.0) + v_
+        vol = w.prod(axis=1)
+        s = vol > 0
+        VN.append(box[s]); VL.append(lab[s]); VV.append(vol[s])
     for a in range(3):
         others = [b for b in range(3) if b != a]
         for side in (0, 1):
             q = nb[box, a, side]
             has = q >= 0
             qi = node_idx[box].copy()
-            qi[:, a] = q
-            qid = np.full(len(box), -1, dtype=np.int64)
-            qid[has] = node_id[tuple(qi[has].T)]
+            qi[:, a] = np.where(has, q, 0)
+            qid = np.where(has, node_id[tuple(qi.T)], -1)
             for o in itertools.product((0, 1), repeat=3):
                 if o[a] != side:
                     continue
                 part = half[box, others[0], o[others[0]]] * half[box, others[1], o[others[1]]]
-                lab = octant_lab[o]
-                sel = has & (part > 0)
-                for n_, j_, l_, a_ in zip(box[sel], qid[sel], lab[sel], part[sel]):
-                    facet[(n_, j_, l_)] = facet.get((n_, j_, l_), 0.0) + a_
+                s = has & (part > 0)
+                FN.append(box[s]); FJ.append(qid[s]); FL.append(octant_lab[o][s]); FA.append(part[s])
 
-    # transition nodes: exact clipping
-    leaf_of = tree.owner
-    LOh, HIh = LO * h, HI * h
-    leaf_index = {int(i): k for k, i in enumerate(ids)}
-    for n_ in clipped:
-        p = P[n_]
-        R = 2.0 * np.max(half[n_]) + 4.0 * h.max()
-        while True:
-            cand = [j for j in kd.query_ball_point(p, R) if j != n_]
-            lo = np.maximum(p - R, 0.0)
-            hi = np.minimum(p + R, dom_hi)
-            faces, complete = voronoi_cell(p, [(j, P[j]) for j in cand], lo, hi)
-            vmax = max(np.linalg.norm(np.asarray(v) - p) for f in faces.values() for v in f)
-            if complete or 2 * vmax <= R * (1 + 1e-9) or (np.all(lo <= 0) and np.all(hi >= dom_hi)):
-                break
-            R *= 2.0
-        pts = np.concatenate([np.asarray(f) for f in faces.values()])
-        blo = np.floor(pts.min(0) / h + 1e-9).astype(int)
-        bhi = np.ceil(pts.max(0) / h - 1e-9).astype(int)
-        blo, bhi = np.clip(blo, 0, shape - 1), np.clip(np.maximum(bhi, blo + 1), 1, shape)
-        sub = leaf_of[blo[0]:bhi[0], blo[1]:bhi[1], blo[2]:bhi[2]]
-        leaves_here = np.unique(sub)
-        labs = {int(leaf_label[leaf_index[int(L)]]) for L in leaves_here}
-        nbr_faces = {k: f for k, f in faces.items() if not isinstance(k, tuple)}
-        if len(labs) == 1:
-            (l_,) = labs
-            vol[(n_, l_)] = vol.get((n_, l_), 0.0) + _volume(faces)
-            for j, f in nbr_faces.items():
-                a_ = float(np.linalg.norm(_area_vec(f)))
-                if a_ > _FACET_REL * float((P[j] - p) @ (P[j] - p)):
-                    facet[(n_, j, l_)] = facet.get((n_, j, l_), 0.0) + a_
-            continue
-        for L in leaves_here:
-            k = leaf_index[int(L)]
-            l_ = int(leaf_label[k])
-            part = _clip_to_box(faces, LOh[k], HIh[k])
-            if len(part) < 4:
-                continue
-            v = _volume(part)
-            if v > 1e-12:
-                vol[(n_, l_)] = vol.get((n_, l_), 0.0) + v
-            for j, f in part.items():
-                if isinstance(j, tuple):
-                    continue
-                a_ = float(np.linalg.norm(_area_vec(f)))
-                if a_ > _FACET_REL * float((P[j] - p) @ (P[j] - p)):
-                    facet[(n_, j, l_)] = facet.get((n_, j, l_), 0.0) + a_
+    # transition nodes: exact clipping (Rust kernel, numpy fallback)
+    if len(clipped):
+        from core.native import native
+        leaf_of_owner = np.full(len(tree.lo), -1, dtype=np.int64)
+        leaf_of_owner[ids] = np.arange(len(ids))
+        todo = clipped
+        R = 2.0 * half[todo].reshape(len(todo), -1).max(axis=1) + 4.0 * h.max()
+        while len(todo):
+            if native is not None and hasattr(native, "voronoi_cells"):
+                lists = kd.query_ball_point(P[todo], R)
+                ptr = np.zeros(len(todo) + 1, dtype=np.int64)
+                ptr[1:] = np.cumsum([len(x) for x in lists])
+                idx = np.fromiter(itertools.chain.from_iterable(lists), dtype=np.int64, count=int(ptr[-1]))
+                comp, vp, vl, vv, fp, fn, fl, fa = native.voronoi_cells(
+                    np.ascontiguousarray(P), todo.astype(np.int64), ptr, idx, R.astype(float), dom_hi.astype(float),
+                    h.astype(float), np.ascontiguousarray(tree.owner, dtype=np.int32),
+                    np.ascontiguousarray(LO, dtype=np.int64), np.ascontiguousarray(HI, dtype=np.int64),
+                    leaf_label.astype(np.int64), leaf_of_owner)
+                done = np.asarray(comp, bool)
+                rows_v = np.repeat(np.arange(len(todo)), np.diff(vp))
+                rows_f = np.repeat(np.arange(len(todo)), np.diff(fp))
+                VN.append(todo[rows_v]); VL.append(vl); VV.append(vv)
+                FN.append(todo[rows_f]); FJ.append(fn); FL.append(fl); FA.append(fa)
+            else:
+                done = np.ones(len(todo), bool)
+                for r, n_ in enumerate(todo):
+                    _clip_one_py(n_, P, kd, R[r], dom_hi, h, shape, tree.owner, ids, LO, HI, leaf_label,
+                                 VN, VL, VV, FN, FJ, FL, FA)
+            todo, R = todo[~done], 2.0 * R[~done]
+    cat = (lambda L, dt: np.concatenate(L).astype(dt) if L else np.zeros(0, dt))
     if log:
         log(f"  dual: {N} nodes, {len(box)} box cells, {len(clipped)} clipped")
-    return dict(N=N, node_idx=node_idx, P=P, vol=vol, facet=facet, n_clipped=len(clipped),
-                box_nodes=box, clipped_nodes=clipped)
+    return dict(N=N, node_idx=node_idx, P=P, n_clipped=len(clipped), box_nodes=box, clipped_nodes=clipped,
+                vol=(cat(VN, np.int64), cat(VL, np.int64), cat(VV, float)),
+                facet=(cat(FN, np.int64), cat(FJ, np.int64), cat(FL, np.int64), cat(FA, float)))
+
+
+def _clip_one_py(n_, P, kd, R, dom_hi, h, shape, owner, ids, LO, HI, leaf_label, VN, VL, VV, FN, FJ, FL, FA):
+    """numpy fallback (and reference) for one transition node."""
+    p = P[n_]
+    while True:
+        cand = [j for j in kd.query_ball_point(p, R) if j != n_]
+        lo = np.maximum(p - R, 0.0)
+        hi = np.minimum(p + R, dom_hi)
+        faces, complete = voronoi_cell(p, [(j, P[j]) for j in cand], lo, hi)
+        vmax = max(np.linalg.norm(np.asarray(v) - p) for f in faces.values() for v in f)
+        if complete or 2 * vmax <= R * (1 + 1e-9) or (np.all(lo <= 0) and np.all(hi >= dom_hi)):
+            break
+        R *= 2.0
+    pts = np.concatenate([np.asarray(f) for f in faces.values()])
+    blo = np.clip(np.floor(pts.min(0) / h + 1e-9).astype(int), 0, shape - 1)
+    bhi = np.clip(np.maximum(np.ceil(pts.max(0) / h - 1e-9).astype(int), blo + 1), 1, shape)
+    leaves_here = np.unique(owner[blo[0]:bhi[0], blo[1]:bhi[1], blo[2]:bhi[2]])
+    row = {int(i): k for k, i in enumerate(ids)}
+    rows = [row[int(L)] for L in leaves_here]
+    labs = {int(leaf_label[k]) for k in rows}
+
+    def emit(part, l_):
+        v = _volume(part)
+        if v > 1e-12:
+            VN.append(np.array([n_])); VL.append(np.array([l_])); VV.append(np.array([v]))
+        for j, f in part.items():
+            if isinstance(j, tuple):
+                continue
+            a_ = float(np.linalg.norm(_area_vec(f)))
+            if a_ > _FACET_REL * float((P[j] - p) @ (P[j] - p)):
+                FN.append(np.array([n_])); FJ.append(np.array([j])); FL.append(np.array([l_]))
+                FA.append(np.array([a_]))
+
+    if len(labs) == 1:
+        emit(faces, labs.pop())
+        return
+    for k in rows:
+        part = _clip_to_box(faces, LO[k] * h, HI[k] * h)
+        if len(part) >= 4:
+            emit(part, int(leaf_label[k]))
 
 
 def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, shape):
@@ -587,55 +618,57 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, shape):
     eps = np.array([mat.eps if m["kind"] == SEMI else EPS0 * float(m.get("eps_r", 1.0)) for m in materials]
                    + [0.0])
     nm2, nm3, cm = 1e-14, 1e-21, 1e-7
-    cv = np.zeros(N)
-    cv_semi = np.zeros(N)
-    touch = {}                                           # conductor label -> node mask
-    for (n_, l_), v in dual["vol"].items():
-        k = kinds[l_]
-        if k == SEMI:
-            cv[n_] += v
-            cv_semi[n_] += v
-        elif k == INSULATOR:
-            cv[n_] += v
-        elif k == CONDUCTOR:
-            touch.setdefault(materials[l_]["contact"], set()).add(n_)
-    # facets: per undirected edge, area from each side (device labels only)
-    fa, fs, fg = {}, {}, {}
-    for (n_, j_, l_), a in dual["facet"].items():
-        if kinds[l_] not in (SEMI, INSULATOR):
-            continue
-        key = (min(n_, j_), max(n_, j_), 0 if n_ < j_ else 1)
-        fa[key] = fa.get(key, 0.0) + a
-        if kinds[l_] == SEMI:
-            fs[key] = fs.get(key, 0.0) + a
-        fg[key] = fg.get(key, 0.0) + eps[l_] * a
-    pairs = sorted({(i, j) for (i, j, _) in fa})
-    side_area = np.array([[fa.get((i, j, s), np.nan) for s in (0, 1)] for i, j in pairs]).reshape(-1, 2)
-    asym = np.nanmax(np.abs(side_area[:, 0] - side_area[:, 1]) / np.maximum(np.nanmax(side_area, axis=1), 1e-30)) \
-        if len(pairs) else 0.0
-    one_sided = int(np.isnan(side_area).any(axis=1).sum())
+    VN, VL, VV = dual["vol"]
+    kv = kinds[VL]
+    cv = np.bincount(VN, weights=VV * np.isin(kv, (SEMI, INSULATOR)), minlength=N)
+    cv_semi = np.bincount(VN, weights=VV * (kv == SEMI), minlength=N)
+    label_vol = np.bincount(VL + 1, weights=VV, minlength=len(materials) + 1)       # index 0 = gas
+    touch = {}
+    for l_, m_ in enumerate(materials):
+        if m_["kind"] == CONDUCTOR:
+            s = np.unique(VN[(VL == l_) & (VV > 0)])
+            touch.setdefault(m_["contact"], []).append(s)
+    touch = {k: np.unique(np.concatenate(v)) for k, v in touch.items()}
 
-    # each edge's facet is the mean of what its two cells computed (they
-    # agree to round-off; the gate checks it)
-    def mean2(d):
-        return np.array([np.mean([d.get((i, j, s), 0.0) for s in (0, 1) if (i, j, s) in fa]) for i, j in pairs])
-
-    A, As, G = (mean2(fa), mean2(fs), mean2(fg)) if pairs else (np.zeros(0),) * 3
-    e = np.array(pairs, dtype=np.int64).reshape(-1, 2)
-    L = np.linalg.norm(P[e[:, 1]] - P[e[:, 0]], axis=1) if len(e) else np.zeros(0)
+    FN, FJ, FL, FA = dual["facet"]
+    kf = kinds[FL]
+    d = np.isin(kf, (SEMI, INSULATOR)) & (FJ >= 0)
+    FN, FJ, FL, FA, kf = FN[d], FJ[d], FL[d], FA[d], kf[d]
+    lo, hi = np.minimum(FN, FJ), np.maximum(FN, FJ)
+    side = (FN > FJ).astype(np.int64)
+    key = (lo * N + hi) * 2 + side
+    ukey, inv = np.unique(key, return_inverse=True)
+    sA = np.bincount(inv, weights=FA)
+    sS = np.bincount(inv, weights=FA * (kf == SEMI))
+    sG = np.bincount(inv, weights=FA * eps[FL])
+    pk, sd = ukey // 2, ukey % 2
+    upair, pinv = np.unique(pk, return_inverse=True)
+    A2 = np.full((len(upair), 2), np.nan)
+    S2 = np.full((len(upair), 2), np.nan)
+    G2 = np.full((len(upair), 2), np.nan)
+    A2[pinv, sd], S2[pinv, sd], G2[pinv, sd] = sA, sS, sG
+    both = ~np.isnan(A2).any(axis=1)
+    one_sided = int((~both).sum())
+    asym = float(np.max(np.abs(A2[both, 0] - A2[both, 1]) / np.maximum(A2[both].max(axis=1), 1e-30))) \
+        if both.any() else 0.0
+    A, As, G = np.nanmean(A2, axis=1), np.nanmean(S2, axis=1), np.nanmean(G2, axis=1)
+    e = np.stack([upair // N, upair % N], axis=1)
+    L = np.linalg.norm(P[e[:, 1]] - P[e[:, 0]], axis=1)
 
     dev = cv > 0
-    keep_e = (A > 1e-12) & dev[e[:, 0]] & dev[e[:, 1]]
+    keep_e = (A > 0) & dev[e[:, 0]] & dev[e[:, 1]]
     new_id = np.full(N, -1, dtype=np.int64)
     new_id[dev] = np.arange(int(dev.sum()))
     edges = new_id[e[keep_e]]
     A, As, G, L = A[keep_e], As[keep_e], G[keep_e], L[keep_e]
 
-    contact_nodes = {name: np.zeros(N, bool) for name in touch}
+    contact_nodes = {}
     for name, s in touch.items():
-        contact_nodes[name][list(s)] = True
-    for name, (a, side) in (face_contacts or {}).items():
-        on = node_idx[:, a] == (0 if side == "min" else shape[a])
+        mask = np.zeros(N, bool)
+        mask[s] = True
+        contact_nodes[name] = mask
+    for name, (a, side_) in (face_contacts or {}).items():
+        on = node_idx[:, a] == (0 if side_ == "min" else shape[a])
         contact_nodes.setdefault(name, np.zeros(N, bool))
         contact_nodes[name] |= on
     names = list(contact_nodes)
@@ -660,19 +693,20 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, shape):
         p = pts_nm[new_id[contact_nodes[nm] & dev]] * cm
         contacts.append(SimpleNamespace(name=nm, x_range_cm=(float(p[:, 0].min()), float(p[:, 0].max()))
                                         if len(p) else (0.0, 0.0)))
+    n_dev = int(dev.sum())
     return OctreeMesh(
         points=pts_nm * cm, triangles=np.zeros((0, 3), dtype=int), edges=edges,
         edge_weight=A * nm2 / (L * cm), edge_g=G * nm2 / (L * cm),
         facet_length=A * nm2, facet_length_semi=As * nm2,
         cv_area=cv[dev] * nm3, cv_area_semi=cv_semi[dev] * nm3,
         Cdop=np.where(semi_node, net, 0.0), ni_arr=np.where(semi_node, mat.ni, 0.0), is_insulator=~semi_node,
-        dEi_arr=np.zeros(int(dev.sum())), Eg_arr=np.full(int(dev.sum()), mat.Eg_eV),
-        ec_off_arr=np.full(int(dev.sum()), mat.Vt * np.log(mat.Nc / mat.ni)),
+        dEi_arr=np.zeros(n_dev), Eg_arr=np.full(n_dev, mat.Eg_eV),
+        ec_off_arr=np.full(n_dev, mat.Vt * np.log(mat.Nc / mat.ni)),
         boundary_point_index=b_idx, boundary_bc_type=b_type, boundary_edges=set(),
         domain=SimpleNamespace(contacts=contacts), h_min_cm=float(L.min() * cm) if len(L) else 0.0,
         grid_index=node_idx[dev], node_id=new_id, dim=3,
-        quality=dict(facet_asymmetry=float(asym), one_sided_facets=one_sided),
-        _cv_all=cv, _cv_semi_all=cv_semi, _vol=dual["vol"], _edges_all=e[keep_e], _dual=dual)
+        quality=dict(facet_asymmetry=asym, one_sided_facets=one_sided),
+        label_volume=label_vol, n_clipped=dual["n_clipped"])
 
 
 # --- the mandatory gate ---------------------------------------------------------------
@@ -686,12 +720,9 @@ def check_octree_mesh(m, label, materials, h, log=print, vol_rtol=1e-9, facet_rt
         errs.append("negative edge coupling")
     # per-label volume sums == voxel volumes (device labels and conductors)
     vox = float(np.prod(h))
-    by_label = {}
-    for (n_, l_), v in m._vol.items():
-        by_label[l_] = by_label.get(l_, 0.0) + v
     for l_, m_ in enumerate(materials):
         want = float((label == l_).sum()) * vox
-        got = by_label.get(l_, 0.0)
+        got = float(m.label_volume[l_ + 1])
         if abs(got - want) > vol_rtol * max(want, 1.0) + 1e-6:
             errs.append(f"material {m_['name']!r}: dual volume {got:.6g} nm^3 != voxel volume {want:.6g}")
     if m.quality["facet_asymmetry"] > facet_rtol:

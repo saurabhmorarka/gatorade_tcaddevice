@@ -17,6 +17,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 mod levelset;
+mod voronoi;
+mod boxtree;
 
 const LAM_TOL: f64 = -1e-10; // same inside-test tolerance as TriGeom.locate
 const WALK_MAX: usize = 4096;
@@ -321,5 +323,7 @@ fn tcad_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trace_field_lines, m)?)?;
     m.add_function(wrap_pyfunction!(levelset::ls_project, m)?)?;
     m.add_function(wrap_pyfunction!(levelset::ls_refine, m)?)?;
+    m.add_function(wrap_pyfunction!(voronoi::voronoi_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(boxtree::boxtree_refine, m)?)?;
     Ok(())
 }
