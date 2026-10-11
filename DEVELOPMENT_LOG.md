@@ -4281,3 +4281,27 @@ move left of that minimum.
   (550/187, 250/487). Hiding the Probe panel takes the view area from 741
   to 1047 px. New test `test_section_splitter_resizes` (16 tests, venv and
   conda).
+
+## 40. Merge of Phases 0-2 into main; Phase 3 decisions
+
+The branch chain `3d-perf-core` -> `3d-vtk-export` -> `3d-rust-tracer` ->
+`3d-viewer` -> `3d-viewer-sections` is merged into `main` (`831cf4c`).
+
+**Merge gate**
+- 1D goldens 6/6, unchanged from main.
+- 2D per-point goldens 4/4 in the venv and the conda env.
+- VTK 10/10, native tracer 2/2, tcadview 16/16.
+- No tracked `out/` data changed.
+- Runtimes, before -> after:
+
+  | run | before | after |
+  |---|---|---|
+  | 2D MOSFET full I-V | 17.5 s | 7.5 s clean machine, 10.1 s with VS Code busy |
+  | MOS-cap C-V | 14 s | 3.9 s |
+  | BTBT sweep | 93 s | ~38 s |
+  | 3D extruded MOSFET | hours | ~75 s |
+
+**Phase 3 decisions from the user**
+- The planar template is always finite width with STI edges.
+- Re-distancing gets its own implementation, with Rust where profiling
+  shows a 5-10x gain.

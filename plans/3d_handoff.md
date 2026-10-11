@@ -1,24 +1,21 @@
 # 3D program: handoff (written 2026-10-04 evening, resume 2026-10-05)
 
-## >>> OPEN QUESTIONS FOR THE USER (asked 2026-10-10). Remind them first <<<
+## Decisions 2026-10-10 (Phase 3 is next)
 
-Phase 2 (viewer) is done; the user loves tcadview with section views. The
-next phase is **Phase 3: virtual fab + planar MOSFET template** (plan given
-in chat 2026-10-10, summarized under "Phase 3 plan" below). The user said
-they would answer later and asked to be reminded if they forget or the
-session closes. Do not start Phase 3 until these are answered:
+- Phases 0-2 merged into `main` (merge `831cf4c`). The old chain branches
+  stay local.
+- **Planar template: always finite width with STI edges.** No
+  infinite-width mode. The 2D cross-check uses the centre section of a wide
+  device.
+- **Re-distancing:** our own implementation. Use Rust where profiling shows
+  a 5-10x gain. The user asked for a refresher on what re-distancing is
+  (given in chat).
+- **No Claude attribution in git**: no Co-Authored-By trailers, no
+  "Generated with" lines. Rewriting the already-pushed history is pending
+  the user's decision.
+- Phase 3 branch: `3d-fab-planar` off `main`.
 
-1. **Planar width direction:**
-   - (a) recommended: finite width with STI edges (truly 3D), plus a
-     `width: infinite` option for the 2D cross-check
-   - (b) z-uniform only for now
-2. **Re-distancing:** add `scikit-fmm` (pip) to both envs, or write our own
-   fast-marching method now?
-3. **Merge:** run the merge gate on the branch chain ending at
-   `3d-viewer-sections` and merge into `main` before Phase 3? Phase 3 would
-   then branch from `main` as `3d-fab-planar`. Never push without asking.
-
-### Phase 3 plan (as proposed)
+### Phase 3 plan (as proposed; amended by the decisions above)
 - `fab/` package:
   - per-material SDFs on a uniform voxel grid, materials never overlap
   - operations: substrate, pattern (polygon masks with parameter
