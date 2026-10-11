@@ -1,5 +1,121 @@
 # 3D program: handoff (written 2026-10-04 evening, resume 2026-10-05)
 
+## START HERE - passdown of 2026-10-10 night (session limit hit)
+
+**Branches.**
+- `main`: Phases 0-2, pushed.
+- `3d-fab-planar`: Phase 3 virtual fab, planar template, ILD/contacts,
+  rectilinear reference solve, exact voxel view. Committed, NOT merged,
+  NOT pushed. The user said "looks good for now".
+- `3d-octree-mesh`: branched from `3d-fab-planar`. Phase 5 octree
+  mesher; NOTHING implemented yet. The user approved starting it here.
+- Rules:
+  - no Claude attribution in commits
+  - confirm before pushing
+  - DEVELOPMENT_LOG entry with every commit (sections 41-43 cover
+    Phase 3)
+
+**Done on `3d-fab-planar` today** (DEVELOPMENT_LOG 42-43):
+- *Flat gate stack.* The gate dielectric is deposited over the whole
+  flat surface; the strip etches only the `gate_oxide` region via
+  `etch(regions=)`. This fixed the STI recess step, spacer stringers,
+  the gate ledge and voids.
+- *Mandatory structure check.* `Structure.check()` runs in
+  `flow.build`; one-voxel flakes are despeckled by `_despeckle`.
+- *Cell labelling.* Gas iff the cell mean of the union field is >= 0
+  (fixes cells no region claimed at curved surfaces).
+- *ILD and contacts.* ILD fill + CMP to `ild_cap` above the gate;
+  contact trenches through the ILD only; W up to the ILD top (contacts
+  taller than the gate). No gas between spacer and contacts.
+- *tcadview.* Process builds are drawn as exact voxel faces
+  (`model.voxel_surface` / `voxel_slice`); smooth level-set contours
+  behind a checkbox.
+- *Solver.* An ohmic metal-volume contact's insulator nodes take the
+  metal potential V + median psi_bulk (`solver2d/newton_solver_qf_2d.py`),
+  where before they got a NaN from ni = 0. The 2D golden tests are
+  unchanged.
+- *Reference 3D solve.* `python -m fab simulate configs/fab_planar.yaml`
+  (conda env, PETSc LU; ILU fails on 16:1 cells). Rectilinear grid,
+  67,956 nodes, half width, whole stack. Results: Vt 0.218 -> 0.057 V,
+  DIBL 170 mV/V, SS 89 mV/dec, Ion 1827 uA/um, Ioff 1.0e-6 A/um, 434 s.
+  This is the baseline the octree mesher is compared against.
+
+**The approved octree design (to implement on `3d-octree-mesh`).**
+Write it in `mesh3d/octree.py`, producing the same attribute set as
+`mesh3d/cartesian.py` (so `fab/simulate.py` can switch meshers).
+
+1. *Adaptive box tree.*
+   - Integer units = fab voxel (1, 0.5, 1 nm). Leaves are boxes; a leaf
+     may split along any subset of axes, at fab voxel faces (kd-style,
+     sizes need not be powers of 2).
+   - Bookkeeping: an int32 "leaf id per fab voxel" array, for O(1) point
+     location and neighbour lookup.
+2. *Refinement criteria.*
+   - Every leaf is a single label, gas and conductors included.
+   - Per-axis target spacing graded from the Si/insulator interface,
+     junctions (sign change of net doping), doping gradients and gate
+     edges: h_fine (2, 0.5, 2) nm, growth 1.35, h_max 8, as in
+     `fab/simulate.py`.
+   - Coarse in the substrate depth, ILD, metal and gas.
+   - 2:1 balance per axis between vertex-adjacent leaves.
+3. *Interface rule (local, so refinement doesn't propagate along a
+   whole interface).* The leaf across an interface face has the same
+   size triple: a mirror image across the interface. Then dual facets
+   don't cross interfaces obliquely.
+4. *Nodes and control volumes.*
+   - Nodes are all leaf corners. The control volumes are the exact
+     Voronoi diagram of the nodes, which is always admissible: couplings
+     are facet areas >= 0.
+   - *Fast path.* The box between midpoints to the axis neighbours IS
+     the Voronoi cell iff no other node is closer to any of its 8 corners
+     (a vectorized cKDTree query on the corners). Per-material volumes
+     and facets come from octants; each octant lies in one leaf.
+   - *Other nodes (transitions).* Exact half-space clipping, as in
+     `mesh3d/studies/octree_transition_study.py::voronoi_cell`. The
+     per-material split comes from clipping the cell against each
+     overlapping leaf box.
+   - Prototype in Python; port the clipping to Rust (`native/`) if it
+     dominates.
+5. *Device subset.* Device = semiconductor + insulator leaves.
+   Conductor-touching device nodes are contact nodes; the body is the
+   bottom face. Sort the contact `boundary_point_index` ascending (the
+   solver pairs it with `psi[is_contact]` in node order).
+6. *Mandatory gate, raising on failure:*
+   - CV > 0
+   - per-material volume sums equal the voxel volumes
+   - every clipped cell closes, and facet areas match from both sides
+   - couplings >= 0
+   - conformity: an edge with semiconductor facet area connects two
+     nodes with semiconductor CV
+   - no isolated nodes; every contact has nodes
+7. *Validation.*
+   - Same device as the rectilinear baseline: node count, Id-Vg
+     agreement, runtime.
+   - Does petsc_ilu converge now?
+   - Runtime goal: full 3D I-V in about 1 minute.
+
+**Study result behind this design** (script saved at
+`mesh3d/studies/octree_transition_study.py`).
+- On random 2:1 octrees, centre-fan tets (the 2D quadtree's trick)
+  give about 15% negative couplings: rejected.
+- The Voronoi dual was exact: volumes sum to the box and are all
+  positive, cells close to 4e-9, and facets are symmetric.
+- Non-box cells occur only within one fine cell of a level change.
+
+**Open items to raise with the user next session.**
+- Merge/push `3d-fab-planar` (needs explicit OK).
+- Capacitance extraction (Cgd/Cgs from terminal charge vs bias), now
+  possible because the contacts are volumes. The user cares about
+  off-state capacitance; I offered it before or after the octree.
+- `fab/simulate.py::sample_structure` still labels device cells by
+  argmin of phi at coarse-cell centres, not by `cell_labels()`. The
+  octree replaces this; fix it if the rectilinear path stays.
+- Device design: Vt is nearly 0 at 1 V, DIBL 170. A design question
+  for the user (doping/tox), not a mesh question.
+- Later: Schottky contacts, STI corner rounding option, Phase 4
+  (FinFET, nanosheet).
+
+
 ## Phase 3 status (2026-10-10): first milestone done on `3d-fab-planar`
 
 - Virtual fab `fab/` and planar template (finite width + STI, always):

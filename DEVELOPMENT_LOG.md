@@ -4631,3 +4631,17 @@ PETSc LU, 434 s), against the earlier run cut 10 nm above the silicon:
 The tall drain metal, now in the electrostatics through the spacer and
 ILD, couples more drain field into the channel. The capacitances
 themselves (Cgd, Cgs from charge vs bias) are not computed yet.
+
+## 44. Branch `3d-octree-mesh` started (Phase 5); passdown
+
+Branched from `3d-fab-planar`. Nothing implemented yet. The approved
+design and the night's passdown are at the top of
+`plans/3d_handoff.md`:
+- an adaptive box tree with per-axis splits
+- a local mirror rule at interfaces
+- an exact Voronoi dual (box fast path plus exact clipping)
+- a mandatory gate
+- validation against the rectilinear reference of section 43
+
+The octree transition study is saved as
+`mesh3d/studies/octree_transition_study.py`.
