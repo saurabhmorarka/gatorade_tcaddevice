@@ -1,0 +1,107 @@
+"""Device templates: layer 1 (a template name + parameters) expanded into
+layer 2 (an explicit process flow) and layer 3 (the device definition).
+
+Every number in a generated flow is an expression over the parameters, so
+the dumped layer-2 YAML (python -m fab expand) stays readable and editable,
+and changing a parameter in it still propagates.
+"""
+
+# --- planar bulk MOSFET -----------------------------------------------------------
+# Finite width with STI on both sides (always: a planar device without its
+# STI edges is not the real device). x: source -> drain, z: width, heights
+# up from the original silicon surface. No halo implant (modern flows drop
+# it; add one in the flow if a study needs it).
+PLANAR_DEFAULTS = {
+    "type": "nmos",
+    "Lg": 30,               # gate length
+    "tox": 1.5,             # gate oxide
+    "gate_height": 40,
+    "spacer": 8,            # spacer (SiN) thickness
+    "L_sd": 40,             # source/drain length beyond the spacer
+    "W": 60,                # active (channel) width
+    "sti_width": 20,        # STI on each side of the active area
+    "sti_depth": 50,
+    "sti_overfill": 10,     # STI oxide fill above silicon before CMP
+    "sub_depth": 100,       # silicon below the surface in the domain
+    "endcap": 15,           # gate extension over the STI
+    "contact_inset": 5,     # contact metal kept off the spacer and STI edge
+    "contact_height": 10,
+    "top_margin": 6,        # gas above the gate's spacer liner
+    "voxel": [1.0, 0.5, 1.0],
+    "sub_conc": 1e15,       # substrate doping, cm^-3
+    "well_peak": 3e18, "well_rp": 25, "well_sigma": 15,
+    # implants as analytic Gaussians (peak cm^-3, Rp/sigma/lateral nm), tuned
+    # for a ~30 nm gate: extension junction ~11 nm, deep S/D junction ~30 nm
+    "ext_peak": 5e19, "ext_rp": 4, "ext_sigma": 3, "ext_lateral": 3,
+    "sd_peak": 1e20, "sd_rp": 12, "sd_sigma": 7, "sd_lateral": 5,
+}
+
+PLANAR_DERIVED = {
+    "Lx": "2*(L_sd + spacer) + Lg",
+    "Lz": "W + 2*sti_width",
+    "xg0": "L_sd + spacer",
+    "xg1": "L_sd + spacer + Lg",
+    "zw0": "sti_width",
+    "zw1": "sti_width + W",
+}
+
+
+def planar(params):
+    """Layer 2 + 3 for the planar template (params: layer-1 values merged
+    over PLANAR_DEFAULTS)."""
+    p = dict(PLANAR_DEFAULTS, **params)
+    p.update({k: v for k, v in PLANAR_DERIVED.items() if k not in params})
+    if p["type"] not in ("nmos", "pmos"):
+        raise ValueError(f"planar type must be nmos or pmos, not {p['type']!r}")
+    n = p["type"] == "nmos"
+    sub_sp, sd_sp = ("B", "As") if n else ("P", "B")
+    process = [
+        {"step": "substrate", "label": "substrate", "material": "Si", "name": "substrate"},
+        {"step": "dope", "label": "substrate doping", "species": sub_sp, "conc": "sub_conc", "materials": ["Si"]},
+        {"step": "pattern", "label": "active mask", "name": "active", "mask": {"rect": [-1, "Lx + 1", "zw0", "zw1"]}},
+        {"step": "etch", "label": "STI trench etch", "mode": "anisotropic", "materials": ["Si"], "mask": "!active",
+         "depth": "sti_depth"},
+        {"step": "deposit", "label": "STI oxide fill", "mode": "fill", "material": "SiO2", "name": "sti",
+         "to_height": "sti_overfill"},
+        {"step": "planarize", "label": "STI CMP", "to_height": 0},
+        {"step": "implant", "label": "well / Vt implant", "species": sub_sp, "peak": "well_peak", "rp": "well_rp",
+         "sigma": "well_sigma"},
+        {"step": "deposit", "label": "gate oxidation", "mode": "conformal", "material": "SiO2", "name": "gate_oxide",
+         "thickness": "tox", "on": ["Si"]},
+        {"step": "deposit", "label": "poly deposition", "mode": "fill", "material": "Poly", "name": "gate",
+         "to_height": "tox + gate_height"},
+        {"step": "pattern", "label": "gate mask", "name": "gate",
+         "mask": {"rect": ["xg0", "xg1", "zw0 - endcap", "zw1 + endcap"]}},
+        {"step": "etch", "label": "gate etch", "mode": "anisotropic", "materials": ["Poly"], "mask": "!gate",
+         "stop_on": ["SiO2"]},
+        {"step": "etch", "label": "oxide strip", "mode": "anisotropic", "materials": ["SiO2"], "depth": "1.5*tox"},
+        {"step": "implant", "label": "extension implant", "species": sd_sp, "peak": "ext_peak", "rp": "ext_rp",
+         "sigma": "ext_sigma", "lateral_sigma": "ext_lateral", "blocked_by": ["Poly"]},
+        {"step": "deposit", "label": "spacer deposition", "mode": "conformal", "material": "SiN", "name": "spacer",
+         "thickness": "spacer"},
+        {"step": "etch", "label": "spacer etch", "mode": "anisotropic", "materials": ["SiN"], "depth": "1.15*spacer"},
+        {"step": "implant", "label": "source/drain implant", "species": sd_sp, "peak": "sd_peak", "rp": "sd_rp",
+         "sigma": "sd_sigma", "lateral_sigma": "sd_lateral", "blocked_by": ["Poly", "SiN"]},
+        {"step": "pattern", "label": "contact masks", "name": "source_ct",
+         "mask": {"rect": [-1, "xg0 - spacer - contact_inset", "zw0 + contact_inset", "zw1 - contact_inset"]}},
+        {"step": "pattern", "label": "contact masks", "name": "drain_ct",
+         "mask": {"rect": ["xg1 + spacer + contact_inset", "Lx + 1", "zw0 + contact_inset", "zw1 - contact_inset"]}},
+        {"step": "deposit", "label": "source contact", "mode": "fill", "material": "Metal", "name": "source_contact",
+         "to_height": "contact_height", "mask": "source_ct"},
+        {"step": "deposit", "label": "drain contact", "mode": "fill", "material": "Metal", "name": "drain_contact",
+         "to_height": "contact_height", "mask": "drain_ct"},
+    ]
+    # headroom above the gate for the spacer liner (a deposit must not reach
+    # the domain ceiling: the etches see gas only from above)
+    domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-sub_depth", "tox + gate_height + spacer + top_margin"],
+              "voxel": "voxel"}
+    device = {"contacts": [
+        {"name": "source", "region": "source_contact"},
+        {"name": "drain", "region": "drain_contact"},
+        {"name": "gate", "region": "gate"},
+        {"name": "body", "surface": "bottom"},
+    ]}
+    return {"params": p, "domain": domain, "process": process, "device": device}
+
+
+TEMPLATES = {"planar": planar}

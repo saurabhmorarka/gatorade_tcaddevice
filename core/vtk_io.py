@@ -87,6 +87,60 @@ def _string_array_xml(name, strings, indent):
             f'format="ascii">\n{indent}  {" ".join(map(str, codes))}\n{indent}</DataArray>\n')
 
 
+class _Appended:
+    """Collects DataArray XML and their raw appended-data blobs."""
+
+    def __init__(self, compress):
+        self.compress = compress
+        self.blobs = []
+        self.offset = 0
+
+    def array(self, name, a, indent, n_tuples=False):
+        a = _as_vtk_array(a)
+        ncomp = 1 if a.ndim == 1 else a.shape[1]
+        blob = _encode(a, self.compress)
+        attr = f'type="{_VTK_TYPES[a.dtype.newbyteorder("=")]}"'
+        if name is not None:
+            attr += f" Name={quoteattr(name)}"
+        if n_tuples:
+            attr += f' NumberOfTuples="{len(a)}"'
+        xml = (f'{indent}<DataArray {attr} NumberOfComponents="{ncomp}" format="appended" '
+               f'offset="{self.offset}"/>\n')
+        self.blobs.append(blob)
+        self.offset += len(blob)
+        return xml
+
+    def field_data(self, field_data, indent):
+        if not field_data:
+            return []
+        out = [f"{indent}<FieldData>\n"]
+        for name, v in field_data.items():
+            if isinstance(v, (list, tuple)) and v and all(isinstance(x, str) for x in v):
+                out.append(_string_array_xml(name, v, indent + "  "))
+            elif isinstance(v, str):
+                out.append(_string_array_xml(name, [v], indent + "  "))
+            else:
+                out.append(self.array(name, np.atleast_1d(np.asarray(v)), indent + "  ", n_tuples=True))
+        out.append(f"{indent}</FieldData>\n")
+        return out
+
+    def write(self, path, xml_lines, tail):
+        tmp = f"{path}.tmp{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write("".join(xml_lines).encode("utf-8"))
+            f.write(b'  <AppendedData encoding="raw">\n   _')
+            for b in self.blobs:
+                f.write(b)
+            f.write(("\n  </AppendedData>\n" + tail).encode("utf-8"))
+        os.replace(tmp, path)
+
+
+def _header(kind, compress):
+    return ['<?xml version="1.0"?>\n',
+            f'<VTKFile type="{kind}" version="1.0" byte_order="LittleEndian" header_type="UInt64"'
+            + (' compressor="vtkZLibDataCompressor"' if compress else "") + ">\n"]
+
+
 def write_vtu(path, points, cells, cell_types, point_data=None, cell_data=None, field_data=None,
               compress=False):
     """Write an unstructured grid.
@@ -114,67 +168,62 @@ def write_vtu(path, points, cells, cell_types, point_data=None, cell_data=None, 
     types = np.concatenate([np.full(len(c), t, dtype=np.uint8) for c, t in zip(cells, cell_types)])
     n_pts, n_cells = len(pts), len(types)
 
-    blobs = []
-    offset = [0]
-
-    def darray(name, a, indent):
-        a = _as_vtk_array(a)
-        ncomp = 1 if a.ndim == 1 else a.shape[1]
-        blob = _encode(a, compress)
-        attr = f'type="{_VTK_TYPES[a.dtype.newbyteorder("=")]}"'
-        if name is not None:
-            attr += f" Name={quoteattr(name)}"
-        xml = (f'{indent}<DataArray {attr} NumberOfComponents="{ncomp}" format="appended" '
-               f'offset="{offset[0]}"/>\n')
-        blobs.append(blob)
-        offset[0] += len(blob)
-        return xml
+    w = _Appended(compress)
 
     def check(name, a, n, what):
         if len(a) != n:
             raise ValueError(f"{what} array {name!r} has length {len(a)}, expected {n}")
 
-    out = ['<?xml version="1.0"?>\n',
-           '<VTKFile type="UnstructuredGrid" version="1.0" byte_order="LittleEndian" header_type="UInt64"'
-           + (' compressor="vtkZLibDataCompressor"' if compress else "") + ">\n",
-           "  <UnstructuredGrid>\n"]
-    if field_data:
-        out.append("    <FieldData>\n")
-        for name, v in field_data.items():
-            if isinstance(v, (list, tuple)) and v and all(isinstance(s, str) for s in v):
-                out.append(_string_array_xml(name, v, "      "))
-            elif isinstance(v, str):
-                out.append(_string_array_xml(name, [v], "      "))
-            else:
-                a = np.atleast_1d(np.asarray(v))
-                x = darray(name, a, "      ")
-                out.append(x.replace('format="appended"', f'NumberOfTuples="{len(a)}" format="appended"'))
-        out.append("    </FieldData>\n")
+    out = _header("UnstructuredGrid", compress) + ["  <UnstructuredGrid>\n"]
+    out += w.field_data(field_data, "    ")
     out.append(f'    <Piece NumberOfPoints="{n_pts}" NumberOfCells="{n_cells}">\n')
     out.append("      <PointData>\n")
     for name, a in (point_data or {}).items():
         check(name, a, n_pts, "point")
-        out.append(darray(name, a, "        "))
+        out.append(w.array(name, a, "        "))
     out.append("      </PointData>\n      <CellData>\n")
     for name, a in (cell_data or {}).items():
         check(name, a, n_cells, "cell")
-        out.append(darray(name, a, "        "))
+        out.append(w.array(name, a, "        "))
     out.append("      </CellData>\n      <Points>\n")
-    out.append(darray("Points", pts, "        "))
+    out.append(w.array("Points", pts, "        "))
     out.append("      </Points>\n      <Cells>\n")
-    out.append(darray("connectivity", conn, "        "))
-    out.append(darray("offsets", offsets, "        "))
-    out.append(darray("types", types, "        "))
+    out.append(w.array("connectivity", conn, "        "))
+    out.append(w.array("offsets", offsets, "        "))
+    out.append(w.array("types", types, "        "))
     out.append("      </Cells>\n    </Piece>\n  </UnstructuredGrid>\n")
-    out.append('  <AppendedData encoding="raw">\n   _')
-    tail = "\n  </AppendedData>\n</VTKFile>\n"
-    tmp = f"{path}.tmp{os.getpid()}"
-    with open(tmp, "wb") as f:
-        f.write("".join(out).encode("utf-8"))
-        for b in blobs:
-            f.write(b)
-        f.write(tail.encode("utf-8"))
-    os.replace(tmp, path)
+    w.write(path, out, "</VTKFile>\n")
+
+
+def write_vti(path, origin, spacing, shape, point_data=None, cell_data=None, field_data=None, compress=True):
+    """Write an image (uniform grid). shape = number of NODES per axis;
+    point arrays are (nx, ny, nz[, c]) and cell arrays (nx-1, ny-1, nz-1[, c]),
+    indexed [i, j, k] (VTK's x-fastest order is applied here)."""
+    shape = tuple(int(n) for n in shape)
+    ext = " ".join(f"0 {n - 1}" for n in shape)
+    w = _Appended(compress)
+
+    def flat(name, a, grid_shape):
+        a = np.asarray(a)
+        if a.shape[:3] != grid_shape:
+            raise ValueError(f"array {name!r} has shape {a.shape}, expected {grid_shape}[+components]")
+        if a.ndim == 3:
+            return a.ravel(order="F")
+        return np.stack([a[..., c].ravel(order="F") for c in range(a.shape[3])], axis=1)
+
+    out = _header("ImageData", compress)
+    out.append(f'  <ImageData WholeExtent="{ext}" Origin="{" ".join(f"{v:.17g}" for v in origin)}" '
+               f'Spacing="{" ".join(f"{v:.17g}" for v in spacing)}" Direction="1 0 0 0 1 0 0 0 1">\n')
+    out += w.field_data(field_data, "    ")
+    out.append(f'    <Piece Extent="{ext}">\n      <PointData>\n')
+    for name, a in (point_data or {}).items():
+        out.append(w.array(name, flat(name, a, shape), "        "))
+    out.append("      </PointData>\n      <CellData>\n")
+    cshape = tuple(n - 1 for n in shape)
+    for name, a in (cell_data or {}).items():
+        out.append(w.array(name, flat(name, a, cshape), "        "))
+    out.append("      </CellData>\n    </Piece>\n  </ImageData>\n")
+    w.write(path, out, "</VTKFile>\n")
 
 
 def write_pvd(path, entries):

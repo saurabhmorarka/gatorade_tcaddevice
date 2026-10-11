@@ -28,6 +28,23 @@ HIDDEN_FIELDS = {"region_id", "material_id", "contact_id", "vtkOriginalPointIds"
                  "_display", "_log_eDensity", "_log_hDensity"}
 
 
+# process-step snapshots (fab/export.py): regions are stored as level sets
+# ls_<region>; "Material" colours each region by its material instead of a field
+LEVELSET_PREFIX = "ls_"
+MATERIAL_FIELD = "Material"
+MATERIAL_COLORS = {"Si": "#9fb4cc", "SiO2": "#f4b8c8", "Poly": "#c0504d", "SiN": "#86c48a", "Metal": "#e2b33c",
+                   "SiGe": "#b393d6", "Ge": "#6f8fb5", "HfO2": "#f2a25c", "TiN": "#8c8c8c", "W": "#a0a0b0"}
+_EXTRA_COLORS = ("#7fc7c2", "#d98cb3", "#c9b27c", "#8fa3d9", "#b5c96f")
+
+
+def material_color(name):
+    if name in MATERIAL_COLORS:
+        return MATERIAL_COLORS[name]
+    if name.startswith("SiGe"):
+        return MATERIAL_COLORS["SiGe"]
+    return _EXTRA_COLORS[sum(map(ord, name)) % len(_EXTRA_COLORS)]
+
+
 def default_scale(name):
     if name in LOG_FIELDS:
         return "log"
@@ -77,7 +94,69 @@ class State:
     contact_bias: dict
     label: str
     units: dict
+    kind: str = ""
     _regions: dict = field(default_factory=dict)
+    _cache: dict = field(default_factory=dict)
+
+    @property
+    def is_process(self):
+        """A process-step snapshot (voxel image with level sets)."""
+        return self.kind == "process"
+
+    def levelset(self, k):
+        return LEVELSET_PREFIX + self.region_names[k]
+
+    def _contour_grid(self):
+        """The image with every level set forced 'outside' on the domain walls,
+        so a region touching a wall contours to a closed surface (cached)."""
+        if "contour_grid" not in self._cache:
+            g = self.grid.copy(deep=False)
+            dims = g.dimensions
+            for k in range(len(self.region_names)):
+                name = self.levelset(k)
+                if name not in g.point_data.keys():
+                    continue
+                a = np.array(g.point_data[name], dtype=np.float32).reshape(dims[::-1])   # [k, j, i]
+                for ax in range(3):
+                    sl = [slice(None)] * 3
+                    for end in (0, -1):
+                        sl[ax] = end
+                        a[tuple(sl)] = np.maximum(a[tuple(sl)], 0.5)
+                g.point_data[name] = a.ravel()
+            self._cache["contour_grid"] = g
+        return self._cache["contour_grid"]
+
+    def surface(self, k):
+        """Region k's smooth closed boundary surface (process snapshots;
+        cached), with the point fields interpolated onto it."""
+        key = ("surface", k)
+        if key not in self._cache:
+            s = self._contour_grid().contour([-0.5], scalars=self.levelset(k))
+            self._cache[key] = s if s.n_points else None
+        return self._cache[key]
+
+    def slice_region(self, k, axis, pos):
+        """Region k on the plane normal to `axis` at `pos`, cut at its smooth
+        boundary (process snapshots), or None."""
+        key = ("slice", axis, round(float(pos), 12))
+        if key not in self._cache:
+            o = [0.0, 0.0, 0.0]
+            o["xyz".index(axis)] = pos
+            self._cache[key] = self.grid.slice(normal=axis, origin=o)
+        sl = self._cache[key]
+        if not sl.n_points:
+            return None
+        c = sl.clip_scalar(scalars=self.levelset(k), value=-0.5, invert=True)
+        return c if c.n_points else None
+
+    def node_labels(self):
+        """Region index per grid node from the level sets (-1 = gas)."""
+        if "labels" not in self._cache:
+            ls = np.stack([np.asarray(self.grid.point_data[self.levelset(k)], dtype=np.int16)
+                           for k in range(len(self.region_names))])
+            lab = np.argmin(ls, axis=0)
+            self._cache["labels"] = np.where(ls.min(axis=0) < 0, lab, -1)
+        return self._cache["labels"]
 
     @property
     def dim(self):
@@ -97,13 +176,18 @@ class State:
         mid = self.grid.cell_data["material_id"][rid == k]
         return self.material_names[int(mid[0])] if len(mid) and mid[0] >= 0 else ""
 
-    def fields(self):
-        """Displayable field names: point fields first, then cell fields."""
-        pd = [n for n in self.grid.point_data.keys() if n not in HIDDEN_FIELDS]
+    def fields(self, data_only=False):
+        """Displayable field names: point fields first, then cell fields
+        (process snapshots: "Material" first, unless data_only)."""
+        pd = [n for n in self.grid.point_data.keys()
+              if n not in HIDDEN_FIELDS and not n.startswith(LEVELSET_PREFIX) and not n.startswith("_log_")]
         cd = [n for n in self.grid.cell_data.keys() if n not in HIDDEN_FIELDS and n not in pd]
-        return pd + cd
+        extra = [MATERIAL_FIELD] if self.is_process and not data_only else []
+        return extra + pd + cd
 
     def association(self, name):
+        if name == MATERIAL_FIELD:
+            return "material"
         return "point" if name in self.grid.point_data.keys() else "cell"
 
     def values(self, name, grid=None):
@@ -118,7 +202,13 @@ class State:
         """Finite (min, max) of the displayed values over `regions` (all if
         None); (0, 1) if there is nothing finite."""
         ks = range(len(self.region_names)) if regions is None else regions
-        vals = [scale_values(self.values(name, self.region(k)), scale) for k in ks]
+        if name == MATERIAL_FIELD:
+            return 0.0, 1.0
+        if self.is_process:                    # no per-region cell extraction on big voxel images
+            sel = np.isin(self.node_labels(), list(ks))
+            vals = [scale_values(self.values(name)[sel], scale)]
+        else:
+            vals = [scale_values(self.values(name, self.region(k)), scale) for k in ks]
         v = np.concatenate([x[np.isfinite(x)] for x in vals]) if vals else np.zeros(0)
         if not len(v):
             return 0.0, 1.0
@@ -156,7 +246,7 @@ class State:
             return None
         s = self._sample(pt.points)
         out = {}
-        for n in self.fields():
+        for n in self.fields(data_only=True):
             if self.association(n) == "point" and n in s:
                 v = s[n][0]
             else:
@@ -186,7 +276,8 @@ class State:
 
 
 def load_state(path):
-    """Read one .vtu written by solver2d/vtk_export.py."""
+    """Read one .vtu written by solver2d/vtk_export.py, or one .vti
+    process snapshot written by fab/export.py."""
     grid = pv.read(path)
     fd = grid.field_data
 
@@ -199,7 +290,7 @@ def load_state(path):
     return State(grid=grid, region_names=strings("region_names"), material_names=strings("material_names"),
                  contact_names=cnames,
                  contact_bias=dict(zip(cnames, bias.tolist())) if bias is not None else {},
-                 label=(strings("label") or [""])[0], units=units)
+                 label=(strings("label") or [""])[0], units=units, kind=(strings("kind") or [""])[0])
 
 
 class Session:
@@ -210,10 +301,10 @@ class Session:
         ext = os.path.splitext(path)[1].lower()
         if ext == ".pvd":
             self.states = [StateInfo(b, f, n or os.path.basename(f)) for b, f, n in vtk_io.read_pvd(path)]
-        elif ext == ".vtu":
+        elif ext in (".vtu", ".vti"):
             self.states = [StateInfo(0.0, self.path, os.path.basename(path))]
         else:
-            raise ValueError(f"{path}: expected a .pvd or .vtu file")
+            raise ValueError(f"{path}: expected a .pvd, .vtu or .vti file")
         if not self.states:
             raise ValueError(f"{path}: no datasets")
         self._cache = {}
@@ -275,8 +366,11 @@ class Section:
         if k not in self._regions:
             o = [0.0, 0.0, 0.0]
             o[self.n] = self.pos
-            g = self.state.region(k)
-            s = g.slice(normal=self.axis, origin=o) if g.n_cells else None
+            if self.state.is_process:
+                s = self.state.slice_region(k, self.axis, self.pos)
+            else:
+                g = self.state.region(k)
+                s = g.slice(normal=self.axis, origin=o) if g.n_cells else None
             if s is not None and s.n_points:
                 s = s.copy()
                 s.points = np.column_stack([self.to2d(s.points), np.zeros(s.n_points)])

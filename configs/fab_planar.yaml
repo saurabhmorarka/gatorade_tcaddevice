@@ -1,0 +1,17 @@
+# Planar bulk NMOS from the virtual fab (Phase 3). Layer 1: template +
+# parameters; everything else is generated (see `python3 -m fab expand`).
+# Lengths in nm unless a unit is given.
+#
+#   python3 -m fab build configs/fab_planar.yaml
+#   python3 -m tcadview out/fab_planar/build.pvd
+template: planar
+params:
+  type: nmos
+  Lg: 30nm
+  tox: 1.5nm
+  gate_height: 40nm
+  spacer: 8nm
+  W: 60nm
+  sti_width: 20nm
+  sti_depth: 50nm
+  voxel: [1.0, 0.5, 1.0]     # nm, x/y(depth)/z

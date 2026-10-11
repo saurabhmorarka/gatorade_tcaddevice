@@ -1,19 +1,32 @@
 # 3D program: handoff (written 2026-10-04 evening, resume 2026-10-05)
 
-## Decisions 2026-10-10 (Phase 3 is next)
+## Phase 3 status (2026-10-10): first milestone done on `3d-fab-planar`
 
-- Phases 0-2 merged into `main` (merge `831cf4c`). The old chain branches
-  stay local.
-- **Planar template: always finite width with STI edges.** No
-  infinite-width mode. The 2D cross-check uses the centre section of a wide
-  device.
-- **Re-distancing:** our own implementation. Use Rust where profiling shows
-  a 5-10x gain. The user asked for a refresher on what re-distancing is
-  (given in chat).
-- **No Claude attribution in git**: no Co-Authored-By trailers, no
-  "Generated with" lines. Rewriting the already-pushed history is pending
-  the user's decision.
-- Phase 3 branch: `3d-fab-planar` off `main`.
+- Virtual fab `fab/` and planar template (finite width + STI, always):
+  `python3 -m fab build configs/fab_planar.yaml`, view with
+  `python3 -m tcadview out/fab_planar/build.pvd`. DEVELOPMENT_LOG section 41.
+- Rust re-distancing kernel in `native/` (rebuild both envs after pulling:
+  venv `env -u CONDA_PREFIX VIRTUAL_ENV=$PWD/../.venv ../.venv/bin/maturin develop --release`,
+  conda `env -u VIRTUAL_ENV CONDA_PREFIX=~/miniconda3/envs/tcad ~/miniconda3/envs/tcad/bin/maturin develop --release`,
+  both from `native/`).
+- Not merged, not pushed. Waiting on user feedback on the planar build.
+- No Claude attribution in commits (user rule).
+
+### Gotchas specific to the fab
+- Inside is phi < 0; a complement is -phi - EPS (EPS = 2^-20), removals are
+  inclusive; level sets are float64 (float32 broke the tie arithmetic).
+- Set operations leave exact-zero "phantom" sheets; anything that takes
+  column minima or projects onto the zero set must guard against them
+  (`_straddles`, `phi <= 0` updates in `_remove`).
+- Anything built from a per-column top height is only column-accurate
+  laterally; use minima of the solid field along columns instead.
+- A deposit must not reach the domain ceiling (raises).
+
+### Next in Phase 3 / then Phase 4
+- user review of the planar structure (dimensions, doping defaults)
+- epitaxy (Wulff facets) and isotropic selective etch refinements are
+  Phase 4 needs (FinFET, nanosheet); octree mesher is Phase 5
+- profile again on a FinFET-size build before more Rust
 
 ### Phase 3 plan (as proposed; amended by the decisions above)
 - `fab/` package:

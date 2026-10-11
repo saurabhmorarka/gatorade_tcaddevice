@@ -4305,3 +4305,155 @@ The branch chain `3d-perf-core` -> `3d-vtk-export` -> `3d-rust-tracer` ->
 - The planar template is always finite width with STI edges.
 - Re-distancing gets its own implementation, with Rust where profiling
   shows a 5-10x gain.
+
+## 41. Phase 3: virtual fab (level-set process engine) + planar MOSFET template
+
+Branch `3d-fab-planar`, off `main` after the Phases 0-2 merge.
+
+**User decisions (2026-10-10)**
+- The planar device is always finite width with STI edges. There is no
+  z-uniform mode.
+- Re-distancing gets its own implementation, with Rust where it gives
+  5-10x.
+- Commits carry no Claude attribution from now on. Old commits stay as
+  they are.
+
+**Engine (`fab/`)**
+- `structure.py`: regions (name, material, level set on a uniform node
+  grid), 2D masks and accumulated donors/acceptors. Each process step is
+  one geometric operation:
+  - substrate, pattern
+  - deposit:
+    - conformal: an exact offset of the distance field
+    - selective (`on: [Si]`)
+    - fill, directional, masked
+  - etch:
+    - anisotropic: by depth and/or stop-on-material, masked
+    - isotropic
+  - planarize
+  - implant: analytic Gaussian in depth below the surface of the
+    non-blocking solid, times a lateral erfc of the 2D distance to the
+    open area (`blocked_by` footprint and/or mask). Peak or dose.
+  - dope: uniform, in regions or materials
+- `levelset.py`: closest-point re-distancing (below), cropped local
+  distance, column top heights, exact polygon distance for masks.
+- `expr.py`: safe parameter expressions (ast, no eval) with nm/um/A units.
+- `templates.py`: the planar template, layer 1 expanded to layers 2/3.
+  Derived parameters (`Lx`, `xg0`, ...) are expressions too, so the
+  dumped flow stays editable.
+- `flow.py`: runs the three-layer YAML. `export.py`: per-step `.vti`
+  snapshots plus a `.pvd` (written on worker threads).
+- `python3 -m fab build|expand`.
+
+**Re-distancing (the core numerical piece).** Prototyped against exact
+distances before writing the engine (3.9M voxels, 1/0.5/1 nm):
+- The per-axis crossing formula was off by up to 0.57 nm at seed voxels:
+  tilted surfaces cross beyond the neighbour voxel.
+- Replaced by Newton projection onto the trilinear interpolant: closest
+  points to 0.005 nm.
+- A voxel inheriting its nearest seed's closest point is off by delta^2/2D
+  (up to ~0.5 nm). Added a tangent-plane slide plus re-projection, keeping
+  the closer of the two. Smooth surfaces now come out to ~0.02 nm.
+- Sharp convex edges had no seeds. Seeds now include all 26 neighbours.
+- Remaining sharp-corner error is under half a voxel. That is a
+  resolution limit: a sampled field cannot hold a sharp edge.
+- Re-distancing runs only when a step needs true distances: conformal
+  deposit, isotropic etch, implant footprints. Etch, fill and CMP need
+  only signs, and min/max keeps the zero set.
+
+**Rust kernel (`native/src/levelset.rs`).** Profiling: 68% of the build
+was scipy `map_coordinates` inside the Newton projections.
+- `ls_project` / `ls_refine` mirror the numpy code: on-the-fly
+  `np.gradient`, the same clamped trilinear sampling and the same
+  acceptance tests. Points are split over `std::thread::scope` (no new
+  crate).
+- Speed: 7.3x on re-distancing (1.81 -> 0.25 s, 3.8M voxels).
+- Agreement: 6e-14 nm with numpy.
+- Bug found: `np.argwhere(...).astype(float)` is Fortran-ordered, and
+  numpy-rs `as_slice()` accepts F order, which silently scrambled the
+  rows. The kernels now reject non-C-contiguous input, with a test.
+
+**Bugs found while building the planar device**
+1. *Tie nodes.* Mask edges on whole nm land exactly on nodes.
+   - Problem: a node with phi = 0 was in neither a set nor its complement,
+     so the STI etch left a one-voxel slot of nothing at the active edge.
+   - Fix: a complement is -phi - EPS. Removals include their boundary.
+2. *float32 storage broke the tie arithmetic.* -(-1e-6 as float32) - 1e-6
+   = -3e-15, not 0. The poly fill claimed a node at every Si surface, and
+   every column read as "blocked" by the gate, so no As was implanted.
+   - Fix: level sets in float64, EPS = 2^-20.
+3. *Phantom zero sheets.* After the gate etch, the poly field is exactly
+   0 along the whole oxide surface.
+   - In re-distancing, Newton projection landed on them (distance 0
+     everywhere on the oxide top). Fix: a candidate must lie in a voxel
+     whose corners straddle the interface.
+   - For the implant footprint, the column minimum read 0 there.
+4. *Column-wise etch fronts* place lateral edges only to the nearest
+   column (spacer 7.21 nm for 8 nm). Two partial fixes failed: keeping
+   untouched nodes, then a per-column visibility term.
+   - Fix: removed = points with visible gas within `depth` straight up,
+     a vertical sliding minimum (`ndimage.minimum_filter1d`) of
+     -cummin(solid). Both are minima along columns of the solid field,
+     so etched faces keep sub-voxel positions, and overhangs shadow.
+   - Removals also update nodes exactly on a surface (phi <= 0), or stray
+     zeros poison the column minima (the STI recess read 2.0 for 2.25).
+   - Result: spacer width 8.0000 nm at every height on both sides,
+     including an off-node gate edge (30.3 nm), and STI recess 2.2500 nm.
+5. *Domain ceiling.* The 8 nm liner over the 41.5 nm gate reached the
+   47.5 nm ceiling, so the etch saw no gas above the gate.
+   - Fix: the template has headroom (gate + spacer + margin), and a
+     deposit reaching the ceiling now raises an error.
+6. *Implant defaults* gave a 48 nm junction for a 30 nm gate. Retuned:
+   extension ~11 nm, deep S/D ~31 nm.
+
+**Planar template.** Finite width with STI. Flow:
+1. substrate doping
+2. STI etch, fill, CMP
+3. well/Vt implant
+4. gate oxidation (on Si)
+5. poly, gate etch (stops on oxide)
+6. oxide strip (recesses STI by 1.5 tox)
+7. extension implant
+8. SiN spacer
+9. S/D implant
+10. metal contacts
+
+nmos/pmos, no halo. Default: Lg 30, tox 1.5, gate 40, spacer 8, W 60,
+STI 20 wide / 50 deep, voxel 1/0.5/1 nm, 127x312x101 nodes.
+
+**tcadview (process snapshots)**
+- Reads `.vti` (cell `region_id`/`material_id`; point `ls_<region>` int8
+  level sets, doping NaN outside semiconductors).
+- Region surfaces are contours of the level sets (wall nodes forced
+  outside, so regions close at the domain walls). Slices and sections are
+  clipped at the level sets.
+- "Material" field coloured per material. Opens at the final step, with a
+  "Process step" stepper.
+- The region tree is rebuilt per step, with visibility and opacity kept by
+  name. The field list updates (doping appears at the first implant).
+- The cut plot's signed-log axis puts its linear band 8 decades below the
+  peak (doping profiles were unreadable).
+
+**Timing (M3 Pro).** Planar build: 8.1 s numpy -> 1.4 s with the Rust
+kernel and cropped implant re-distancing. 20 snapshots: 2.4 s (5.7 s
+before threading). About 32 MB on disk, git-ignored.
+
+**Checks**
+- `testsuite/test_fab.py`, 21 tests, with and without Rust:
+  - re-distancing (sphere, plane), polygon distances
+  - operations vs analytic geometry:
+    - conformal corner radius sqrt(t^2 - d^2) to 0.06 nm
+    - spacer exactly t at three heights, off-node edge
+    - etch stop, selective growth, CMP + isotropic etch
+    - implant peak depth / erfc 1/2 at the edge, dose integral to 1e-3
+    - ceiling error
+  - the planar build vs its parameters:
+    - gate edges, gate height and oxide top to 0.05 nm
+    - spacer 8.000, STI depth/recess/width edges
+    - junction depth vs the analytic Gaussians to 0.1 nm
+  - no gas below the surface, the layer-2 YAML round trip (bitwise),
+    snapshots in the viewer model, pmos
+- `test_native.py`: Rust vs numpy re-distancing, F-order rejection.
+- All suites pass in the venv and the conda env:
+  - 1D 6/6, 2D 4/4
+  - VTK, native, tcadview 16/16, fab 21/21

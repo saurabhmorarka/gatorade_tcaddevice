@@ -78,8 +78,9 @@ class CutPlot(FigureCanvasQTAgg):
             self.ax.set_yscale("log")
         elif scale == "signed log":
             fin = np.abs(np.concatenate([c[1] for c in curves]))
-            fin = fin[np.isfinite(fin)]
-            self.ax.set_yscale("symlog", linthresh=max(1.0, float(fin.min()) if len(fin) else 1.0))
+            fin = fin[np.isfinite(fin) & (fin > 0)]
+            # linear band 8 decades below the peak: readable decades for doping-sized values
+            self.ax.set_yscale("symlog", linthresh=max(1.0, 1e-8 * float(fin.max())) if len(fin) else 1.0)
         self.ax.set_xlabel(xlabel)
         self.ax.set_ylabel(f"{name}" + (f" ({unit})" if unit else ""))
         if len(curves) > 1:
@@ -97,7 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1400, 900)
         self.session = None
         self.idx = 0
-        self.region_visible = {}
+        self.region_visible = {}          # by region name: process steps add regions
         self.region_opacity = {}
         self.cut = None                   # (p0, p1) in um
         self._pick_cut = []               # pending picked cut points
@@ -369,24 +370,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bias_slider.setRange(0, n - 1)
         self.bias_slider.setValue(0)
         self.bias_slider.blockSignals(False)
-        self.idx = 0
+        st0 = self.session.state(0)
+        self.idx = n - 1 if st0.is_process else 0          # a build opens on its final structure
+        if self.idx:
+            self.bias_slider.blockSignals(True)
+            self.bias_slider.setValue(self.idx)
+            self.bias_slider.blockSignals(False)
+        self.bias_box.setTitle("Process step" if st0.is_process else "Bias")
         st = self.state
-        self.region_visible = {k: True for k in range(len(st.region_names))}
-        self.region_opacity = {k: 1.0 for k in range(len(st.region_names))}
-        self.region_tree.blockSignals(True)
-        self.region_tree.clear()
-        for k, nm in enumerate(st.region_names):
-            it = QtWidgets.QTreeWidgetItem([nm, st.region_material(k)])
-            it.setData(0, QtCore.Qt.UserRole, k)
-            it.setCheckState(0, QtCore.Qt.Checked)
-            self.region_tree.addTopLevelItem(it)
-        self.region_tree.resizeColumnToContents(0)
-        self.region_tree.blockSignals(False)
+        self.region_visible, self.region_opacity = {}, {}
+        self._sync_regions()
         fields = st.fields()
         self.field_combo.blockSignals(True)
         self.field_combo.clear()
         self.field_combo.addItems(fields)
-        default = "ElectrostaticPotential" if "ElectrostaticPotential" in fields else \
+        default = model.MATERIAL_FIELD if st.is_process else \
+            "ElectrostaticPotential" if "ElectrostaticPotential" in fields else \
             ("DopingConcentration" if "DopingConcentration" in fields else fields[0])
         self.field_combo.setCurrentText(default)
         self.field_combo.blockSignals(False)
@@ -427,12 +426,56 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.scale_combo.currentText()
 
     def visible_regions(self):
-        return [k for k, v in self.region_visible.items() if v]
+        return [k for k, n in enumerate(self.state.region_names) if self.region_visible.get(n, True)]
+
+    def _opacity(self, k):
+        return self.region_opacity.get(self.state.region_names[k], 1.0)
+
+    def _sync_regions(self):
+        """Region tree = the current state's regions (a process step can add
+        or remove some); visibility and opacity are kept by name."""
+        st = self.state
+        rows = [(nm, st.region_material(k)) for k, nm in enumerate(st.region_names)]
+        if getattr(self, "_tree_rows", None) == rows:
+            return
+        self._tree_rows = rows
+        self.region_tree.blockSignals(True)
+        self.region_tree.clear()
+        for k, (nm, mat) in enumerate(rows):
+            it = QtWidgets.QTreeWidgetItem([nm, mat])
+            it.setData(0, QtCore.Qt.UserRole, k)
+            it.setCheckState(0, QtCore.Qt.Checked if self.region_visible.get(nm, True) else QtCore.Qt.Unchecked)
+            if st.is_process:
+                it.setIcon(1, self._swatch(model.material_color(mat)))
+            self.region_tree.addTopLevelItem(it)
+        self.region_tree.resizeColumnToContents(0)
+        self.region_tree.blockSignals(False)
+
+    @staticmethod
+    def _swatch(color):
+        pm = QtGui.QPixmap(12, 12)
+        pm.fill(QtGui.QColor(color))
+        return QtGui.QIcon(pm)
+
+    def _sync_fields(self):
+        """Field list = the current state's fields (doping appears at the
+        first implant of a build), keeping the selection when it exists."""
+        fields = self.state.fields()
+        if [self.field_combo.itemText(i) for i in range(self.field_combo.count())] == fields:
+            return
+        cur = self.field
+        self.field_combo.blockSignals(True)
+        self.field_combo.clear()
+        self.field_combo.addItems(fields)
+        self.field_combo.setCurrentText(cur if cur in fields else fields[0])
+        self.field_combo.blockSignals(False)
 
     def set_state(self, i):
         if self.session is None:
             return
         self.idx = int(np.clip(i, 0, len(self.session) - 1))
+        self._sync_regions()
+        self._sync_fields()
         self._update_bias_label()
         self._rebuild_section()
         self.render()
@@ -441,7 +484,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_bias_label(self):
         info = self.session.states[self.idx]
-        if len(self.session) > 1:
+        if self.state.is_process:
+            self.bias_label.setText(f"{info.name}   [step {self.idx + 1}/{len(self.session)}]")
+        elif len(self.session) > 1:
             self.bias_label.setText(f"{info.name}   [{self.idx + 1}/{len(self.session)}]")
         else:
             self.bias_label.setText(f"{info.name}  (only one bias point saved; for the whole sweep "
@@ -470,6 +515,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """What to draw for region k: the cells (2D), the outer surface
         (3D), or the enabled slices through it (3D)."""
         st = self.state
+        if st.is_process:
+            axes = [a for a in "xyz" if self.slice_on[a].isChecked()]
+            if not axes:
+                return [g for g in [st.surface(k)] if g is not None]
+            return [g for g in (st.slice_region(k, a, self._slice_origin(a)) for a in axes) if g is not None]
         g = st.region(k)
         if st.dim == 2 or g.n_cells == 0:
             return [g]
@@ -486,8 +536,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return out
 
     def _add_field(self, plotter, geom, k, lo, hi, title, bar):
-        """Draw region k's geometry `geom` coloured by the current field."""
+        """Draw region k's geometry `geom` coloured by the current field (or
+        by its material)."""
         st, name = self.state, self.field
+        if name == model.MATERIAL_FIELD:
+            plotter.add_mesh(geom, color=model.material_color(st.region_material(k)), opacity=self._opacity(k),
+                             show_edges=self.edges.isChecked(), edge_color="black", line_width=0.5,
+                             smooth_shading=geom.n_cells > 0 and st.is_process, reset_camera=False)
+            return
         m = geom.copy(deep=False)
         assoc = st.association(name)
         vals = model.scale_values(st.values(name, geom), self.scale)
@@ -497,7 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
             m.cell_data["_display"] = vals
         plotter.add_mesh(
             m, scalars="_display", preference=assoc, cmap=self.cmap_combo.currentText(), clim=(lo, hi),
-            nan_color=NAN_COLOR, opacity=self.region_opacity.get(k, 1.0), show_edges=self.edges.isChecked(),
+            nan_color=NAN_COLOR, opacity=self._opacity(k), show_edges=self.edges.isChecked(),
             edge_color="black", line_width=0.5, show_scalar_bar=not bar,
             scalar_bar_args=dict(title=title, vertical=False, position_x=0.2, position_y=0.03,
                                  width=0.6, height=0.09, fmt="%.3g", color="black",
@@ -529,8 +585,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for k in self.visible_regions():
             for geom in self._display_geometry(k):
                 self._add_field(self.plotter, geom, k, lo, hi, title, bar)
-                bar = True
-            if sliced:
+                bar = bar or name != model.MATERIAL_FIELD
+            if sliced and st.is_process:
+                surf = st.surface(k)
+                if surf is not None:                       # faint context around the slices
+                    self.plotter.add_mesh(surf, color=model.material_color(st.region_material(k)), opacity=0.08,
+                                          reset_camera=False)
+            elif sliced:
                 self.plotter.add_mesh(st.region(k).extract_feature_edges(), color="gray", opacity=0.4,
                                       reset_camera=False)
         if self.section is not None:
@@ -566,7 +627,7 @@ class MainWindow(QtWidgets.QMainWindow):
             g = sec.region(k)
             if g is not None:
                 self._add_field(pl, g, k, lo, hi, title, bar)
-                bar = True
+                bar = bar or self.field != model.MATERIAL_FIELD
                 pl.add_mesh(g.extract_feature_edges(boundary_edges=True, feature_edges=False,
                                                     manifold_edges=False, non_manifold_edges=False),
                             color="gray", line_width=1, reset_camera=False)
@@ -647,7 +708,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_region_check(self, item, col):
         k = item.data(0, QtCore.Qt.UserRole)
-        self.region_visible[k] = item.checkState(0) == QtCore.Qt.Checked
+        self.region_visible[self.state.region_names[k]] = item.checkState(0) == QtCore.Qt.Checked
         self.render()
 
     def _selected_regions(self):
@@ -657,12 +718,12 @@ class MainWindow(QtWidgets.QMainWindow):
         sel = self._selected_regions()
         if sel:
             self.opacity.blockSignals(True)
-            self.opacity.setValue(int(round(100 * self.region_opacity[sel[0]])))
+            self.opacity.setValue(int(round(100 * self._opacity(sel[0]))))
             self.opacity.blockSignals(False)
 
     def _on_opacity(self, v):
         for k in self._selected_regions():
-            self.region_opacity[k] = v / 100.0
+            self.region_opacity[self.state.region_names[k]] = v / 100.0
         self.render()
 
     def _update_slice_labels(self):
@@ -814,6 +875,9 @@ class MainWindow(QtWidgets.QMainWindow):
         depth y for a vertical cut), else against distance along the cut."""
         st = self.state
         p0, p1 = self.cut
+        if self.field == model.MATERIAL_FIELD:
+            self.cutplot.clear("Cut line: choose a field to plot (e.g. DopingConcentration)")
+            return
         d, v = st.cut_line(p0, p1, self.field)
         i = model.cut_axis(p0, p1)
         nd = 2 if st.dim == 2 else 3
