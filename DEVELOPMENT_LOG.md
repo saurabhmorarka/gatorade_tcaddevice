@@ -4887,3 +4887,74 @@ pass.
   reach into metal, because a box cell stops at the surface nodes, which
   face match guarantees. So the check, and the rebuild, can later be
   limited to the clipped cells near metal.
+
+## 49. Velocity saturation driven by the quasi-Fermi gradient ("hybrid"), opt-in
+
+The user's point: only the field along the current causes velocity
+saturation.
+- A literal E.J/|J| ("Eparallel") still throttles at the S/D junctions.
+  There the built-in field (about 5e5 V/cm) is parallel to the current
+  but balanced by diffusion, so it heats nobody.
+- The force that drives the carrier, and lies along its current, is the
+  quasi-Fermi gradient (J = -q mu n grad phin). That is Sentaurus'
+  default for high-field saturation (GradQuasiFermi).
+
+**What changed** (`solver2d/newton_solver_qf_2d.py`; backward compatible).
+- `velocity_saturation` = `False` | `True` / `"efield"` (unchanged, still
+  the default) | `"hybrid"` | `"gradqf"`.
+- `_edge_force` computes F per edge and carrier, with its 4 partials.
+  `hybrid` = w |dphi|/L + (1 - w) |dpsi|/L, w = c^2 / (c^2 + c_ref^2),
+  c_ref = 1e16: the gradient where the carrier is dense, the field where
+  it is sparse. This is the avalanche solver's resolution of the same
+  trade-off.
+- `edge_mobility` takes n, p, phin and phip and returns the full mobility
+  derivatives; `edge_currents` adds them to the psi AND phi partials.
+- The YAML can name the force: `physics: velocity_saturation: hybrid`
+  (`main2d_mosfet_sweep.py`; `btbt/main_btbt2d_sweep.py` no longer casts
+  it to bool).
+- *Warm-up* (`newton_solve_2d(vsat_warmup=True)`). With a quasi-Fermi
+  force, each point is converged with "efield" first, then with the
+  requested force from there.
+  - Why: a new contact bias enters as a phi jump across the first edge
+    (0.05 V / 0.5 nm, about 1e6 V/cm).
+  - A quasi-Fermi force reads that jump as saturation, and a saturated
+    edge carries about q c vsat whatever its phi drop. So the phi
+    conductance collapses and Newton diverged: residual 1e7 with LU too,
+    and ILU failures on every octree mesh.
+  - The edge field is blind to phi and settles it first.
+
+**Tests.** `testsuite/test_vsat_force.py`:
+- all 8 edge-current partials for every force against central finite
+  differences (densities 1e12-1e20). A 1% error in one partial is
+  caught (checked by mutation).
+- force physics: with a flat phi in a 1e6 V/cm field, efield saturates
+  and gradqf does not; hybrid follows gradqf when dense and efield when
+  sparse.
+
+The 2D golden tests pass (efield default unchanged).
+
+**2D NMOS sweep** (`configs/input_mosfet_2d.yaml`, Lg 0.5 um, 6 curves,
+138 points):
+
+| force | converged | Newton iterations | Ion | DIBL | SS lin/sat |
+|---|---|---|---|---|---|
+| efield | 138/138 | 811 | 201.1 uA/um | 40.6 | 68.3 / 70.9 |
+| hybrid | 138/138 | 875 | 201.9 uA/um | 40.3 | 68.3 / 70.8 |
+| gradqf | singular factorization | - | - | - | - |
+
+**3D planar device, Id(Vg=0.6, Vd=0.05)** (PETSc ILU):
+
+| mesh | nodes | hybrid | efield (section 47) | no vsat |
+|---|---|---|---|---|
+| oct default | 65.7k | 1.3447e-5 | 1.074e-5 | 1.422e-5 |
+| oct root 8-16-8 | 47.3k | 1.3324e-5 | 1.155e-5 | 1.411e-5 |
+| oct root 16-16-16 | 58.1k | 1.3437e-5 | 1.009e-5 | 1.421e-5 |
+| oct fine | 94.1k | 1.2970e-5 | 1.130e-5 | 1.371e-5 |
+| rect default / fine | 68k / 169k | 1.3012e-5 / 1.2891e-5 | 1.139e-5 / 1.127e-5 | 1.369e-5 / 1.359e-5 |
+
+- The layout spread drops from about 14% to 0.9%.
+- Saturation now costs about 5% at Vd = 50 mV, not 20%.
+- Solve time is about the same (default octree 31 s vs 30 s).
+- Coarse octrees remain about 3.5% above the fine meshes. That is
+  resolution, for the defaults study.
+- Off-current: octree 7.8-8.2e-10, rectilinear 8.5-9.3e-10.

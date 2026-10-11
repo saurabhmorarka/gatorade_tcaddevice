@@ -89,7 +89,7 @@ def _context(config_path):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             mesh = build_mesh2d(domain, mat=mat, **mesh_opts)
-        vsat = bool((cfg.get("physics") or {}).get("velocity_saturation", False))
+        vsat = (cfg.get("physics") or {}).get("velocity_saturation", False)   # bool or a force name
         geom = TriGeom(mesh, mat)
         _, cv_semi, _ = _mesh_semi_geometry(mesh)
         ni_arr, _ = _mesh_ni_edge_g(mesh, mat)

@@ -39,7 +39,8 @@ def capped(kinds_capped, h_cap):
     return f
 
 
-VSAT = os.environ.get("TCAD_VSAT", "1") != "0"     # TCAD_VSAT=0: no velocity saturation
+# TCAD_VSAT: 0 = off, 1 = on with the edge-field force, or a force name (efield | hybrid | gradqf)
+VSAT = {"0": False, "1": True}.get(os.environ.get("TCAD_VSAT", "1"), os.environ.get("TCAD_VSAT"))
 
 RUNS = {
     "cart default": ("cartesian", {}),

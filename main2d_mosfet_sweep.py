@@ -51,7 +51,7 @@ from mos.mos_params import MOSDevice
 from solver2d.current import contact_current
 from solver2d.mosfet_metrics import mosfet_metrics
 from solver2d.efield2d import electric_field_2d
-from solver2d.newton_solver_qf_2d import newton_solve_2d
+from solver2d.newton_solver_qf_2d import newton_solve_2d, vsat_force
 
 _CM_TO_UM = 1.0e4
 _UM_TO_CM = 1.0e-4
@@ -200,7 +200,8 @@ def _context(config_path, extrude=None):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             mesh = build_mesh2d(domain, mat=mat, **mesh_opts)
-        vsat = bool((cfg.get("physics") or {}).get("velocity_saturation", False))
+        vsat = (cfg.get("physics") or {}).get("velocity_saturation", False)   # bool or a force name
+        vsat_force(vsat)                                                       # validate early
         eq = solve_mosfet(mesh, mat, dev, Cs, 0.0, 0.0, velocity_saturation=vsat)
         if extrude:
             from mesh3d.extrude import extrude_mesh
@@ -473,9 +474,9 @@ def main():
               f"{res['newton_iters']} Newton iterations, {res['time_s']:.1f}s")
         for line in res["log"]:
             print(line)
-    vsat_on = bool((cfg.get("physics") or {}).get("velocity_saturation", False))
+    force = vsat_force((cfg.get("physics") or {}).get("velocity_saturation", False))
     print(f"all curves: {wall:.1f}s wall-clock ({len(tasks)} curves as {len(segments)} parallel segments), "
-          f"velocity saturation {'ON' if vsat_on else 'OFF'}")
+          f"velocity saturation {'ON (' + force + ')' if force else 'OFF'}")
 
     transfer = []
     for res in results[:len(vds_transfer)]:
