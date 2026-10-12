@@ -151,25 +151,40 @@ def _predict(prev, cur, p_next):
     return {k: s1[k] + np.clip(a * (s1[k] - s0[k]), -0.5, 0.5) for k in _FIELDS}
 
 
-def continuation(solve_at, p0, s0, targets, prev=None, log=None):
+def _predict_psi(prev, cur, p_next):
+    """Secant predictor for psi only; the quasi-Fermi levels stay at the
+    last converged state. For a GATE walk: the gate moves psi, while phin
+    and phip stay pinned by the unchanged source/drain contacts, and their
+    extrapolated change is mostly noise from the undetermined regions -
+    on the 3D planar device at Vds = 1 V the full secant guess cost up to
+    15 Newton iterations per step, this one 5 (DEVELOPMENT_LOG 57). Not
+    for a drain ramp, whose contact quasi-Fermi levels move: there the
+    full secant is 6x cheaper."""
+    g = _predict(prev, cur, p_next)
+    return {"psi": g["psi"], "phin": cur[1]["phin"], "phip": cur[1]["phip"]}
+
+
+def continuation(solve_at, p0, s0, targets, prev=None, log=None, h_init=H_INIT, fast_iters=FAST_ITERS,
+                 psi_only=False):
     """Walk the bias parameter from p0 (converged state s0) through each
-    value in `targets` (in order), with a secant predictor and adaptive
-    sub-stepping: a step that fails is retried at half size (up to
-    MAX_HALVINGS times), a step that converges in <= FAST_ITERS iterations
+    value in `targets` (in order), with a secant predictor (psi only if
+    psi_only: for a gate walk, see _predict_psi) and adaptive sub-stepping
+    from a first step h_init: a step that fails is retried at half size (up
+    to MAX_HALVINGS times), a step that converges in <= fast_iters iterations
     doubles the next step (never overshooting the next requested target).
     Returns ({target: state}, n_newton_iterations, last (prev, cur) pair);
     stops early (keeping what converged) if a step can't be completed."""
     out = {}
     cur = (p0, s0)
     total_it = 0
-    h = H_INIT
+    h = h_init
     for tgt in targets:
         while abs(tgt - cur[0]) > 1e-12:
             remaining = tgt - cur[0]
             h = np.sign(remaining) * min(abs(h), abs(remaining))
             for _ in range(MAX_HALVINGS + 1):
                 p_next = cur[0] + h
-                r = solve_at(p_next, _predict(prev, cur, p_next))
+                r = solve_at(p_next, (_predict_psi if psi_only else _predict)(prev, cur, p_next))
                 total_it += r["iters"]
                 if _converged(r):
                     break
@@ -179,7 +194,7 @@ def continuation(solve_at, p0, s0, targets, prev=None, log=None):
                     log(f"    step to {p_next:+.4f} failed after {MAX_HALVINGS} halvings - curve stopped")
                 return out, total_it, (prev, cur)
             prev, cur = cur, (p_next, r)
-            if r["iters"] <= FAST_ITERS:
+            if r["iters"] <= fast_iters:
                 h *= 2.0
         out[float(tgt)] = cur[1]
     return out, total_it, (prev, cur)

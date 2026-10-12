@@ -284,8 +284,16 @@ def _write_states(task, d, states):
     return entries
 
 
+# Gate-walk step control (DEVELOPMENT_LOG 57): extrapolate only psi (the
+# gate moves psi; the quasi-Fermi levels stay pinned by the source/drain
+# contacts), start at 0.05 V (a first 0.1 V step at Vds = 1 V failed after
+# 15 iterations), and double the step after <= 5 iterations (the psi-only
+# steps take 5). Full planar device, Vds = 1 V walk: 119 -> 69 iterations.
+GATE_WALK = dict(h_init=0.05, fast_iters=5, psi_only=True)
+
+
 def run_curve(task):
-    """One segment of an Id-Vg curve at fixed task['Vds']: from the curve's
+    """One Id-Vg curve (or a segment of one) at fixed task['Vds']: from the curve's
     Vgs = 0 state (task['base'] key into the context, else ramped here from
     equilibrium), walk by continuation through task['vgs'] - the walk from
     0 to the first value is adaptive and not recorded."""
@@ -301,7 +309,7 @@ def run_curve(task):
             return dict(task=task, points={}, entries=[], iters=it0, time_s=time.perf_counter() - t0)
         base = ramp[Vds]
     vgs = sorted(v for v in task["vgs"] if v > 0)
-    states, it1, _ = continuation(_solver_at(d, None, Vds), 0.0, base, vgs)
+    states, it1, _ = continuation(_solver_at(d, None, Vds), 0.0, base, vgs, **GATE_WALK)
     if task.get("include_zero", True):
         states = {0.0: base, **states}
     pts = {v: drain_current(d, r) for v, r in states.items()}
@@ -384,6 +392,35 @@ def write_state_octree(path, d, state, bias, label):
     width for a half-width solve."""
     from solver2d.vtk_export import FIELD_UNITS, state_point_data
     mesh = d["mesh"]
+    if "vtu_geom" not in d:                       # the cells and points depend on the mesh only: once
+        d["vtu_geom"] = _octree_vtu_geometry(d)
+    inv, dev, mirrored, pts, cells_lab = d["vtu_geom"]
+    pd_mesh = state_point_data(mesh, d["mat"], state)
+    pdat = {}
+    for k, v in pd_mesh.items():
+        v = np.asarray(v)
+        ok = (dev >= 0).reshape((-1,) + (1,) * (v.ndim - 1))
+        a = np.where(ok, v[np.maximum(dev, 0)], np.nan)
+        if v.ndim == 2:                           # a vector: its z component flips in the mirror image
+            a[mirrored, 2] *= -1.0
+        pdat[k] = a
+    region_names, materials, region_mat = _region_info(d)
+    cnames = [c.name for c in mesh.domain.contacts]
+    vtk_io.write_vtu(path, pts, inv.reshape(-1, 8), vtk_io.VTK_HEXAHEDRON, point_data=pdat,
+                     cell_data={"region_id": cells_lab.astype(np.int32),
+                                "material_id": region_mat[cells_lab].astype(np.int32)},
+                     field_data={"region_names": region_names, "material_names": materials,
+                                 "contact_names": cnames,
+                                 "contact_bias": np.array([float(bias.get(c, 0.0)) for c in cnames]),
+                                 "label": label, "field_units": [f"{k}:{v}" for k, v in FIELD_UNITS.items()]},
+                     compress=True)
+
+
+def _octree_vtu_geometry(d):
+    """write_state_octree's mesh-only part: the leaf hexahedra (mirrored for
+    a half-width solve), their unique corner points, and each point's
+    device node (-1 inside conductors)."""
+    mesh = d["mesh"]
     lab, origin, h = d["voxels"]
     LO, HI, leaf_label = mesh.leaves
     keep = leaf_label >= 0
@@ -391,7 +428,6 @@ def write_state_octree(path, d, state, bias, label):
     nshape = tuple(np.array(lab.shape) + 1)
     gid = np.full(nshape, -1, dtype=np.int64)
     gid[tuple(mesh.grid_index.T)] = np.arange(len(mesh.grid_index))
-    pd_mesh = state_point_data(mesh, d["mat"], state)
     corners = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
     cidx = np.stack([np.stack([np.where(o[a], HI[:, a], LO[:, a]) for a in range(3)], axis=1) for o in corners],
                     axis=1)                                             # (L, 8, 3) node grid indices
@@ -410,25 +446,8 @@ def write_state_octree(path, d, state, bias, label):
         src[:, 2] = np.where(src[:, 2] > lab.shape[2], 2 * lab.shape[2] - src[:, 2], src[:, 2])
     dev = gid[tuple(src.T)]
     mirrored = uniq[:, 2] > lab.shape[2] if d["half_z"] else np.zeros(len(uniq), bool)
-    pdat = {}
-    for k, v in pd_mesh.items():
-        v = np.asarray(v)
-        ok = (dev >= 0).reshape((-1,) + (1,) * (v.ndim - 1))
-        a = np.where(ok, v[np.maximum(dev, 0)], np.nan)
-        if v.ndim == 2:                           # a vector: its z component flips in the mirror image
-            a[mirrored, 2] *= -1.0
-        pdat[k] = a
     pts = (origin + uniq * h) * 1e-3                                    # um
-    region_names, materials, region_mat = _region_info(d)
-    cnames = [c.name for c in mesh.domain.contacts]
-    vtk_io.write_vtu(path, pts, inv.reshape(-1, 8), vtk_io.VTK_HEXAHEDRON, point_data=pdat,
-                     cell_data={"region_id": cells_lab.astype(np.int32),
-                                "material_id": region_mat[cells_lab].astype(np.int32)},
-                     field_data={"region_names": region_names, "material_names": materials,
-                                 "contact_names": cnames,
-                                 "contact_bias": np.array([float(bias.get(c, 0.0)) for c in cnames]),
-                                 "label": label, "field_units": [f"{k}:{v}" for k, v in FIELD_UNITS.items()]},
-                     compress=True)
+    return inv, dev, mirrored, pts, cells_lab
 
 
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
@@ -452,40 +471,30 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     d["base"] = ramps
     log(f"  drain ramps: {time.perf_counter() - t0:.0f} s")
     vgs = list(np.round(np.arange(vgs_step, vgs_max + 1e-9, vgs_step), 6))
-    # Split every curve into segments so all performance cores work: each
-    # segment walks from its curve's Vgs = 0 state to its first point (not
-    # recorded) and then through its points; longest-first so no straggler
-    # starts last. (The same scheme as main2d_mosfet_sweep.split_task.)
-    # Equal segments per curve: weighting by cost (more segments for the
-    # high-Vds curve) was slower, 243 -> 268 s on the full planar device -
-    # each extra segment repeats a walk from Vgs = 0 that costs about as
-    # much as its points at high Vds (DEVELOPMENT_LOG 52).
-    n_work = workers or performance_cores()
-    per_curve = max(1, n_work // max(1, len([v for v in vds if v in ramps])))
+    # One worker per curve. Splitting a curve into segments (each walking
+    # from Vgs = 0 to its first point) cannot shorten it: a segment's walk
+    # takes the same continuation steps as the curve, so the last segment
+    # costs about the whole curve, and 6 busy processes slow each other
+    # (a walk ran ~1.7x slower). Full planar device, octree: 92 s split
+    # vs 83 s per curve; rectilinear 65 vs 56 s (DEVELOPMENT_LOG 57).
     tasks = []
     for v in vds:
         if v not in ramps:
             log(f"  Vds={v:g} V: drain ramp failed - curve skipped")
             continue
-        k = min(per_curve, len(vgs))
-        size = -(-len(vgs) // k)
-        for c in range(k):
-            chunk = vgs[c * size:(c + 1) * size]
-            if chunk:
-                tasks.append(dict(config=config, Vds=v, vgs=chunk, top_nm=top_nm, half_z=half_z, vtk=vtk,
-                                  vtk_keep=(0.0, max(vgs)), mesher=mesher, include_zero=(c == 0),
-                                  vtk_dir=os.path.join(out_dir, "vtk")))
-    tasks.sort(key=lambda t: -max(t["vgs"]))                     # far segments walk longest
+        tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
+                          vtk_keep=(0.0, max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk")))
+    n_work = workers or performance_cores()
     ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
     # one BLAS / OpenMP thread per worker process (inherited at spawn)
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
         os.environ.setdefault(var, "1")
     with ProcessPoolExecutor(max_workers=min(n_work, len(tasks)), initializer=_init_worker,
                              initargs=(key, ctx)) as ex:
-        seg_results = list(ex.map(run_curve, tasks))
+        curve_results = list(ex.map(run_curve, tasks))
     results = []
     for v in vds:
-        parts = [r for r in seg_results if r["task"]["Vds"] == v]
+        parts = [r for r in curve_results if r["task"]["Vds"] == v]
         if not parts:
             continue
         pts, entries = {}, {}
@@ -503,7 +512,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
         ids = [r["points"][x] / W_um for x in v]
         curves.append(dict(Vds=r["task"]["Vds"], Vgs=np.array(v), Id=np.array(ids)))
         log(f"  Vds={r['task']['Vds']:g} V: {len(v)} points, {r['iters']} Newton iterations, "
-            f"slowest segment {r['time_s']:.0f} s")
+            f"{r['time_s']:.0f} s")
         if r.get("entries"):
             vtk_io.write_pvd(os.path.join(out_dir, "vtk", f"idvg_Vds{r['task']['Vds']:g}.pvd"), r["entries"])
     with open(os.path.join(out_dir, "ids_vgs.csv"), "w", newline="") as f:
