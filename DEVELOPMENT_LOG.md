@@ -5450,3 +5450,43 @@ curve 39). Rectilinear 70 -> 57 s. Metrics unchanged: octree Vt 0.204 ->
 **Next.** The serial stages are now ~half the run (equilibrium 13 s,
 drain ramps 22 s). The user's direction: solve Poisson first, before any
 continuity / coupled Newton.
+
+## 58. Phase A speed pass, part 4: Poisson first
+
+The user's direction: solve Poisson before any continuity / coupled
+Newton. New `poisson_solve` in `solver2d/newton_solver_qf_2d.py`: the
+coupled system's own Poisson rows for psi with phin, phip frozen
+(Laplacian + diagonal charge term; no mobility, current or recombination,
+so the same for any transport model), Newton with per-node clip 1 V, a
+scalar ILU solver kept per mesh.
+
+**Measured (full planar 3D device, one process):**
+
+| where Poisson runs first | equilibrium | drain ramp | Vds = 1 V walk |
+|---|---|---|---|
+| nowhere (was) | 5.2 s, 9 its | 21.6 s, 64 its | 28.2 s, 69 its |
+| every solve (Gummel half-step before each warm start) | 2.9 s, 2 its | 25.9 s, 60 its | 36.1 s, 72 its (+15 s of Poisson) |
+
+Under bias, frozen quasi-Fermi levels move psi without letting carriers
+flow in from the contacts, so the coupled iterations do not drop.
+Rejected for warm starts.
+
+**Kept: Poisson start for an equilibrium cold start** (`poisson_start=True`
+default): when every semiconductor contact sits at one Fermi level,
+phin = phip = that level is exact, so psi from Poisson is the solution and
+the coupled Newton only confirms it. Two details:
+- Only in equilibrium. A cold start under bias with flat quasi-Fermi
+  levels is worse than local neutrality: the 2D diode's cold retry at
+  Va = 0.2 V then failed (currents 1e8x off).
+- At least 2 coupled iterations after it: the first already passes the
+  update test, leaving the singularity-breaking perturbation at ~1e-12 V
+  (the diode's equilibrium current 6e-9 instead of ~1e-13 A/cm^2; now
+  1e-12, inside the golden floor).
+
+**Result.** Equilibrium 3D: octree 5.1 -> 1.6 s, rectilinear 3.7 -> 1.5 s,
+same solution (1e-9 V). Full I-V: octree 75 -> 73 s, rectilinear 57 ->
+54 s, metrics unchanged. 3D octree test 22 -> 14 s. Tests: 114 + 6 pass,
+no golden changed.
+
+**Where the 73 s goes now:** mesh build ~9 s, equilibrium 2 s, drain ramps
+22 s (serial), the Vds = 1 V curve 39 s (69 Newton iterations + VTK).

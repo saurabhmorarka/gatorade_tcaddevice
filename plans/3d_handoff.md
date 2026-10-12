@@ -30,7 +30,16 @@ tell the full story with numbers.
   - the repeated Vgs = 0 walks of the segments.
 - Profiling tool: `fab/profile_iv.py` (`--dump DIR` saves the walk's
   linear systems for offline solver comparisons).
-- RESUME HERE (written 2026-10-11 night, before a likely context clear):
+- RESUME HERE, NEWEST (2026-10-12): parts 1-2 merged to `main` and pushed
+  (fb6fa9e). On `3d-speed` since, LOCAL (ask before push/merge):
+  part 3 (DEVELOPMENT_LOG 57: psi-only gate-walk predictor, one worker
+  per curve, cached octree VTU geometry) and part 4 (58: Poisson-first
+  equilibrium cold start). Octree full I-V 105 -> 73 s, rectilinear
+  70 -> 54 s, metrics unchanged. Remaining: mesh build ~9 s, drain ramps
+  22 s serial, Vds = 1 V curve 39 s. Next candidates: per-iteration cost
+  (assembly 86 ms + line-search residuals 46 ms each), mesh build, the
+  serial drain ramp (e.g. ramp each Vds inside its own worker).
+- RESUME HERE (older, 2026-10-11 night; superseded where it disagrees):
   - State: `3d-speed` has two LOCAL commits (ec985e5 part 1, 6970877
     part 2). Nothing pushed or merged: ask the user before either.
   - Reference numbers (6 performance cores, full planar device):

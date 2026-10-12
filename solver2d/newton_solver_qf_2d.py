@@ -782,12 +782,71 @@ def _row_absmax(J):
     return np.maximum.reduceat(np.abs(J.data), J.indptr[:-1])
 
 
+_POISSON_SOLVERS = {}
+
+
+def _poisson_linear_solver(mesh):
+    """A scalar (psi-only) LinearSolver per mesh, kept like
+    default_linear_solver's: the pattern never changes, so its ILU is
+    reused across calls."""
+    key = id(mesh)
+    entry = _POISSON_SOLVERS.get(key)
+    if entry is None or entry[0]() is not mesh:
+        entry = (weakref.ref(mesh), LinearSolver(rtol=1e-10))
+        _POISSON_SOLVERS[key] = entry
+    return entry[1]
+
+
+def poisson_solve(mesh, mat, psi, phin, phip, is_contact, psi_bc, poisson_scale, tol=1e-9, maxiter=60,
+                  max_step=1.0, verbose=False):
+    """Nonlinear Poisson for psi with phin and phip FROZEN (the Gummel
+    half-step): the same Poisson rows as the coupled system, with no
+    mobility, current or recombination term - so it is cheap and the same
+    for any transport model. Newton with each node's update clipped to
+    max_step V (the Boltzmann charge makes the problem monotone, so this
+    always converges). Returns (psi, iterations)."""
+    N = len(mesh.points)
+    ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
+    Vt = mat.Vt
+    dEi = _mesh_dEi(mesh)
+    _, cv_semi, _ = _mesh_semi_geometry(mesh)
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    free = ~is_contact
+    # the Laplacian rows (fixed): row r = sum_e g_e (psi_j - psi_r) / cv_r / scale, Dirichlet at contacts
+    cv = mesh.cv_area
+    r = np.concatenate([ii, jj, ii, jj])
+    c = np.concatenate([jj, ii, ii, jj])
+    v = np.concatenate([g_e / cv[ii], g_e / cv[jj], -g_e / cv[ii], -g_e / cv[jj]]) / poisson_scale
+    keep = free[r]
+    Lap = sp.csr_matrix((v[keep], (r[keep], c[keep])), shape=(N, N))
+    semi_frac = cv_semi / cv
+    lin = _poisson_linear_solver(mesh)
+    psi = psi.copy()
+    psi[is_contact] = psi_bc
+    it = 0
+    for it in range(1, maxiter + 1):
+        n, p = _densities(psi, phin, phip, ni_arr, Vt, dEi)
+        F = Lap @ psi - Q * (n - p - mesh.Cdop) * semi_frac / poisson_scale
+        F[is_contact] = 0.0
+        d = np.where(free, -Q * (n + p) / Vt * semi_frac / poisson_scale, 1.0)
+        J = Lap + sp.diags(d)
+        dpsi = lin.solve(J, -F)
+        dpsi[is_contact] = 0.0
+        dpsi = np.clip(dpsi, -max_step, max_step)
+        psi += dpsi
+        if verbose:
+            print(f"  Poisson it {it}: max|dpsi| = {np.abs(dpsi).max():.2e}")
+        if np.abs(dpsi).max() < tol:
+            break
+    return psi, it
+
+
 def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50, verbose=False,
                      psi_init=None, phin_init=None, phip_init=None,
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
                      damping="line_search", cold_retry=True, velocity_saturation=False,
                      generation=None, linear_solver="auto", vsat_warmup=True, qf_box=True,
-                     vsat_fallback=True):
+                     vsat_fallback=True, poisson_start=True):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -904,7 +963,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         # differs so much that continuation sweeps failed (2D NMOS).
         kw = dict(f_tol=f_tol, verbose=verbose, psi_bc_override=psi_bc_override,
                   phin_bc_override=phin_bc_override, phip_bc_override=phip_bc_override, damping=damping,
-                  generation=generation, linear_solver=linear_solver, qf_box=qf_box)
+                  generation=generation, linear_solver=linear_solver, qf_box=qf_box, poisson_start=poisson_start)
         try:
             r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
                                 phip_init=phip_init, maxiter=min(maxiter, VSAT_DIRECT_MAXITER), cold_retry=False,
@@ -1009,6 +1068,23 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         rng = np.random.default_rng(0)
         psi0 = psi_eq.copy()
         psi0[contact_point_idx] = psi_bc
+        qf_eq = np.concatenate([phin_bc[semi_bc], phip_bc[semi_bc]])
+        if poisson_start and len(qf_eq) and np.ptp(qf_eq) < 1e-12:
+            # Equilibrium (every semiconductor contact at one Fermi level):
+            # phin = phip = that level everywhere is exact, so solve Poisson
+            # for psi first and leave the coupled Newton ~nothing to do. Full
+            # planar 3D device: 9 -> 2 coupled iterations, 5.3 -> 1.7 s
+            # (DEVELOPMENT_LOG 58). Not under bias: there flat quasi-Fermi
+            # levels are a worse start than local neutrality (the 2D diode's
+            # cold retry at 0.2 V then failed), and as a Gummel half-step
+            # before every warm start it cost more than it saved.
+            flat = np.full(N, qf_eq[0])
+            psi0, _ = poisson_solve(mesh, mat, psi0, flat, flat, is_contact_full, psi_bc, poisson_scale)
+            # psi is then right from the first coupled iteration, which
+            # would pass the update test with the perturbation below only
+            # cut to ~1e-12 V (the 2D diode's equilibrium current 6e-9
+            # instead of 1e-13 A/cm^2): take at least a second iteration.
+            state["min_iters"] = 2
         phin0 = 1e-6 * Vt * rng.standard_normal(N)
         phin0[contact_point_idx] = phin_bc
         phip0 = 1e-6 * Vt * rng.standard_normal(N)
@@ -1220,6 +1296,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                     and upd_all < QUAD_PREDICT_MAX and upd_prev > upd_all and res_norm < RES_PREDICT_MAX):
                 converged = upd_all ** 3 / upd_prev ** 2 < PSI_UPDATE_TOL
             upd_prev = upd_all if (accepted and step == 1.0) else None
+            converged = converged and it >= state.get("min_iters", 1)
             if converged:
                 state["converged"] = True
                 break
