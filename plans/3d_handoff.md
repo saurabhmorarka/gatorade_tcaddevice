@@ -1,160 +1,178 @@
-# 3D program: handoff (written 2026-10-04 evening, resume 2026-10-05)
+# 3D program: handoff
 
-## COLD START (2026-10-11): read this first if the conversation was cleared
+## COLD START (2026-10-11, after the merge): read this first
 
-This section is meant to be enough to continue with zero chat context.
-The detailed "START HERE" passdown below has the numbers;
-DEVELOPMENT_LOG.md sections 41-46 have the full story.
+Written to resume with ZERO chat context. The later sections of this file
+are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
+tell the full story with numbers.
+
+### 0. Where things stand (one paragraph)
+`main` now holds Phases 0-3 and the octree mesher, merged and pushed
+(DEVELOPMENT_LOG 54).
+- *Device:* a 3D planar NMOS is built by the virtual fab, meshed by the
+  exact-Voronoi octree, and solved by drift-diffusion with hybrid
+  quasi-Fermi velocity saturation.
+- *Full I-V:* 2 x 13 points in 243-261 s, all performance cores.
+- *Viewer:* exact material outlines, a zoomable cut plot, and E/current
+  vectors.
+- *Tests:* the suite covers 1D, 2D and 3D (110 tests, about 3.5 min,
+  plus the octree tests under conda).
+- *Next:* the user said: "before starting next phases, check with me".
+  DO NOT start a phase; present the options in section 6 and wait.
 
 ### 1. Working rules the user set (also in memory, MEMORY.md)
-- *Git.* Work on feature branches. Never add Claude attribution
-  (Co-Authored-By / "Generated with") to commits or PRs, and never
-  rewrite old pushed history. Confirm before any push or merge.
-- *Log.* Add a DEVELOPMENT_LOG.md entry with every commit.
-- *Plans.* Show the plan before a big implementation. The user
-  approves; then build.
+- *Git.*
+  - Work on feature branches. Never add Claude attribution
+    (Co-Authored-By / "Generated with") to commits or PRs.
+  - Never rewrite pushed history. Confirm before any push or merge,
+    unless the user says to do it (as they did for this merge).
+- *Log.* A DEVELOPMENT_LOG.md entry with every commit.
+- *Plans.* Show the plan before a big implementation; the user approves,
+  then build.
+- *Long-term fixes.* Everything must hold for FinFET, nanosheet, any
+  gate / oxide / contact style. No planar-only shortcuts. Prefer exact
+  geometric or numerical invariants backed by a mandatory gate (memory
+  tcad1d-geometry-general-fixes).
 - *Mesh quality.* A mandatory gate on every build, never opt-in.
-  Non-obtuse / Voronoi-admissible meshes only.
-- *Geometry.* The user inspects 3D structures closely: no slivers,
-  ledges or voids. The viewer must show exactly what the solver sees.
+  Voronoi-admissible meshes only.
+- *Geometry.* The user inspects 3D structures closely (no slivers, ledges
+  or voids); the viewer must show exactly what the solver sees.
 - *Physics.*
-  - Metals carry no unknowns: fixed-potential Dirichlet surfaces.
-  - Contacts are process-built metal volumes; Schottky (tunneling)
-    contacts come later.
-  - Planar devices always have finite width with STI.
-  - ILD between the spacer and the contacts; contacts as tall as or
-    taller than the gate.
-- *Speed.* Runtime matters: the full 3D I-V target is about 1 minute.
-  Use Rust (PyO3, `native/`) where it gives 5-10x or more; profile
-  first.
-- *Communication.* The user likes short, plain status updates and
-  honest numbers.
+  - Metals carry no unknowns (Dirichlet surfaces).
+  - Contacts are process-built metal volumes.
+  - Planar devices have finite width with STI.
+  - ILD sits between the spacer and the contacts.
+- *Speed.* The full 3D I-V target is about 1 minute.
+  - Rust (PyO3, `native/`) only for 5-10x or more, after profiling.
+  - GPU only for more than 3x TOTAL gain.
+  - Use all performance cores.
+- *Tests.* The user wants a super-quick suite. Each 1D/2D/3D case stays
+  within the other cases' time (the 3D case takes 42 s).
+- *Communication.*
+  - Short, plain status updates and honest numbers, including negative
+    results.
+  - The user runs commands in their own terminal, so give the
+    `.venv/bin/python` form (system python3 lacks PyVista/Qt).
 
 ### 2. Environments
-- *venv:* `.venv/bin/python`, no PETSc (SciPy SuperLU).
-- *conda:* `~/miniconda3/envs/tcad/bin/python`, with PETSc. Use it for
-  3D solves. `TCAD_LINSOLVE=petsc_ilu` or `petsc_lu`.
-- *Rust kernels* (`native/`): rebuild BOTH environments after any
-  change, from `native/`:
+- *venv:* `.venv/bin/python`, no PETSc (SciPy SuperLU). Viewer, tests.
+- *conda:* `~/miniconda3/envs/tcad/bin/python`, with PETSc. Use it for 3D
+  solves: `TCAD_LINSOLVE=petsc_ilu` (fast) or `petsc_lu`.
+  `fab simulate` defaults to petsc_lu unless the variable is set.
+- *Rust kernels* (`native/`): rebuild BOTH environments after any change,
+  from `native/`:
   - `env -u CONDA_PREFIX VIRTUAL_ENV=$PWD/../.venv ../.venv/bin/maturin develop --release`
   - `env -u VIRTUAL_ENV CONDA_PREFIX=$HOME/miniconda3/envs/tcad ~/miniconda3/envs/tcad/bin/maturin develop --release`
 - *Tests:*
-  - `.venv/bin/python -m unittest testsuite.test_fab testsuite.test_tcadview testsuite.test_octree`
-  - also run `test_octree` under conda (its rectilinear comparison
-    needs PETSc)
-  - 2D golden tests: `testsuite.test_2d_examples`, about 2 min. Run
-    them whenever shared solver code changes; that's the merge gate.
+  - Everything: `.venv/bin/python -m unittest discover -s testsuite`
+    (110 tests, about 3.5 min, 1 skip). Plus
+    `~/miniconda3/envs/tcad/bin/python -m unittest testsuite.test_octree`
+    (its rectilinear comparison needs PETSc).
+  - Goldens, re-capture only after independent verification:
+    - `testsuite/test_2d_examples.py --capture <name>`
+    - `testsuite/test_3d_examples.py --capture`
+    - the 1D ones: `testsuite/capture_golden.py`
+- *Run things:*
+  - `TCAD_LINSOLVE=petsc_ilu ~/miniconda3/envs/tcad/bin/python -m fab simulate configs/fab_planar.yaml --mesher octree --out out/fab_planar_octree_par`
+  - `.venv/bin/python -m tcadview out/fab_planar_octree_par/vtk/idvg_Vds1.pvd`
+  - `.venv/bin/python -m fab build configs/fab_planar.yaml --out out/fab_planar_struct`
 
-### 3. Branches (local; `main` is pushed, nothing since)
-`main` (Phases 0-2) -> `3d-fab-planar` (Phase 3) -> `3d-octree-mesh`
-(Phase 5 mesher, current). Neither feature branch is merged or pushed;
-ask the user before doing either.
+### 3. Git state
+- `main` = everything (merge of `3d-octree-mesh`, which contains
+  `3d-fab-planar`), pushed to origin
+  (github.com/saurabhmorarka/gatorade_tcaddevice).
+- Old local branches (3d-perf-core ... 3d-viewer-sections) were merged
+  earlier.
+- For new work, branch from `main`.
 
 ### 4. Map of the 3D code
 | path | what it is |
 |---|---|
-| `fab/structure.py` | level-set virtual fab: regions, deposit/etch/implant, `cell_labels()` (gas iff union-field cell mean >= 0; `_despeckle`), `check()` structure check |
-| `fab/templates.py` | planar template: STI, flat gate dielectric, TiN gate, spacer, ILD + CMP, contact trenches + W fill |
-| `fab/flow.py`, `fab/expr.py` | YAML layers, expressions; `build()` runs `check()` every time |
-| `fab/simulate.py` | `device_voxels` -> mesh (`mesher="cartesian"` or `"octree"`) -> `solve_mosfet` sweeps; `write_state` / `write_state_octree` VTK; `python -m fab simulate cfg --mesher octree` |
-| `mesh3d/cartesian.py` | graded rectilinear box-FV mesh (the reference) |
-| `mesh3d/octree.py` | THE octree mesher: `target_spacing` (per-axis), `BoxTree` (rules: label, size, 2:1 balance, face match at semiconductor+conductor interfaces), `_dual` (box fast path + clipped cells), `_assemble`, `check_octree_mesh` (gate) |
-| `native/src/boxtree.rs`, `voronoi.rs` | Rust mirrors of `BoxTree.refine` and the Voronoi clipper |
-| `mesh3d/studies/` | `octree_transition_study.py` (why Voronoi, not tet fans), `mesher_convergence.py` (accuracy runs), `tree_leaf_stats.py`, `facet_asymmetry_debug.py` |
-| `solver2d/newton_solver_qf_2d.py` | shared DD solver. Contact `boundary_point_index` must be sorted ascending. Ohmic metal-volume contacts: insulator nodes take V + median psi_bulk. |
-| `tcadview/` | viewer. Process builds draw exact voxel faces (`voxel_surface`); "smooth surfaces" checkbox for level-set contours |
-| `configs/fab_planar.yaml`, `fab_planar_tiny.yaml` | full and small test devices |
+| `fab/structure.py`, `templates.py`, `flow.py`, `expr.py` | level-set virtual fab; planar template (STI, flat gate stack, TiN gate, spacer, ILD + CMP, W contacts); `check()` structure gate on every build |
+| `fab/simulate.py` | `build_device` -> mesh -> solve. `simulate()`: the parent builds mesh + equilibrium + drain ramps ONCE, then workers (pool initializer, no level sets) run curve SEGMENTS in parallel; `write_state` / `write_state_octree` (vectors mirrored with a z flip) |
+| `mesh3d/octree.py` | octree mesher: per-axis `target_spacing`; `BoxTree` (label, size, 2:1 balance, face match at semiconductor + conductor faces, `compact`, `split_for_stray`); `_dual`; `_assemble` (contact node = ON its metal); stray-metal refine loop; `check_octree_mesh` gate (volumes, facets, couplings, conformity, isolated nodes, contacts, NO stray metal volume) |
+| `mesh3d/cartesian.py` | graded rectilinear reference mesh |
+| `native/src/boxtree.rs`, `voronoi.rs` | Rust tree refine and Voronoi clipper |
+| `mesh3d/studies/` | `mesher_convergence.py` (layout/sizing runs; TCAD_VSAT=0/1/name), transition study, leaf stats |
+| `solver2d/newton_solver_qf_2d.py` | shared DD solver. `velocity_saturation`: False / True (= "hybrid", the default) / "efield" / "gradqf"; `_edge_force` + exact Jacobian; `VSAT_REF_DENSITY = 1e16`; direct attempt capped at `VSAT_DIRECT_MAXITER = 15`, then an efield warm-up fallback |
+| `solver2d/vtk_export.py` | VTK fields; `nodal_vectors` (E, Jn, Jp, J by an edge least-squares fit of the solver's edge currents) |
+| `tcadview/` | viewer. `model.State.outline` (exact material boundaries), `vector_fields` / `vector_samples`; app: outlines checkbox, Vectors group, cut-plot toolbar and X/Y axis scales |
+| `testsuite/test_3d_examples.py` | tiny planar device, 3 bias points, golden + vector-flux check |
+| `configs/fab_planar.yaml`, `fab_planar_tiny.yaml` | full and tiny devices |
 
-### 5. Octree design in one paragraph
-The nodes are the corners of a kd-style box tree over the fab voxels.
-The control volumes are the EXACT Voronoi diagram of those nodes,
-which is always admissible: couplings are facet areas >= 0. This is
-the 3D analogue of the 2D non-obtuse rule; tet centre-fans fail
-(about 15% negative couplings).
-- Box cells (the corner test via KD-tree) use octants: vectorized and
-  exact per material.
-- Other cells are clipped exactly in Rust. Per-material splits clip
-  against the leaf boxes.
-- Face match at semiconductor and conductor interfaces keeps nodes on
-  those surfaces.
-- The gate checks, every build, raising on failure: exact per-material
-  volumes, facet symmetry, couplings >= 0, conformity, no isolated
-  nodes, contacts present.
+### 5. Key numbers (full planar device: Lg 30, W 60, tox 1.5, spacer 8 nm)
+- *Mesh:* octree 65.7k nodes, build about 15 s (one stray-metal pass).
+- *Results:* Vt 0.204 -> 0.052 V, SS 82 mV/dec, DIBL 160 mV/V,
+  Ion 1811 uA/um, Ioff 1.16e-6 A/um. A punch-through path under the
+  channel: a device-design issue, not numerics.
+- *Time:* 243-261 s total.
+  - mesh + equilibrium 33-38 s;
+  - drain ramp 43-47 s (sequential);
+  - Vds = 1 V curve: slowest segment 165-174 s, about 40 Newton
+    iterations per point with hybrid (efield about 3x fewer).
+- *Accuracy:*
+  - Coarse octree layouts agree within 0.9% with hybrid and sit about 3.5%
+    above the fine meshes (a resolution question, not studied yet).
+  - The rectilinear default is 68k nodes and about 1% off.
 
-Gotchas already hit:
-- A coplanar clip must be a no-op.
-- The facet round-off cutoff is relative (1e-8 * L^2).
-- Isotropic sizing put fine y-spacing down the STI sidewalls; sizing
-  is per-axis now.
-- A conductor surface between nodes made facets ambiguous; face match
-  now covers conductors.
+### 6. Next phases: OPTIONS TO PRESENT, wait for the user's choice
+A. *Speed pass toward the 1-minute 3D I-V* (the user asked for "whatever
+   speeds it up"; parked items):
+   - per-point Newton cost at high Vds with hybrid (about 40 iterations).
+     Candidates: a doping-relative c_ref (option b of log 51), Newton
+     globalization (the row-scaled merit stalls on reasonable starts; log
+     51), better predictors;
+   - profile the 3D solve (assembly vs linear solve); preconditioner
+     reuse; threaded direct solver;
+   - the drain ramp (sequential 43 s) and mesh + equilibrium (33 s);
+   - limit the stray-metal recheck to clipped cells near metal (+5 s
+     today);
+   - `_rule_size` halves odd boxes, leaving alternating 0.5/1 nm leaves
+     (wasted nodes).
+B. *Octree defaults study:* the coarse octree is +3.5% vs the fine meshes;
+   find the region one change at a time, pick the defaults, tighten
+   `test_octree`'s tolerance back from 2% to 1%, and add a README section
+   for the octree mesher.
+C. *The user's physics roadmap, in order* (memory
+   tcad1d-physics-roadmap-after-3d-mesher):
+   1. Schottky S/D contacts (research how others model them first);
+   2. Schrodinger-Poisson / quantum correction (charge peak away from the
+      interface, lower density);
+   3. mobility: surface orientation, surface roughness, Coulomb, phonon,
+      interface-charge dependence;
+   4. stress and its effect on mobility;
+   5. FinFET, nanosheet.
+   New physics is prototyped in 1D first (memory).
+D. *Smaller items raised before:*
+   - capacitance extraction (Cgs/Cgd from terminal charge);
+   - the device design (Vt, DIBL, punch-through);
+   - an STI corner rounding option;
+   - the SuperLU-singular rectilinear equilibrium (PETSc is fine).
 
-### 6. Exact next step (UPDATED 2026-10-11 evening; DEVELOPMENT_LOG 47-49)
-Done:
-- contact nodes on their metal (47)
-- the exact stray-metal test with a refine loop, gated (48)
-- the opt-in "hybrid" quasi-Fermi velocity-saturation force with an
-  efield warm-up (49)
+### 7. Gotchas learned (recent)
+- *Octree outlines:* VTK feature/boundary edges report every hanging-node
+  seam. Use `State.outline`.
+- *Contacts:* a contact node must lie ON its metal. The old rule (its cell
+  reaches the metal) pinned oxide nodes to the gate, a local 3x Cox and up
+  to 16% Id error.
+- *Velocity saturation:*
+  - The efield force throttles at the S/D junctions: the built-in field is
+    parallel to the current, about a 20% Id loss at 50 mV.
+  - Pure gradqf gives a singular Newton system.
+  - Hybrid needs `VSAT_DIRECT_MAXITER` plus the efield warm-up fallback.
+    Warm-up FIRST broke 2D continuation sweeps; a per-mesh strategy memory
+    cost +65% iterations.
+  - The contact-region shift start broke forward-biased diodes (log 51).
+- *c_ref = 1e17* changes 2D lightly doped results by 5%; it is a model
+  parameter, not a speed knob.
+- *Segments:* weighting curve segments by cost was slower, because each
+  segment repeats a walk from Vgs = 0.
+- *Golden tests* can show "missing (point did not converge?)" when a
+  change breaks convergence. Investigate; never just re-capture.
 
-Hybrid is now the DEFAULT (`true` = hybrid; section 50, commit 70cf3a7).
+---
 
-The user asked (2026-10-11) for a better start on a contact bias change to
-cut the hybrid 3D cost. It did NOT work (DEVELOPMENT_LOG 51). The code is
-unchanged since 70cf3a7. Measured on the real I-V path: hybrid costs
-1.7-3.4x efield in 3D (worst at high Vds). That is intrinsic stiffness,
-not a start-up artifact.
-
-2026-10-11 late: the user chose option (a); `fab simulate` now runs
-parallel segments (347 -> 243 s on the full device), and
-`testsuite/test_3d_examples.py` exists (42 s). DEVELOPMENT_LOG 52.
-Next lever: about 40 Newton iterations per point at Vds = 1 V with hybrid.
-
-Waiting on the user (who asked to wait before the next phase):
-- How to handle the hybrid cost; options (a)-(d) in log 51.
-- Speed pass toward the 1-minute full 3D I-V. Today: mesh 15 s and about
-  7-10 s per point with efield (65k nodes); hybrid is 1.7-3.4x that.
-- Future physics list, in order (memory: tcad1d-physics-roadmap-after-3d-mesher):
-  Schottky S/D, Schrodinger-Poisson, mobility stack, stress, then
-  FinFET/nanosheet.
-
-Then:
-1. Defaults study, with hybrid: the coarse octree is about 3.5% above the
-   fine meshes. Find the region by one-at-a-time runs as before. Candidates:
-   h_fine x/z in the channel, and the alternating 0.5/1 nm y-leaves under
-   the surface (`_rule_size` halving odd boxes).
-2. Speed: limit the stray-metal recheck to clipped cells near metal.
-3. README section for the octree mesher; then ask about merges.
-
-### 6a. Old next step (done)
-Find why the DEFAULT octree under-predicts the on-current by about 5%,
-then pick defaults.
-- Target: Id(Vg=0.6, Vd=0.05) of about 1.128e-5 A on the full planar
-  device.
-- Use `mesh3d/studies/mesher_convergence.py` and add named settings to
-  its RUNS dict, varying ONE thing at a time from "oct default":
-  - h_max 8 -> 4 alone
-  - h_fine_other 2 -> 1 alone
-  - h_fine x/z 2 -> 1 alone
-  - optionally a semiconductor-only h_max, or gate edges as x seeds
-    (the channel x-spacing far from the junctions may be the culprit)
-- Look at `tree_leaf_stats.py` output for where nodes go (the ILD had
-  11.5k small leaves).
-- Goal: within about 1% of the converged value, with at most about
-  the rectilinear default's node count (68k) if possible.
-- Then: README section for the octree mesher, update this file, and
-  ask the user about merges.
-
-### 7. Open items to raise with the user
-- Merging/pushing `3d-fab-planar` and `3d-octree-mesh`.
-- Capacitance extraction (Cgd/Cgs from terminal charge vs bias),
-  requested interest; it's possible now that contacts are volumes.
-- Device design (a design question, not numerics): Vt near 0 at 1 V,
-  DIBL 170 mV/V.
-- Schottky contacts; STI corner rounding option; Phase 4 (FinFET,
-  nanosheet), where the octree should beat the rectilinear grid.
-- The SuperLU singular equilibrium on the rectilinear mesh (PETSc is
-  fine).
-
+## History: older passdowns
 
 ## START HERE - passdown of 2026-10-10 night (session limit hit)
 

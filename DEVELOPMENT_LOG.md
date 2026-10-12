@@ -5160,3 +5160,29 @@ boundaries with VTK feature/boundary edges.
   Arrows sit on the active slices (full 3D vectors), in the section view
   (in-plane part), and over the whole device for 2D results.
 - `test_vtk`'s ParaView array count goes 12 -> 16.
+
+## 54. Merge to main: Phase 3 (virtual fab) and the octree mesher
+
+The user asked to merge to main and push. `3d-octree-mesh`, which contains
+`3d-fab-planar`, is merged into `main` (no fast-forward) and pushed to
+origin.
+
+**Merge gate:** `unittest discover -s testsuite` (venv): 110 tests OK,
+1 skip, 198 s. `test_octree` under conda with PETSc: 6 OK.
+
+**What main now has, beyond Phases 0-2:**
+- *Virtual fab* (`fab/`): planar template, structure gate, `fab simulate`
+  with parallel curve segments.
+- *Octree mesher* (`mesh3d/octree.py`, `native/`): an exact Voronoi dual
+  with a mandatory gate (including the stray-metal check); contact nodes
+  must lie on their metal.
+- *Velocity saturation:* hybrid quasi-Fermi driving force by default,
+  with an efield fallback start.
+- *Vector export* (E, Jn, Jp, J), verified against the plane currents.
+- *Viewer:* exact material outlines, a cut-plot toolbar with axis scales,
+  vector arrows.
+- *Tests:* a quick 3D golden test.
+
+Handoff: the COLD START at the top of `plans/3d_handoff.md` was rewritten
+for a context clear. The user wants to be asked before the next phase
+starts.
