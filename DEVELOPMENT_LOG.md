@@ -5065,3 +5065,52 @@ its phi-conductance collapses and Newton stiffens.
   reasonable starts;
 - (d) keep hybrid for accuracy runs and offer efield as a fast option in
   `fab simulate`.
+
+## 52. Faster `fab simulate` (parallel segments); a quick 3D golden test; first full results
+
+The user chose option (a) from section 51: accept the hybrid cost for now,
+speed things up in general.
+
+**`fab simulate` runs every point on the performance cores.** Before, there
+was one process per Id-Vg curve: two curves meant two busy cores out of six,
+and each process rebuilt the mesh and equilibrium.
+- The parent builds the mesh, solves equilibrium, and ramps the drain to
+  each Vds at Vgs = 0, ONCE.
+- That context goes to every worker through the pool initializer. The fab
+  structure (level sets, hundreds of MB) is left out: the VTK writers now
+  need only `_region_info`.
+- Each curve is split into segments, n_cores / n_curves of them. A segment
+  walks from its curve's Vgs = 0 state to its first point (not recorded),
+  then through its points. Workers use 1 BLAS/OpenMP thread.
+
+Full planar device (65.7k nodes, octree, hybrid, PETSc ILU, 2 x 13 points):
+
+| | wall time | notes |
+|---|---|---|
+| before (one process per curve) | 347 s | Vds = 1 V curve 329 s on one core |
+| after (equal segments) | 243 s | mesh + equilibrium 33 s, drain ramp 43 s, slowest segment 165 s |
+| segments weighted by curve cost | 268 s | rejected, see below |
+
+- All 26 currents agree with the old path to 1.5e-10.
+- *Weighting rejected.* More segments for the high-Vds curve was slower,
+  because each extra segment repeats a walk from Vgs = 0 that costs about
+  as much as its points at Vds = 1 V (779 vs 551 Newton iterations).
+- *Where the rest is.* Each point at Vds = 1 V costs about 40 Newton
+  iterations with hybrid: the next lever, for the speed pass.
+
+**Results, full planar device** (Lg 30 nm, W 60 nm, tox 1.5 nm):
+Vt 0.204 -> 0.052 V, SS 82 mV/dec, DIBL 160 mV/V, Ion 1811 uA/um,
+Ioff 1.16e-6 A/um.
+- The field maps show a subsurface punch-through path in the off state
+  (about 1e17 cm^-3 under the channel). This is the known device-design
+  issue (high DIBL and Ioff), not a numerical one.
+
+**`testsuite/test_3d_examples.py`** (the user asked for a 3D case that is as
+quick as the 1D/2D ones):
+- tiny planar device, octree, default physics;
+- bias points: off (0, 0.05), linear (0.6, 0.05), saturation (0.6, 0.6),
+  reached through the sweep's own continuation driver;
+- checks: currents to rtol 2e-3, plus the exact node count and zero stray
+  metal nodes;
+- wall time 42 s in the venv (SuperLU), 52 s with PETSc LU, 26 s with
+  PETSc ILU; it passes in all three.

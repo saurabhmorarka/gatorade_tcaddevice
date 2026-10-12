@@ -226,7 +226,21 @@ def _build_device_octree(st, p, half_z, log, opts, t0):
 _CTX = {}
 
 
+def _region_info(d):
+    """(region names, sorted material names, material index per region) -
+    from the structure, or from d["region_info"] where the structure was
+    dropped (worker processes get no level sets)."""
+    if "region_info" not in d:
+        regions = d["st"].regions
+        materials = sorted({r.material for r in regions})
+        d["region_info"] = ([r.name for r in regions], materials,
+                            np.array([materials.index(r.material) for r in regions]))
+    return d["region_info"]
+
+
 def _context(cfg_path, top_nm, half_z, mesher="cartesian"):
+    """Device, mesh and equilibrium, built once per process (a worker
+    started by simulate() gets it from _init_worker instead)."""
     key = (cfg_path, top_nm, half_z, mesher)
     if key not in _CTX:
         from main2d_mosfet_sweep import solve_mosfet
@@ -238,6 +252,10 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian"):
     return _CTX[key]
 
 
+def _init_worker(key, d):
+    _CTX[key] = d
+
+
 def drain_current(d, r):
     """Total drain current of the full device (A), from the solved half."""
     from solver2d.current import contact_current
@@ -245,34 +263,49 @@ def drain_current(d, r):
     return I * (2.0 if d["half_z"] else 1.0)
 
 
+def _solver_at(d, Vgs, Vds):
+    from main2d_mosfet_sweep import solve_mosfet
+    mesh, mat, dev, Cs = d["mesh"], d["mat"], d["dev"], d["Cs"]
+    return lambda pp, gss: solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
+                                        psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
+                                        cold_retry=False, velocity_saturation=True)
+
+
+def _write_states(task, d, states):
+    entries = []
+    os.makedirs(task["vtk_dir"], exist_ok=True)
+    writer = write_state_octree if d.get("mesher") == "octree" else write_state
+    for v in sorted(states):
+        if task["vtk"] == "all" or v in task.get("vtk_keep", ()):
+            f = f"vds{task['Vds']:g}_vgs{v:+.3f}.vtu"
+            writer(os.path.join(task["vtk_dir"], f), d, states[v], {"gate": v, "drain": task["Vds"]},
+                   f"Vgs={v:+.3f}V Vds={task['Vds']:+.3f}V")
+            entries.append(dict(file=f, timestep=v, name=f"Vgs={v:+.3f}V Vds={task['Vds']:+.3f}V"))
+    return entries
+
+
 def run_curve(task):
-    """One Id-Vg curve at fixed task['Vds'] (from the equilibrium state)."""
-    from main2d_mosfet_sweep import continuation, solve_mosfet
+    """One segment of an Id-Vg curve at fixed task['Vds']: from the curve's
+    Vgs = 0 state (task['base'] key into the context, else ramped here from
+    equilibrium), walk by continuation through task['vgs'] - the walk from
+    0 to the first value is adaptive and not recorded."""
+    from main2d_mosfet_sweep import continuation
     t0 = time.perf_counter()
     d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"))
-    mesh, mat, dev, Cs = d["mesh"], d["mat"], d["dev"], d["Cs"]
-
-    def at(Vgs, Vds):
-        return lambda pp, gss: solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
-                                            psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
-                                            cold_retry=False, velocity_saturation=True)
     Vds = task["Vds"]
-    ramp, it0, _ = continuation(at(0.0, None), 0.0, d["eq"], [Vds])
-    if Vds not in ramp:
-        return dict(task=task, points={}, time_s=time.perf_counter() - t0)
-    vgs = [v for v in task["vgs"] if v > 0]
-    up, it1, _ = continuation(at(None, Vds), 0.0, ramp[Vds], vgs)
-    states = {0.0: ramp[Vds], **up}
+    base = d.get("base", {}).get(Vds)
+    it0 = 0
+    if base is None:
+        ramp, it0, _ = continuation(_solver_at(d, 0.0, None), 0.0, d["eq"], [Vds])
+        if Vds not in ramp:
+            return dict(task=task, points={}, entries=[], iters=it0, time_s=time.perf_counter() - t0)
+        base = ramp[Vds]
+    vgs = sorted(v for v in task["vgs"] if v > 0)
+    states, it1, _ = continuation(_solver_at(d, None, Vds), 0.0, base, vgs)
+    if task.get("include_zero", True):
+        states = {0.0: base, **states}
     pts = {v: drain_current(d, r) for v, r in states.items()}
-    os.makedirs(task["vtk_dir"], exist_ok=True)
-    entries = []
-    for v in sorted(states):
-        if task["vtk"] == "all" or v in (0.0, max(states)):
-            f = f"vds{Vds:g}_vgs{v:+.3f}.vtu"
-            writer = write_state_octree if d.get("mesher") == "octree" else write_state
-            writer(os.path.join(task["vtk_dir"], f), d, states[v], {"gate": v, "drain": Vds},
-                        f"Vgs={v:+.3f}V Vds={Vds:+.3f}V")
-            entries.append(dict(file=f, timestep=v, name=f"Vgs={v:+.3f}V Vds={Vds:+.3f}V"))
+    entries = _write_states(task, d, states)
     return dict(task=task, points=pts, entries=entries, iters=it0 + it1, time_s=time.perf_counter() - t0)
 
 
@@ -325,16 +358,14 @@ def write_state(path, d, state, bias, label):
     gi = np.unravel_index(used, shape)
     pts = np.column_stack([ax[a][gi[a]] for a in range(3)]) * 1e-3          # um
     pdat = {k: v[gi] for k, v in grid.items()}
-    st = d["st"]
-    materials = sorted({r.material for r in st.regions})
-    region_mat = np.array([materials.index(r.material) for r in st.regions])
+    region_names, materials, region_mat = _region_info(d)
     Ec = E[keep]
     cnames = [c.name for c in mesh.domain.contacts]
     vtk_io.write_vtu(path, pts, conn, vtk_io.VTK_HEXAHEDRON, point_data=pdat,
                      cell_data={"region_id": cell[keep].astype(np.int32),
                                 "material_id": region_mat[cell[keep]].astype(np.int32),
                                 "ElectricField": Ec, "AbsElectricField": np.sqrt((Ec ** 2).sum(axis=1))},
-                     field_data={"region_names": [r.name for r in st.regions], "material_names": materials,
+                     field_data={"region_names": region_names, "material_names": materials,
                                  "contact_names": cnames,
                                  "contact_bias": np.array([float(bias.get(c, 0.0)) for c in cnames]),
                                  "label": label, "field_units": [f"{k}:{v}" for k, v in FIELD_UNITS.items()]},
@@ -375,14 +406,12 @@ def write_state_octree(path, d, state, bias, label):
     dev = gid[tuple(src.T)]
     pdat = {k: np.where(dev >= 0, np.asarray(v)[np.maximum(dev, 0)], np.nan) for k, v in pd_mesh.items()}
     pts = (origin + uniq * h) * 1e-3                                    # um
-    st = d["st"]
-    materials = sorted({r.material for r in st.regions})
-    region_mat = np.array([materials.index(r.material) for r in st.regions])
+    region_names, materials, region_mat = _region_info(d)
     cnames = [c.name for c in mesh.domain.contacts]
     vtk_io.write_vtu(path, pts, inv.reshape(-1, 8), vtk_io.VTK_HEXAHEDRON, point_data=pdat,
                      cell_data={"region_id": cells_lab.astype(np.int32),
                                 "material_id": region_mat[cells_lab].astype(np.int32)},
-                     field_data={"region_names": [r.name for r in st.regions], "material_names": materials,
+                     field_data={"region_names": region_names, "material_names": materials,
                                  "contact_names": cnames,
                                  "contact_bias": np.array([float(bias.get(c, 0.0)) for c in cnames]),
                                  "label": label, "field_units": [f"{k}:{v}" for k, v in FIELD_UNITS.items()]},
@@ -396,12 +425,60 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     # (long thin cells, large insulator regions) and equilibrium never converged
     os.environ.setdefault("TCAD_LINSOLVE", "petsc_lu")
     t0 = time.perf_counter()
-    d = build_device(flow.load(config), top_nm=top_nm, half_z=half_z, log=log, mesher=mesher)
+    from core.parallel import performance_cores
+    from main2d_mosfet_sweep import continuation
+    key = (config, top_nm, half_z, mesher)
+    d = _context(config, top_nm, half_z, mesher)                 # mesh + equilibrium, once
+    _region_info(d)
+    log(f"  mesh + equilibrium: {time.perf_counter() - t0:.0f} s")
+    # the drain ramps at Vgs = 0 (off: the gentlest place to raise Vds), once
+    ramps, _, _ = continuation(_solver_at(d, 0.0, None), 0.0, d["eq"], sorted(vds))
+    d["base"] = ramps
+    log(f"  drain ramps: {time.perf_counter() - t0:.0f} s")
     vgs = list(np.round(np.arange(vgs_step, vgs_max + 1e-9, vgs_step), 6))
-    tasks = [dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk, mesher=mesher,
-                  vtk_dir=os.path.join(out_dir, "vtk")) for v in vds]
-    with ProcessPoolExecutor(max_workers=workers or len(tasks)) as ex:
-        results = list(ex.map(run_curve, tasks))
+    # Split every curve into segments so all performance cores work: each
+    # segment walks from its curve's Vgs = 0 state to its first point (not
+    # recorded) and then through its points; longest-first so no straggler
+    # starts last. (The same scheme as main2d_mosfet_sweep.split_task.)
+    # Equal segments per curve: weighting by cost (more segments for the
+    # high-Vds curve) was slower, 243 -> 268 s on the full planar device -
+    # each extra segment repeats a walk from Vgs = 0 that costs about as
+    # much as its points at high Vds (DEVELOPMENT_LOG 52).
+    n_work = workers or performance_cores()
+    per_curve = max(1, n_work // max(1, len([v for v in vds if v in ramps])))
+    tasks = []
+    for v in vds:
+        if v not in ramps:
+            log(f"  Vds={v:g} V: drain ramp failed - curve skipped")
+            continue
+        k = min(per_curve, len(vgs))
+        size = -(-len(vgs) // k)
+        for c in range(k):
+            chunk = vgs[c * size:(c + 1) * size]
+            if chunk:
+                tasks.append(dict(config=config, Vds=v, vgs=chunk, top_nm=top_nm, half_z=half_z, vtk=vtk,
+                                  vtk_keep=(0.0, max(vgs)), mesher=mesher, include_zero=(c == 0),
+                                  vtk_dir=os.path.join(out_dir, "vtk")))
+    tasks.sort(key=lambda t: -max(t["vgs"]))                     # far segments walk longest
+    ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
+    # one BLAS / OpenMP thread per worker process (inherited at spawn)
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    with ProcessPoolExecutor(max_workers=min(n_work, len(tasks)), initializer=_init_worker,
+                             initargs=(key, ctx)) as ex:
+        seg_results = list(ex.map(run_curve, tasks))
+    results = []
+    for v in vds:
+        parts = [r for r in seg_results if r["task"]["Vds"] == v]
+        if not parts:
+            continue
+        pts, entries = {}, {}
+        for r in parts:
+            pts.update(r["points"])
+            for e in r["entries"]:
+                entries.setdefault(e["timestep"], e)
+        results.append(dict(task=dict(Vds=v), points=pts, entries=[entries[k] for k in sorted(entries)],
+                            iters=sum(r["iters"] for r in parts), time_s=max(r["time_s"] for r in parts)))
     W_um = (d["W_nm"] or 1e3) * 1e-3
     curves = []
     os.makedirs(out_dir, exist_ok=True)
@@ -409,7 +486,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
         v = sorted(r["points"])
         ids = [r["points"][x] / W_um for x in v]
         curves.append(dict(Vds=r["task"]["Vds"], Vgs=np.array(v), Id=np.array(ids)))
-        log(f"  Vds={r['task']['Vds']:g} V: {len(v)} points, {r['time_s']:.0f} s")
+        log(f"  Vds={r['task']['Vds']:g} V: {len(v)} points, {r['iters']} Newton iterations, "
+            f"slowest segment {r['time_s']:.0f} s")
         if r.get("entries"):
             vtk_io.write_pvd(os.path.join(out_dir, "vtk", f"idvg_Vds{r['task']['Vds']:g}.pvd"), r["entries"])
     with open(os.path.join(out_dir, "ids_vgs.csv"), "w", newline="") as f:
