@@ -2,7 +2,7 @@
 
 TCAD-style semiconductor device simulators, built from scratch in
 Python/NumPy/SciPy - started in 1D (formerly `tcad1d` / `1D-TCAD`), now 2D,
-with 3D planned:
+with 3D under way:
 
 - **1D:** p-n junction diode (drift-diffusion, I-V, avalanche, TAT/BTBT
   leakage) and MOS capacitor (C-V).
@@ -11,6 +11,9 @@ with 3D planned:
   graded interface/junction refinement), solved with a coupled Newton
   box-method drift-diffusion solver (quasi-Fermi unknowns,
   Scharfetter-Gummel flux, velocity saturation).
+- **3D (in progress):** a virtual fab that builds devices from a process
+  flow (level sets on a voxel grid), starting with a planar MOSFET with STI,
+  and the `tcadview` desktop viewer. The 3D solve is next.
 
 <p align="center">
   <img src="out/diode/03_iv_curve.png" alt="Diode I-V curve" width="49%">
@@ -64,6 +67,93 @@ why tunneling happens.
   <img src="out/btbt/pmos_leakage_si_vs_sige.png" alt="PMOS leakage, Si vs SiGe source/drains" width="98%">
 </p>
 
+## 3D virtual fab (`fab/`, `configs/fab_planar.yaml`)
+
+Builds a 3D device the way a fab does, one process step at a time, and
+writes a snapshot after every step so you can scrub through the build.
+
+`python3` in these commands means the project's environment. Run them from
+`tcad1d/` after `source .venv/bin/activate`, or write `.venv/bin/python`
+instead. A system `python3` (e.g. Homebrew's) has no PyVista/Qt and reports
+"No module named tcadview". 3D solves (`fab simulate`) run faster in the
+conda env with PETSc: `~/miniconda3/envs/tcad/bin/python`.
+
+```bash
+python3 -m fab build configs/fab_planar.yaml      # ~1.5 s build + ~2.5 s snapshots
+python3 -m tcadview out/fab_planar/build.pvd      # "Process step" slider, colours by material
+python3 -m fab expand configs/fab_planar.yaml     # the explicit, editable flow the template generates
+```
+
+<p align="center">
+  <img src="out/fab_planar.png" alt="Planar NMOS from the virtual fab" width="60%">
+</p>
+
+**The planar template** (`template: planar`) is a bulk NMOS or PMOS with a
+finite width and STI on both sides:
+1. substrate doping
+2. STI trench, fill and CMP
+3. well/Vt implant
+4. gate dielectric over the whole flat surface, so the gate bottom is
+   level over the channel and the STI alike
+5. gate metal (TiN by default; `gate_material: Poly` also works), then a
+   gate etch stopping on the dielectric
+6. strip of the exposed gate dielectric only, which leaves the STI flush
+   with the silicon (no recess step for the spacer to leave stringers in)
+7. extension implant, self-aligned to the gate
+8. nitride spacer (conformal deposit plus anisotropic etch)
+9. source/drain implant, self-aligned to the gate and spacer
+10. ILD fill and CMP to `ild_cap` above the gate, so dielectric (never
+    gas) sits between the spacer and the contacts
+11. contact trenches etched through the ILD only, filled with W up to the
+    ILD top: whole metal volumes, taller than the gate (their sidewalls
+    facing the gate are much of the off-state capacitance)
+
+Every dimension is a parameter (`Lg`, `tox`, `spacer`, `W`, `sti_depth`,
+the implant peaks and ranges, the voxel size, ...).
+
+**The YAML has three layers.**
+- Layer 1 is a template plus parameters.
+- Layer 2 is the explicit process flow: what `fab expand` prints, editable,
+  with every number an expression over the parameters (`"xg0 - spacer"`).
+- Layer 3 is the device: contacts.
+
+**How it works.**
+- Each region is a level set on a uniform voxel grid.
+- Each step is one geometric operation:
+  - **conformal deposit:** an exact offset of the distance field, so
+    corners round with the right radius
+  - **fill and CMP**
+  - **anisotropic etch:** a vertical sliding minimum of the gas visible
+    from above, which keeps etched edges sub-voxel accurate and shadows
+    overhangs
+  - **isotropic etch**
+  - **analytic implants:** Gaussian in depth, with a lateral erfc under
+    mask and gate edges
+- Distances are recomputed only when a step needs them, by a closest-point
+  method that is exact on flat faces and about 0.02 nm on curved ones.
+  Its inner loop is in Rust (`native/`), 7x faster than the numpy fallback.
+
+**What is checked** (`testsuite/test_fab.py`):
+- Each operation against analytic geometry: conformal corner radius,
+  spacer width, etch stop, selective growth, implant depth and dose.
+- The planar build against its own parameters: gate edges, oxide
+  thickness, spacer width (8.000 nm for 8 nm), STI depth, the STI flush
+  with the silicon, a flat gate bottom, and the junction depth against
+  the Gaussians.
+- **The viewer shows the device geometry exactly.** For a build, tcadview
+  draws each material as the voxel faces the device is built from: sharp
+  edges, and two materials share one face. The smooth level-set contours
+  are a checkbox ("smooth surfaces"). They look nicer, but bevel every
+  edge by up to a voxel and draw neighbouring materials as separate
+  surfaces.
+- **The structure check, after every build:** enclosed gas voids, detached
+  fragments of a region, and layers one voxel thick are warnings in the
+  build log. One-voxel flakes (the staircase of a curved surface poking
+  out by a voxel) are relabelled to their surroundings and counted. A
+  thin film between two different materials is never touched.
+- A round trip through the layer-2 YAML.
+- The snapshots in the viewer.
+
 ## Setup
 
 Requires Python 3.9+ (any plain CPython install - no conda needed). Your
@@ -98,6 +188,7 @@ python3 testsuite/test_2d_examples.py  # every bias point of the 4 2D drivers (~
 python3 testsuite/test_vtk.py          # VTK export (also checks ParaView reads it, if installed)
 python3 testsuite/test_native.py       # compiled kernels vs numpy (skipped if not built)
 python3 testsuite/test_tcadview.py     # viewer, headless (skipped without the viewer deps)
+python3 testsuite/test_fab.py          # virtual fab: operations vs analytic geometry, planar template
 ```
 
 ### Fast path (optional): PETSc solvers for 3D
@@ -181,6 +272,14 @@ What it does:
   panel plots the field along the line and follows the bias stepper.
 - **Bias stepper:** for a sweep, a slider and prev/next buttons. The
   camera, field and cut line are kept as you step.
+- **Section view (3D):** Slices > Section view shows an x/y/z slice
+  face-on in a second, 2D view. Right-click probes inside the device. H cut
+  and V cut run a cut line through the last clicked point, and Overlay
+  curves keeps earlier curves to compare bias points.
+- **Process steps:** a virtual-fab build (`fab/`) opens on its final
+  structure, with a "Process step" slider. The Material field colours
+  each region by its material. Region surfaces are smooth contours of the
+  level sets, and the region list grows as layers are added.
 
 The device is drawn the right way up (y is depth). `testsuite/test_tcadview.py`
 drives the window headless.

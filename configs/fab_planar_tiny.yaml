@@ -1,0 +1,17 @@
+# Scaled-down planar NMOS for fast mesher/solver checks (octree vs rectilinear).
+template: planar
+params:
+  type: nmos
+  Lg: 16nm
+  tox: 1.5nm
+  gate_height: 12nm
+  spacer: 4nm
+  L_sd: 12
+  W: 16nm
+  sti_width: 8nm
+  sti_depth: 16nm
+  sub_depth: 30
+  endcap: 4
+  contact_inset: 2
+  ild_cap: 4
+  voxel: [1.0, 0.5, 1.0]

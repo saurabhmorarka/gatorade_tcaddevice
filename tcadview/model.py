@@ -28,6 +28,23 @@ HIDDEN_FIELDS = {"region_id", "material_id", "contact_id", "vtkOriginalPointIds"
                  "_display", "_log_eDensity", "_log_hDensity"}
 
 
+# process-step snapshots (fab/export.py): regions are stored as level sets
+# ls_<region>; "Material" colours each region by its material instead of a field
+LEVELSET_PREFIX = "ls_"
+MATERIAL_FIELD = "Material"
+MATERIAL_COLORS = {"Si": "#9fb4cc", "SiO2": "#f4b8c8", "Poly": "#c0504d", "SiN": "#86c48a", "Metal": "#e2b33c",
+                   "SiGe": "#b393d6", "Ge": "#6f8fb5", "HfO2": "#f2a25c", "TiN": "#8c8c8c", "W": "#a0a0b0"}
+_EXTRA_COLORS = ("#7fc7c2", "#d98cb3", "#c9b27c", "#8fa3d9", "#b5c96f")
+
+
+def material_color(name):
+    if name in MATERIAL_COLORS:
+        return MATERIAL_COLORS[name]
+    if name.startswith("SiGe"):
+        return MATERIAL_COLORS["SiGe"]
+    return _EXTRA_COLORS[sum(map(ord, name)) % len(_EXTRA_COLORS)]
+
+
 def default_scale(name):
     if name in LOG_FIELDS:
         return "log"
@@ -77,7 +94,94 @@ class State:
     contact_bias: dict
     label: str
     units: dict
+    kind: str = ""
     _regions: dict = field(default_factory=dict)
+    _cache: dict = field(default_factory=dict)
+
+    @property
+    def is_process(self):
+        """A process-step snapshot (voxel image with level sets)."""
+        return self.kind == "process"
+
+    def levelset(self, k):
+        return LEVELSET_PREFIX + self.region_names[k]
+
+    def _contour_grid(self):
+        """The image with every level set forced 'outside' on the domain walls,
+        so a region touching a wall contours to a closed surface (cached)."""
+        if "contour_grid" not in self._cache:
+            g = self.grid.copy(deep=False)
+            dims = g.dimensions
+            for k in range(len(self.region_names)):
+                name = self.levelset(k)
+                if name not in g.point_data.keys():
+                    continue
+                a = np.array(g.point_data[name], dtype=np.float32).reshape(dims[::-1])   # [k, j, i]
+                for ax in range(3):
+                    sl = [slice(None)] * 3
+                    for end in (0, -1):
+                        sl[ax] = end
+                        a[tuple(sl)] = np.maximum(a[tuple(sl)], 0.5)
+                g.point_data[name] = a.ravel()
+            self._cache["contour_grid"] = g
+        return self._cache["contour_grid"]
+
+    def surface(self, k):
+        """Region k's smooth closed boundary surface (process snapshots;
+        cached), with the point fields interpolated onto it."""
+        key = ("surface", k)
+        if key not in self._cache:
+            s = self._contour_grid().contour([-0.5], scalars=self.levelset(k))
+            self._cache[key] = s if s.n_points else None
+        return self._cache[key]
+
+    def voxel_surface(self, k):
+        """Region k's boundary exactly as the device sees it: the voxel
+        faces between its cells (region_id) and any other region or gas
+        (process snapshots; cached). Sharp edges, and the face two regions
+        share is the same face in both - no bevels, seams or gaps. Point
+        fields are taken at the grid nodes, not interpolated."""
+        key = ("voxel_surface", k)
+        if key not in self._cache:
+            self._cache[key] = _voxel_boundary(self.grid, k)
+        return self._cache[key]
+
+    def voxel_slice(self, k, axis, pos):
+        """Region k on the plane normal to `axis` at `pos`, cut along its
+        voxel cells (process snapshots), or None."""
+        key = ("slice", axis, round(float(pos), 12))
+        if key not in self._cache:
+            o = [0.0, 0.0, 0.0]
+            o["xyz".index(axis)] = pos
+            self._cache[key] = self.grid.slice(normal=axis, origin=o)
+        sl = self._cache[key]
+        if not sl.n_cells or "region_id" not in sl.cell_data.keys():
+            return None
+        ids = np.flatnonzero(np.asarray(sl.cell_data["region_id"]) == k)
+        return sl.extract_cells(ids) if len(ids) else None
+
+    def slice_region(self, k, axis, pos):
+        """Region k on the plane normal to `axis` at `pos`, cut at its smooth
+        boundary (process snapshots), or None."""
+        key = ("slice", axis, round(float(pos), 12))
+        if key not in self._cache:
+            o = [0.0, 0.0, 0.0]
+            o["xyz".index(axis)] = pos
+            self._cache[key] = self.grid.slice(normal=axis, origin=o)
+        sl = self._cache[key]
+        if not sl.n_points:
+            return None
+        c = sl.clip_scalar(scalars=self.levelset(k), value=-0.5, invert=True)
+        return c if c.n_points else None
+
+    def node_labels(self):
+        """Region index per grid node from the level sets (-1 = gas)."""
+        if "labels" not in self._cache:
+            ls = np.stack([np.asarray(self.grid.point_data[self.levelset(k)], dtype=np.int16)
+                           for k in range(len(self.region_names))])
+            lab = np.argmin(ls, axis=0)
+            self._cache["labels"] = np.where(ls.min(axis=0) < 0, lab, -1)
+        return self._cache["labels"]
 
     @property
     def dim(self):
@@ -97,13 +201,18 @@ class State:
         mid = self.grid.cell_data["material_id"][rid == k]
         return self.material_names[int(mid[0])] if len(mid) and mid[0] >= 0 else ""
 
-    def fields(self):
-        """Displayable field names: point fields first, then cell fields."""
-        pd = [n for n in self.grid.point_data.keys() if n not in HIDDEN_FIELDS]
+    def fields(self, data_only=False):
+        """Displayable field names: point fields first, then cell fields
+        (process snapshots: "Material" first, unless data_only)."""
+        pd = [n for n in self.grid.point_data.keys()
+              if n not in HIDDEN_FIELDS and not n.startswith(LEVELSET_PREFIX) and not n.startswith("_log_")]
         cd = [n for n in self.grid.cell_data.keys() if n not in HIDDEN_FIELDS and n not in pd]
-        return pd + cd
+        extra = [MATERIAL_FIELD] if self.is_process and not data_only else []
+        return extra + pd + cd
 
     def association(self, name):
+        if name == MATERIAL_FIELD:
+            return "material"
         return "point" if name in self.grid.point_data.keys() else "cell"
 
     def values(self, name, grid=None):
@@ -118,7 +227,13 @@ class State:
         """Finite (min, max) of the displayed values over `regions` (all if
         None); (0, 1) if there is nothing finite."""
         ks = range(len(self.region_names)) if regions is None else regions
-        vals = [scale_values(self.values(name, self.region(k)), scale) for k in ks]
+        if name == MATERIAL_FIELD:
+            return 0.0, 1.0
+        if self.is_process:                    # no per-region cell extraction on big voxel images
+            sel = np.isin(self.node_labels(), list(ks))
+            vals = [scale_values(self.values(name)[sel], scale)]
+        else:
+            vals = [scale_values(self.values(name, self.region(k)), scale) for k in ks]
         v = np.concatenate([x[np.isfinite(x)] for x in vals]) if vals else np.zeros(0)
         if not len(v):
             return 0.0, 1.0
@@ -146,6 +261,110 @@ class State:
             out[n] = a
         return out
 
+    def outline(self, axis, pos, regions=None, res=None):
+        """Material boundaries on the plane `axis` = pos (3D; a 2D state
+        uses axis "z", pos 0) as line segments, a pv.PolyData in 3D
+        coordinates; only boundaries with a region of `regions` (all if
+        None) on one side, the outside included.
+
+        Traced from the region id sampled at pixel centres on a fine grid
+        anchored at the device bounds, with boundaries on the pixel edges:
+        exact for a voxel-built device when `res` divides the voxel size
+        (default: the smaller of 0.25 nm and 1/2000 of the extent). Not
+        VTK feature edges, which on an octree mesh also report every
+        hanging-node seam inside a region (thousands of spurious lines)."""
+        key = ("outline", axis, round(float(pos), 12), None if regions is None else tuple(sorted(regions)), res)
+        if key in self._cache:
+            return self._cache[key]
+        n = AXIS_NAMES.index(axis)
+        u, v = SECTION_AXES[axis]
+        b = self.grid.bounds
+        lo = np.array([b[0], b[2], b[4]])
+        hi = np.array([b[1], b[3], b[5]])
+        if res is None:
+            res = min(2.5e-4, max(hi[u] - lo[u], hi[v] - lo[v]) / 2000.0)
+        nu = max(1, int(round((hi[u] - lo[u]) / res)))
+        nv = max(1, int(round((hi[v] - lo[v]) / res)))
+        uc = lo[u] + (np.arange(nu) + 0.5) * (hi[u] - lo[u]) / nu
+        vc = lo[v] + (np.arange(nv) + 0.5) * (hi[v] - lo[v]) / nv
+        ue = lo[u] + np.arange(nu + 1) * (hi[u] - lo[u]) / nu
+        ve = lo[v] + np.arange(nv + 1) * (hi[v] - lo[v]) / nv
+        U, V = np.meshgrid(uc, vc, indexing="ij")
+        pts = np.zeros((U.size, 3))
+        pts[:, n] = pos
+        pts[:, u], pts[:, v] = U.ravel(), V.ravel()
+        s = pv.PolyData(pts).sample(self.grid, tolerance=1e-9)
+        lab = np.asarray(s.point_data["region_id"], dtype=int)
+        mask = np.asarray(s.point_data.get("vtkValidPointMask", np.ones(len(lab))), dtype=bool)
+        lab = np.where(mask, lab, -1).reshape(nu, nv)
+        lab = np.pad(lab, 1, constant_values=-1)                     # the outside as a label
+        keep = np.ones(len(self.region_names) + 1, bool) if regions is None else np.isin(
+            np.arange(-1, len(self.region_names)), list(regions))
+        ue = np.concatenate([[ue[0]], ue, [ue[-1]]])
+        ve = np.concatenate([[ve[0]], ve, [ve[-1]]])
+        segs = []
+        for ax in (0, 1):
+            a, c = (lab[:-1, :], lab[1:, :]) if ax == 0 else (lab[:, :-1], lab[:, 1:])
+            diff = (a != c) & (keep[a + 1] | keep[c + 1])
+            if ax == 1:
+                diff = diff.T                                        # rows: the constant coordinate
+            # runs of consecutive boundary pixels -> one segment each
+            for k in np.flatnonzero(diff.any(axis=1)):
+                d = np.diff(np.concatenate([[0], diff[k].astype(np.int8), [0]]))
+                starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+                for s0, s1 in zip(starts, ends):
+                    if ax == 0:                                      # edge at u = ue[k+1], v from ve[s0+?]
+                        segs.append(((ue[k + 1], ve[s0]), (ue[k + 1], ve[s1])))
+                    else:
+                        segs.append(((ue[s0], ve[k + 1]), (ue[s1], ve[k + 1])))
+        if not segs:
+            out = pv.PolyData()
+        else:
+            sg = np.array(segs)                                      # (M, 2, 2) in (u, v)
+            p3 = np.zeros((len(sg) * 2, 3))
+            p3[:, n] = pos
+            p3[:, u], p3[:, v] = sg[:, :, 0].ravel(), sg[:, :, 1].ravel()
+            lines = np.column_stack([np.full(len(sg), 2), np.arange(0, 2 * len(sg), 2),
+                                     np.arange(1, 2 * len(sg), 2)]).ravel()
+            out = pv.PolyData(p3, lines=lines)
+        self._cache[key] = out
+        return out
+
+    def vector_fields(self):
+        """Names of the 3-component point fields (E, current densities)."""
+        pd = self.grid.point_data
+        return [n for n in pd.keys() if n not in HIDDEN_FIELDS and np.ndim(pd[n]) == 2 and pd[n].shape[1] == 3]
+
+    def vector_samples(self, name, axis, pos, spacing, regions=None):
+        """A vector field on a regular grid of points (pitch `spacing`, um)
+        in the plane `axis` = pos, inside the regions `regions` (all if
+        None): (points (M, 3), vectors (M, 3)), finite non-zero ones only."""
+        key = ("vec", name, axis, round(float(pos), 12), float(spacing),
+               None if regions is None else tuple(sorted(regions)))
+        if key in self._cache:
+            return self._cache[key]
+        n = AXIS_NAMES.index(axis)
+        u, v = SECTION_AXES[axis]
+        b = self.grid.bounds
+        lo = np.array([b[0], b[2], b[4]])
+        hi = np.array([b[1], b[3], b[5]])
+        uc = np.arange(lo[u] + spacing / 2, hi[u], spacing)
+        vc = np.arange(lo[v] + spacing / 2, hi[v], spacing)
+        U, V = np.meshgrid(uc, vc, indexing="ij")
+        pts = np.zeros((U.size, 3))
+        pts[:, n] = pos
+        pts[:, u], pts[:, v] = U.ravel(), V.ravel()
+        s = pv.PolyData(pts).sample(self.grid, tolerance=1e-9)
+        vec = np.asarray(s.point_data[name], dtype=float).reshape(-1, 3)
+        ok = np.isfinite(vec).all(axis=1) & (np.linalg.norm(vec, axis=1) > 0)
+        if "vtkValidPointMask" in s.point_data.keys():
+            ok &= np.asarray(s.point_data["vtkValidPointMask"], dtype=bool)
+        if regions is not None:
+            ok &= np.isin(np.asarray(s.point_data["region_id"], dtype=int), list(regions))
+        out = (pts[ok], vec[ok])
+        self._cache[key] = out
+        return out
+
     def probe(self, xyz):
         """All fields interpolated at point xyz (um). Returns
         {"region": name or None, "fields": {name: value}}; None outside the
@@ -156,7 +375,7 @@ class State:
             return None
         s = self._sample(pt.points)
         out = {}
-        for n in self.fields():
+        for n in self.fields(data_only=True):
             if self.association(n) == "point" and n in s:
                 v = s[n][0]
             else:
@@ -186,7 +405,8 @@ class State:
 
 
 def load_state(path):
-    """Read one .vtu written by solver2d/vtk_export.py."""
+    """Read one .vtu written by solver2d/vtk_export.py, or one .vti
+    process snapshot written by fab/export.py."""
     grid = pv.read(path)
     fd = grid.field_data
 
@@ -199,7 +419,7 @@ def load_state(path):
     return State(grid=grid, region_names=strings("region_names"), material_names=strings("material_names"),
                  contact_names=cnames,
                  contact_bias=dict(zip(cnames, bias.tolist())) if bias is not None else {},
-                 label=(strings("label") or [""])[0], units=units)
+                 label=(strings("label") or [""])[0], units=units, kind=(strings("kind") or [""])[0])
 
 
 class Session:
@@ -210,10 +430,10 @@ class Session:
         ext = os.path.splitext(path)[1].lower()
         if ext == ".pvd":
             self.states = [StateInfo(b, f, n or os.path.basename(f)) for b, f, n in vtk_io.read_pvd(path)]
-        elif ext == ".vtu":
+        elif ext in (".vtu", ".vti"):
             self.states = [StateInfo(0.0, self.path, os.path.basename(path))]
         else:
-            raise ValueError(f"{path}: expected a .pvd or .vtu file")
+            raise ValueError(f"{path}: expected a .pvd, .vtu or .vti file")
         if not self.states:
             raise ValueError(f"{path}: no datasets")
         self._cache = {}
@@ -275,8 +495,11 @@ class Section:
         if k not in self._regions:
             o = [0.0, 0.0, 0.0]
             o[self.n] = self.pos
-            g = self.state.region(k)
-            s = g.slice(normal=self.axis, origin=o) if g.n_cells else None
+            if self.state.is_process:
+                s = self.state.slice_region(k, self.axis, self.pos)
+            else:
+                g = self.state.region(k)
+                s = g.slice(normal=self.axis, origin=o) if g.n_cells else None
             if s is not None and s.n_points:
                 s = s.copy()
                 s.points = np.column_stack([self.to2d(s.points), np.zeros(s.n_points)])
@@ -320,3 +543,50 @@ def cut_axis(p0, p1, tol=1e-12):
     d = np.abs(np.asarray(p1, float) - np.asarray(p0, float))
     moving = np.flatnonzero(d > tol * max(1.0, float(d.max())))
     return int(moving[0]) if len(moving) == 1 else None
+
+
+def _voxel_boundary(grid, k):
+    """PolyData of the voxel faces bounding the cells with region_id == k
+    (domain walls included), outward-oriented quads on the grid nodes, with
+    every point field copied from those nodes; None if region k is empty."""
+    nx, ny, nz = grid.dimensions
+    rid = np.asarray(grid.cell_data["region_id"]).reshape(nz - 1, ny - 1, nx - 1)     # [kz, jy, ix]
+    m = np.pad(rid == k, 1)
+    quads = []
+    nshape = (nz, ny, nx)
+    for a in range(3):                           # array axis 0 = z, 1 = y, 2 = x
+        lo = np.moveaxis(m, a, 0)
+        d_out = lo[:-1] & ~lo[1:]                # region below, not above: face normal +a
+        d_in = ~lo[:-1] & lo[1:]
+        for faces, flip in ((d_out, False), (d_in, True)):
+            f = np.moveaxis(faces, 0, a)         # padded-cell index frame, face plane index along a
+            idx = np.argwhere(f)
+            if not len(idx):
+                continue
+            base = idx.copy()
+            others = [b for b in range(3) if b != a]
+            base[:, others] -= 1                 # padding offset in the in-plane axes
+            # the face plane index along a is already the node index
+            corners = []
+            for du, dv in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                c = base.copy()
+                c[:, others[0]] += du
+                c[:, others[1]] += dv
+                corners.append(np.ravel_multi_index(c.T, nshape))
+            q = np.stack(corners, axis=1)
+            # array axes are (z, y, x): (u, v, a) is right-handed in xyz
+            # only for a = y, so the winding flips with the axis and side
+            if not (flip ^ (a == 1)):
+                q = q[:, ::-1]
+            quads.append(q)
+    if not quads:
+        return None
+    q = np.concatenate(quads)
+    nodes, inv = np.unique(q, return_inverse=True)
+    iz, jy, ix = np.unravel_index(nodes, nshape)
+    pts = np.asarray(grid.origin) + np.column_stack([ix, jy, iz]) * np.asarray(grid.spacing)
+    faces = np.column_stack([np.full(len(q), 4), inv.reshape(q.shape)]).ravel()
+    out = pv.PolyData(pts, faces)
+    for name in grid.point_data.keys():
+        out.point_data[name] = np.asarray(grid.point_data[name])[nodes]
+    return out

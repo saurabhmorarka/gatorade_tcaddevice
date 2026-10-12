@@ -17,6 +17,7 @@ import pyvista as pv                                                 # noqa: E40
 from PySide6 import QtCore, QtGui, QtWidgets                         # noqa: E402
 from pyvistaqt import QtInteractor                                   # noqa: E402
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg      # noqa: E402
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT   # noqa: E402
 from matplotlib.figure import Figure                                 # noqa: E402
 
 from tcadview import model                                           # noqa: E402
@@ -24,6 +25,8 @@ from tcadview import model                                           # noqa: E40
 CMAPS = ("turbo", "viridis", "coolwarm", "plasma", "jet", "gray")
 SLIDER_STEPS = 1000
 NAN_COLOR = "lightgray"
+OUTLINE_COLOR = "#303030"
+VECTOR_SHORT = {"ElectricField": "E", "eCurrentDensity": "Jn", "hCurrentDensity": "Jp", "TotalCurrentDensity": "J"}
 
 
 def _fmt(v):
@@ -53,7 +56,19 @@ class CutPlot(FigureCanvasQTAgg):
         self.ax = self.fig.add_subplot(111)
         self.held = []                    # [(x, v, label)]
         self.current = None
+        self.xscale = "linear"            # "linear" | "log"
+        self.yscale = "field"             # "field" (follow the field's scale) | one of model.SCALES
+        self._last = None                 # (name, unit, scale, xlabel) of the last plot, for re-drawing
         self.clear()
+
+    def set_axes(self, xscale=None, yscale=None):
+        """Change the axis scales and re-draw the curves on the plot."""
+        if xscale is not None:
+            self.xscale = xscale
+        if yscale is not None:
+            self.yscale = yscale
+        if self.current is not None and self._last is not None:
+            self._draw(*self._last)
 
     def clear(self, msg="Cut line: set two points, Pick them with right-clicks, or use an H/V cut "
                         "through the last probe"):
@@ -70,6 +85,12 @@ class CutPlot(FigureCanvasQTAgg):
         elif not hold:
             self.held = []
         self.current = (x, v, label)
+        self._last = (name, unit, scale, xlabel)
+        self._draw(name, unit, scale, xlabel)
+
+    def _draw(self, name, unit, scale, xlabel):
+        if self.yscale != "field":
+            scale = self.yscale
         self.ax.clear()
         curves = self.held + [self.current]
         for cx, cv, cl in curves:
@@ -78,15 +99,20 @@ class CutPlot(FigureCanvasQTAgg):
             self.ax.set_yscale("log")
         elif scale == "signed log":
             fin = np.abs(np.concatenate([c[1] for c in curves]))
-            fin = fin[np.isfinite(fin)]
-            self.ax.set_yscale("symlog", linthresh=max(1.0, float(fin.min()) if len(fin) else 1.0))
+            fin = fin[np.isfinite(fin) & (fin > 0)]
+            # linear band 8 decades below the peak: readable decades for doping-sized values
+            self.ax.set_yscale("symlog", linthresh=max(1.0, 1e-8 * float(fin.max())) if len(fin) else 1.0)
+        if self.xscale == "log":
+            self.ax.set_xscale("log")              # the cut's start (distance 0) is masked
         self.ax.set_xlabel(xlabel)
         self.ax.set_ylabel(f"{name}" + (f" ({unit})" if unit else ""))
         if len(curves) > 1:
             self.ax.legend(fontsize=7, loc="best")
         else:
-            self.ax.set_title(label, fontsize=9)
+            self.ax.set_title(self.current[2], fontsize=9)
         self.ax.grid(True, alpha=0.3)
+        if getattr(self, "toolbar", None) is not None:
+            self.toolbar.update()                  # new data: "home" is its full view
         self.draw_idle()
 
 
@@ -97,7 +123,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1400, 900)
         self.session = None
         self.idx = 0
-        self.region_visible = {}
+        self.region_visible = {}          # by region name: process steps add regions
         self.region_opacity = {}
         self.cut = None                   # (p0, p1) in um
         self._pick_cut = []               # pending picked cut points
@@ -215,12 +241,26 @@ class MainWindow(QtWidgets.QMainWindow):
         rr.addWidget(self.rmax)
         self.edges = QtWidgets.QCheckBox("mesh edges")
         self.edges.toggled.connect(lambda _: self.render())
+        self.outlines = QtWidgets.QCheckBox("material outlines")
+        self.outlines.setChecked(True)
+        self.outlines.setToolTip("Boundaries between materials on the slices, the section and 2D results "
+                                 "(exact, traced from the region map)")
+        self.outlines.toggled.connect(lambda _: self.render())
+        # process builds: the voxel cells the device is built from (exact,
+        # sharp, shared faces identical) or the smooth level-set contours
+        # (prettier, but every sharp edge is bevelled by up to a voxel and
+        # neighbouring materials do not share one surface)
+        self.smooth = QtWidgets.QCheckBox("smooth surfaces (level set)")
+        self.smooth.setToolTip("Off: the voxel structure the device solve uses. On: the level-set contours.")
+        self.smooth.toggled.connect(lambda _: self.render())
         fl.addRow("Field", self.field_combo)
         fl.addRow("Scale", self.scale_combo)
         fl.addRow("Colormap", self.cmap_combo)
         fl.addRow("Range", self.auto_range)
         fl.addRow("", rr)
         fl.addRow("", self.edges)
+        fl.addRow("", self.outlines)
+        fl.addRow("", self.smooth)
         lay.addWidget(fbox)
 
         # regions
@@ -244,6 +284,34 @@ class MainWindow(QtWidgets.QMainWindow):
         orow.addWidget(self.opacity)
         rl.addLayout(orow)
         lay.addWidget(rbox)
+
+        # vectors: E and current densities as arrows on the slices / section
+        self.vec_box = QtWidgets.QGroupBox("Vectors")
+        vl = QtWidgets.QFormLayout(self.vec_box)
+        self.vec_combo = QtWidgets.QComboBox()
+        self.vec_combo.setToolTip("Arrows on the active slices (3D, full vector) and in the section view "
+                                  "(in-plane part); 2D results: the whole device")
+        self.vec_combo.currentTextChanged.connect(lambda _: self.render())
+        self.vec_len = QtWidgets.QComboBox()
+        self.vec_len.addItems(["log", "linear"])
+        self.vec_len.setToolTip("Arrow length from |v|: log spans 6 decades below the largest arrow "
+                                "(current density varies over many decades); linear is proportional")
+        self.vec_len.currentTextChanged.connect(lambda _: self.render())
+        self.vec_color = QtWidgets.QComboBox()
+        self.vec_color.addItems(["black", "white", "by magnitude (log)"])
+        self.vec_color.currentTextChanged.connect(lambda _: self.render())
+        self.vec_pitch = QtWidgets.QDoubleSpinBox()
+        self.vec_pitch.setRange(0.1, 1000.0)
+        self.vec_pitch.setDecimals(1)
+        self.vec_pitch.setValue(2.0)
+        self.vec_pitch.setSuffix(" nm")
+        self.vec_pitch.setToolTip("Spacing of the arrow grid in the plane")
+        self.vec_pitch.editingFinished.connect(self.render)
+        vl.addRow("Field", self.vec_combo)
+        vl.addRow("Length", self.vec_len)
+        vl.addRow("Colour", self.vec_color)
+        vl.addRow("Spacing", self.vec_pitch)
+        lay.addWidget(self.vec_box)
 
         # slices (3D)
         self.slice_box = QtWidgets.QGroupBox("Slices")
@@ -316,17 +384,44 @@ class MainWindow(QtWidgets.QMainWindow):
         grid = QtWidgets.QGridLayout()
         for i, b in enumerate((self.hcut_btn, self.vcut_btn, self.pick_btn, plot_btn, clear_btn)):
             grid.addWidget(b, i // 2, i % 2)
+        self.cut_x = QtWidgets.QComboBox()
+        self.cut_x.addItems(["linear", "log"])
+        self.cut_x.currentTextChanged.connect(lambda t: self.cutplot.set_axes(xscale=t))
+        self.cut_y = QtWidgets.QComboBox()
+        self.cut_y.addItems(["field scale"] + list(model.SCALES))
+        self.cut_y.setToolTip("'field scale' follows the Scale chosen for the field in Controls")
+        self.cut_y.currentTextChanged.connect(
+            lambda t: self.cutplot.set_axes(yscale="field" if t == "field scale" else t))
+        axes_row = QtWidgets.QHBoxLayout()
+        axes_row.addWidget(QtWidgets.QLabel("X"))
+        axes_row.addWidget(self.cut_x)
+        axes_row.addWidget(QtWidgets.QLabel("Y"))
+        axes_row.addWidget(self.cut_y)
         cl.addRow("From", self.cut_p0)
         cl.addRow("To", self.cut_p1)
         cl.addRow(grid)
         cl.addRow(self.overlay)
+        cl.addRow("Axes", axes_row)
         left = QtWidgets.QWidget()
         left.setLayout(cl)
         left.setFixedWidth(300)
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        # zoom (box), pan, back/forward and home (reset) for the 1D plot
+        self.cut_toolbar = NavigationToolbar2QT(self.cutplot, right, coordinates=False)
+        self.cut_toolbar.setIconSize(QtCore.QSize(16, 16))
+        self.cut_toolbar.setFixedHeight(24)
+        for act in self.cut_toolbar.actions():          # keep home, back/forward, pan, zoom, save
+            if act.text() in ("Subplots", "Customize"):
+                self.cut_toolbar.removeAction(act)
+        rv.setSpacing(0)
+        rv.addWidget(self.cut_toolbar)
+        rv.addWidget(self.cutplot, 1)
         h = QtWidgets.QHBoxLayout(box)
         h.setContentsMargins(4, 4, 4, 4)
         h.addWidget(left)
-        h.addWidget(self.cutplot, 1)
+        h.addWidget(right, 1)
         return box
 
     def _build_bottom(self):
@@ -369,24 +464,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bias_slider.setRange(0, n - 1)
         self.bias_slider.setValue(0)
         self.bias_slider.blockSignals(False)
-        self.idx = 0
+        st0 = self.session.state(0)
+        self.idx = n - 1 if st0.is_process else 0          # a build opens on its final structure
+        if self.idx:
+            self.bias_slider.blockSignals(True)
+            self.bias_slider.setValue(self.idx)
+            self.bias_slider.blockSignals(False)
+        self.bias_box.setTitle("Process step" if st0.is_process else "Bias")
         st = self.state
-        self.region_visible = {k: True for k in range(len(st.region_names))}
-        self.region_opacity = {k: 1.0 for k in range(len(st.region_names))}
-        self.region_tree.blockSignals(True)
-        self.region_tree.clear()
-        for k, nm in enumerate(st.region_names):
-            it = QtWidgets.QTreeWidgetItem([nm, st.region_material(k)])
-            it.setData(0, QtCore.Qt.UserRole, k)
-            it.setCheckState(0, QtCore.Qt.Checked)
-            self.region_tree.addTopLevelItem(it)
-        self.region_tree.resizeColumnToContents(0)
-        self.region_tree.blockSignals(False)
+        self.region_visible, self.region_opacity = {}, {}
+        self._sync_regions()
         fields = st.fields()
         self.field_combo.blockSignals(True)
         self.field_combo.clear()
         self.field_combo.addItems(fields)
-        default = "ElectrostaticPotential" if "ElectrostaticPotential" in fields else \
+        default = model.MATERIAL_FIELD if st.is_process else \
+            "ElectrostaticPotential" if "ElectrostaticPotential" in fields else \
             ("DopingConcentration" if "DopingConcentration" in fields else fields[0])
         self.field_combo.setCurrentText(default)
         self.field_combo.blockSignals(False)
@@ -394,6 +487,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scale_combo.setCurrentText(model.default_scale(default))
         self.scale_combo.blockSignals(False)
         self.slice_box.setVisible(st.dim == 3)
+        self._sync_vectors()
+        b = st.grid.bounds
+        extent_nm = 1e3 * max(b[1] - b[0], b[3] - b[2], b[5] - b[4])
+        self.vec_pitch.blockSignals(True)
+        self.vec_pitch.setValue(max(0.1, round(extent_nm / 40.0, 1)))      # ~40 arrows across the device
+        self.vec_pitch.blockSignals(False)
         self.section_combo.blockSignals(True)
         self.section_combo.setCurrentText("off")
         self.section_combo.blockSignals(False)
@@ -427,12 +526,57 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.scale_combo.currentText()
 
     def visible_regions(self):
-        return [k for k, v in self.region_visible.items() if v]
+        return [k for k, n in enumerate(self.state.region_names) if self.region_visible.get(n, True)]
+
+    def _opacity(self, k):
+        return self.region_opacity.get(self.state.region_names[k], 1.0)
+
+    def _sync_regions(self):
+        """Region tree = the current state's regions (a process step can add
+        or remove some); visibility and opacity are kept by name."""
+        st = self.state
+        rows = [(nm, st.region_material(k)) for k, nm in enumerate(st.region_names)]
+        if getattr(self, "_tree_rows", None) == rows:
+            return
+        self._tree_rows = rows
+        self.region_tree.blockSignals(True)
+        self.region_tree.clear()
+        for k, (nm, mat) in enumerate(rows):
+            it = QtWidgets.QTreeWidgetItem([nm, mat])
+            it.setData(0, QtCore.Qt.UserRole, k)
+            it.setCheckState(0, QtCore.Qt.Checked if self.region_visible.get(nm, True) else QtCore.Qt.Unchecked)
+            if st.is_process:
+                it.setIcon(1, self._swatch(model.material_color(mat)))
+            self.region_tree.addTopLevelItem(it)
+        self.region_tree.resizeColumnToContents(0)
+        self.region_tree.blockSignals(False)
+
+    @staticmethod
+    def _swatch(color):
+        pm = QtGui.QPixmap(12, 12)
+        pm.fill(QtGui.QColor(color))
+        return QtGui.QIcon(pm)
+
+    def _sync_fields(self):
+        """Field list = the current state's fields (doping appears at the
+        first implant of a build), keeping the selection when it exists."""
+        fields = self.state.fields()
+        if [self.field_combo.itemText(i) for i in range(self.field_combo.count())] == fields:
+            return
+        cur = self.field
+        self.field_combo.blockSignals(True)
+        self.field_combo.clear()
+        self.field_combo.addItems(fields)
+        self.field_combo.setCurrentText(cur if cur in fields else fields[0])
+        self.field_combo.blockSignals(False)
 
     def set_state(self, i):
         if self.session is None:
             return
         self.idx = int(np.clip(i, 0, len(self.session) - 1))
+        self._sync_regions()
+        self._sync_fields()
+        self._sync_vectors()
         self._update_bias_label()
         self._rebuild_section()
         self.render()
@@ -441,7 +585,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_bias_label(self):
         info = self.session.states[self.idx]
-        if len(self.session) > 1:
+        if self.state.is_process:
+            self.bias_label.setText(f"{info.name}   [step {self.idx + 1}/{len(self.session)}]")
+        elif len(self.session) > 1:
             self.bias_label.setText(f"{info.name}   [{self.idx + 1}/{len(self.session)}]")
         else:
             self.bias_label.setText(f"{info.name}  (only one bias point saved; for the whole sweep "
@@ -470,6 +616,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """What to draw for region k: the cells (2D), the outer surface
         (3D), or the enabled slices through it (3D)."""
         st = self.state
+        if st.is_process:
+            axes = [a for a in "xyz" if self.slice_on[a].isChecked()]
+            smooth = self.smooth.isChecked()
+            if not axes:
+                return [g for g in [self._process_surface(k)] if g is not None]
+            cut = st.slice_region if smooth else st.voxel_slice
+            return [g for g in (cut(k, a, self._slice_origin(a)) for a in axes) if g is not None]
         g = st.region(k)
         if st.dim == 2 or g.n_cells == 0:
             return [g]
@@ -485,9 +638,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 out.append(s)
         return out
 
+    def _process_surface(self, k):
+        st = self.state
+        return st.surface(k) if self.smooth.isChecked() else st.voxel_surface(k)
+
     def _add_field(self, plotter, geom, k, lo, hi, title, bar):
-        """Draw region k's geometry `geom` coloured by the current field."""
+        """Draw region k's geometry `geom` coloured by the current field (or
+        by its material)."""
         st, name = self.state, self.field
+        if name == model.MATERIAL_FIELD:
+            plotter.add_mesh(geom, color=model.material_color(st.region_material(k)), opacity=self._opacity(k),
+                             show_edges=self.edges.isChecked(), edge_color="black", line_width=0.5,
+                             smooth_shading=geom.n_cells > 0 and st.is_process and self.smooth.isChecked(),
+                             reset_camera=False)
+            return
         m = geom.copy(deep=False)
         assoc = st.association(name)
         vals = model.scale_values(st.values(name, geom), self.scale)
@@ -497,7 +661,7 @@ class MainWindow(QtWidgets.QMainWindow):
             m.cell_data["_display"] = vals
         plotter.add_mesh(
             m, scalars="_display", preference=assoc, cmap=self.cmap_combo.currentText(), clim=(lo, hi),
-            nan_color=NAN_COLOR, opacity=self.region_opacity.get(k, 1.0), show_edges=self.edges.isChecked(),
+            nan_color=NAN_COLOR, opacity=self._opacity(k), show_edges=self.edges.isChecked(),
             edge_color="black", line_width=0.5, show_scalar_bar=not bar,
             scalar_bar_args=dict(title=title, vertical=False, position_x=0.2, position_y=0.03,
                                  width=0.6, height=0.09, fmt="%.3g", color="black",
@@ -514,6 +678,77 @@ class MainWindow(QtWidgets.QMainWindow):
         plotter.add_mesh(pv.PolyData(np.asarray(p, dtype=float)[None, :]), color="black", point_size=10,
                          render_points_as_spheres=True, name="probe", reset_camera=False)
 
+    def _vector_planes(self):
+        """(axis, pos) of the planes that carry arrows in the 3D view."""
+        st = self.state
+        if st.dim == 2:
+            return [("z", 0.0)]
+        return [(a, self._slice_origin(a)) for a in "xyz" if self.slice_on[a].isChecked()]
+
+    def _arrows(self, pts, vec, spacing, vmax):
+        """Arrow glyphs for vectors `vec` at `pts`: direction of v, length
+        from |v| (log over 6 decades below vmax, or proportional), at most
+        0.9 x the grid spacing. Returns (glyphs, log10|v| per glyph point)."""
+        mag = np.linalg.norm(vec, axis=1)
+        if self.vec_len.currentText() == "log":
+            frac = np.clip((np.log10(mag / vmax) + 6.0) / 6.0, 0.0, 1.0)
+        else:
+            frac = mag / vmax
+        keep = frac > 0.02
+        p = pv.PolyData(pts[keep])
+        p.point_data["dir"] = vec[keep] / mag[keep, None]
+        p.point_data["len"] = 0.9 * spacing * frac[keep]
+        p.point_data["log10|v|"] = np.log10(mag[keep])
+        if not p.n_points:
+            return None
+        return p.glyph(orient="dir", scale="len", factor=1.0,
+                       geom=pv.Arrow(tip_length=0.35, tip_radius=0.12, shaft_radius=0.04))
+
+    def _add_arrows(self, plotter, planes, to_plane=None):
+        """Draw the selected vector field on `planes`; to_plane maps 3D
+        points/vectors into a section's flat (u, v, 0) frame."""
+        name = self.vec_combo.currentText()
+        if not name or name == "none":
+            return
+        st = self.state
+        spacing = self.vec_pitch.value() * 1e-3                    # nm -> um
+        samples = [st.vector_samples(name, a, pos, spacing, regions=self.visible_regions()) for a, pos in planes]
+        samples = [(p, v) for p, v in samples if len(p)]
+        if not samples:
+            return
+        if to_plane is not None:
+            samples = [to_plane(p, v) for p, v in samples]
+        vmax = max(float(np.linalg.norm(v, axis=1).max()) for _, v in samples)
+        unit = st.units.get(name, "")
+        for p, v in samples:
+            g = self._arrows(p, v, spacing, vmax)
+            if g is None:
+                continue
+            c = self.vec_color.currentText()
+            if c.startswith("by magnitude"):
+                short = VECTOR_SHORT.get(name, name)
+                plotter.add_mesh(g, scalars="log10|v|", cmap="magma", reset_camera=False,
+                                 scalar_bar_args=dict(title=f"log10 |{short}|\n{unit}", vertical=True,
+                                                      position_x=0.86, position_y=0.25, width=0.05,
+                                                      height=0.5, color="black", fmt="%.1f",
+                                                      title_font_size=14, label_font_size=12))
+            else:
+                plotter.add_mesh(g, color=c, reset_camera=False)
+
+    def _sync_vectors(self):
+        st = self.state
+        names = st.vector_fields() if st is not None else []
+        cur = self.vec_combo.currentText()
+        self.vec_combo.blockSignals(True)
+        self.vec_combo.clear()
+        self.vec_combo.addItems(["none"] + names)
+        if cur in names:
+            self.vec_combo.setCurrentText(cur)
+        self.vec_combo.blockSignals(False)
+        self.vec_box.setEnabled(bool(names))
+        self.vec_box.setToolTip("" if names else "This result has no vector fields (re-export it with the "
+                                                 "current fab simulate / sweep drivers)")
+
     def render(self):
         if self.session is None:
             return
@@ -529,10 +764,21 @@ class MainWindow(QtWidgets.QMainWindow):
         for k in self.visible_regions():
             for geom in self._display_geometry(k):
                 self._add_field(self.plotter, geom, k, lo, hi, title, bar)
-                bar = True
-            if sliced:
-                self.plotter.add_mesh(st.region(k).extract_feature_edges(), color="gray", opacity=0.4,
-                                      reset_camera=False)
+                bar = bar or name != model.MATERIAL_FIELD
+            if sliced and st.is_process:
+                surf = self._process_surface(k)
+                if surf is not None:                       # faint context around the slices
+                    self.plotter.add_mesh(surf, color=model.material_color(st.region_material(k)), opacity=0.08,
+                                          reset_camera=False)
+        if self.outlines.isChecked() and not st.is_process:
+            planes = ([(a, self._slice_origin(a)) for a in "xyz" if self.slice_on[a].isChecked()]
+                      if st.dim == 3 else [("z", 0.0)])
+            for a, pos in planes:
+                o = st.outline(a, pos, regions=self.visible_regions())
+                if o.n_cells:
+                    self.plotter.add_mesh(o, color=OUTLINE_COLOR, line_width=1.5, reset_camera=False)
+        if not st.is_process:
+            self._add_arrows(self.plotter, self._vector_planes())
         if self.section is not None:
             self.plotter.add_mesh(pv.lines_from_points(self.section.outline3d()), color="black",
                                   line_width=2, reset_camera=False)
@@ -566,10 +812,18 @@ class MainWindow(QtWidgets.QMainWindow):
             g = sec.region(k)
             if g is not None:
                 self._add_field(pl, g, k, lo, hi, title, bar)
-                bar = True
-                pl.add_mesh(g.extract_feature_edges(boundary_edges=True, feature_edges=False,
-                                                    manifold_edges=False, non_manifold_edges=False),
-                            color="gray", line_width=1, reset_camera=False)
+                bar = bar or self.field != model.MATERIAL_FIELD
+        if self.outlines.isChecked():
+            o = self.state.outline(sec.axis, sec.pos, regions=self.visible_regions())
+            if o.n_cells:
+                o = o.copy()
+                o.points = np.column_stack([sec.to2d(o.points), np.zeros(o.n_points)])
+                pl.add_mesh(o, color=OUTLINE_COLOR, line_width=1.5, reset_camera=False)
+        if not self.state.is_process:
+            def to_plane(p, v):
+                return (np.column_stack([sec.to2d(p), np.zeros(len(p))]),
+                        np.column_stack([sec.to2d(v), np.zeros(len(v))]))     # in-plane part
+            self._add_arrows(pl, [(sec.axis, sec.pos)], to_plane=to_plane)
         flat = lambda p: np.append(sec.to2d(p), 0.0)                 # noqa: E731
         if self.cut is not None and sec.contains(self.cut[0]) and sec.contains(self.cut[1]):
             pl.add_mesh(pv.Line(flat(self.cut[0]), flat(self.cut[1])), color="magenta", line_width=3,
@@ -647,7 +901,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_region_check(self, item, col):
         k = item.data(0, QtCore.Qt.UserRole)
-        self.region_visible[k] = item.checkState(0) == QtCore.Qt.Checked
+        self.region_visible[self.state.region_names[k]] = item.checkState(0) == QtCore.Qt.Checked
         self.render()
 
     def _selected_regions(self):
@@ -657,12 +911,12 @@ class MainWindow(QtWidgets.QMainWindow):
         sel = self._selected_regions()
         if sel:
             self.opacity.blockSignals(True)
-            self.opacity.setValue(int(round(100 * self.region_opacity[sel[0]])))
+            self.opacity.setValue(int(round(100 * self._opacity(sel[0]))))
             self.opacity.blockSignals(False)
 
     def _on_opacity(self, v):
         for k in self._selected_regions():
-            self.region_opacity[k] = v / 100.0
+            self.region_opacity[self.state.region_names[k]] = v / 100.0
         self.render()
 
     def _update_slice_labels(self):
@@ -814,6 +1068,9 @@ class MainWindow(QtWidgets.QMainWindow):
         depth y for a vertical cut), else against distance along the cut."""
         st = self.state
         p0, p1 = self.cut
+        if self.field == model.MATERIAL_FIELD:
+            self.cutplot.clear("Cut line: choose a field to plot (e.g. DopingConcentration)")
+            return
         d, v = st.cut_line(p0, p1, self.field)
         i = model.cut_axis(p0, p1)
         nd = 2 if st.dim == 2 else 3

@@ -4305,3 +4305,884 @@ The branch chain `3d-perf-core` -> `3d-vtk-export` -> `3d-rust-tracer` ->
 - The planar template is always finite width with STI edges.
 - Re-distancing gets its own implementation, with Rust where profiling
   shows a 5-10x gain.
+
+## 41. Phase 3: virtual fab (level-set process engine) + planar MOSFET template
+
+Branch `3d-fab-planar`, off `main` after the Phases 0-2 merge.
+
+**User decisions (2026-10-10)**
+- The planar device is always finite width with STI edges. There is no
+  z-uniform mode.
+- Re-distancing gets its own implementation, with Rust where it gives
+  5-10x.
+- Commits carry no Claude attribution from now on. Old commits stay as
+  they are.
+
+**Engine (`fab/`)**
+- `structure.py`: regions (name, material, level set on a uniform node
+  grid), 2D masks and accumulated donors/acceptors. Each process step is
+  one geometric operation:
+  - substrate, pattern
+  - deposit:
+    - conformal: an exact offset of the distance field
+    - selective (`on: [Si]`)
+    - fill, directional, masked
+  - etch:
+    - anisotropic: by depth and/or stop-on-material, masked
+    - isotropic
+  - planarize
+  - implant: analytic Gaussian in depth below the surface of the
+    non-blocking solid, times a lateral erfc of the 2D distance to the
+    open area (`blocked_by` footprint and/or mask). Peak or dose.
+  - dope: uniform, in regions or materials
+- `levelset.py`: closest-point re-distancing (below), cropped local
+  distance, column top heights, exact polygon distance for masks.
+- `expr.py`: safe parameter expressions (ast, no eval) with nm/um/A units.
+- `templates.py`: the planar template, layer 1 expanded to layers 2/3.
+  Derived parameters (`Lx`, `xg0`, ...) are expressions too, so the
+  dumped flow stays editable.
+- `flow.py`: runs the three-layer YAML. `export.py`: per-step `.vti`
+  snapshots plus a `.pvd` (written on worker threads).
+- `python3 -m fab build|expand`.
+
+**Re-distancing (the core numerical piece).** Prototyped against exact
+distances before writing the engine (3.9M voxels, 1/0.5/1 nm):
+- The per-axis crossing formula was off by up to 0.57 nm at seed voxels:
+  tilted surfaces cross beyond the neighbour voxel.
+- Replaced by Newton projection onto the trilinear interpolant: closest
+  points to 0.005 nm.
+- A voxel inheriting its nearest seed's closest point is off by delta^2/2D
+  (up to ~0.5 nm). Added a tangent-plane slide plus re-projection, keeping
+  the closer of the two. Smooth surfaces now come out to ~0.02 nm.
+- Sharp convex edges had no seeds. Seeds now include all 26 neighbours.
+- Remaining sharp-corner error is under half a voxel. That is a
+  resolution limit: a sampled field cannot hold a sharp edge.
+- Re-distancing runs only when a step needs true distances: conformal
+  deposit, isotropic etch, implant footprints. Etch, fill and CMP need
+  only signs, and min/max keeps the zero set.
+
+**Rust kernel (`native/src/levelset.rs`).** Profiling: 68% of the build
+was scipy `map_coordinates` inside the Newton projections.
+- `ls_project` / `ls_refine` mirror the numpy code: on-the-fly
+  `np.gradient`, the same clamped trilinear sampling and the same
+  acceptance tests. Points are split over `std::thread::scope` (no new
+  crate).
+- Speed: 7.3x on re-distancing (1.81 -> 0.25 s, 3.8M voxels).
+- Agreement: 6e-14 nm with numpy.
+- Bug found: `np.argwhere(...).astype(float)` is Fortran-ordered, and
+  numpy-rs `as_slice()` accepts F order, which silently scrambled the
+  rows. The kernels now reject non-C-contiguous input, with a test.
+
+**Bugs found while building the planar device**
+1. *Tie nodes.* Mask edges on whole nm land exactly on nodes.
+   - Problem: a node with phi = 0 was in neither a set nor its complement,
+     so the STI etch left a one-voxel slot of nothing at the active edge.
+   - Fix: a complement is -phi - EPS. Removals include their boundary.
+2. *float32 storage broke the tie arithmetic.* -(-1e-6 as float32) - 1e-6
+   = -3e-15, not 0. The poly fill claimed a node at every Si surface, and
+   every column read as "blocked" by the gate, so no As was implanted.
+   - Fix: level sets in float64, EPS = 2^-20.
+3. *Phantom zero sheets.* After the gate etch, the poly field is exactly
+   0 along the whole oxide surface.
+   - In re-distancing, Newton projection landed on them (distance 0
+     everywhere on the oxide top). Fix: a candidate must lie in a voxel
+     whose corners straddle the interface.
+   - For the implant footprint, the column minimum read 0 there.
+4. *Column-wise etch fronts* place lateral edges only to the nearest
+   column (spacer 7.21 nm for 8 nm). Two partial fixes failed: keeping
+   untouched nodes, then a per-column visibility term.
+   - Fix: removed = points with visible gas within `depth` straight up,
+     a vertical sliding minimum (`ndimage.minimum_filter1d`) of
+     -cummin(solid). Both are minima along columns of the solid field,
+     so etched faces keep sub-voxel positions, and overhangs shadow.
+   - Removals also update nodes exactly on a surface (phi <= 0), or stray
+     zeros poison the column minima (the STI recess read 2.0 for 2.25).
+   - Result: spacer width 8.0000 nm at every height on both sides,
+     including an off-node gate edge (30.3 nm), and STI recess 2.2500 nm.
+5. *Domain ceiling.* The 8 nm liner over the 41.5 nm gate reached the
+   47.5 nm ceiling, so the etch saw no gas above the gate.
+   - Fix: the template has headroom (gate + spacer + margin), and a
+     deposit reaching the ceiling now raises an error.
+6. *Implant defaults* gave a 48 nm junction for a 30 nm gate. Retuned:
+   extension ~11 nm, deep S/D ~31 nm.
+
+**Planar template.** Finite width with STI. Flow:
+1. substrate doping
+2. STI etch, fill, CMP
+3. well/Vt implant
+4. gate oxidation (on Si)
+5. poly, gate etch (stops on oxide)
+6. oxide strip (recesses STI by 1.5 tox)
+7. extension implant
+8. SiN spacer
+9. S/D implant
+10. metal contacts
+
+nmos/pmos, no halo. Default: Lg 30, tox 1.5, gate 40, spacer 8, W 60,
+STI 20 wide / 50 deep, voxel 1/0.5/1 nm, 127x312x101 nodes.
+
+**tcadview (process snapshots)**
+- Reads `.vti` (cell `region_id`/`material_id`; point `ls_<region>` int8
+  level sets, doping NaN outside semiconductors).
+- Region surfaces are contours of the level sets (wall nodes forced
+  outside, so regions close at the domain walls). Slices and sections are
+  clipped at the level sets.
+- "Material" field coloured per material. Opens at the final step, with a
+  "Process step" stepper.
+- The region tree is rebuilt per step, with visibility and opacity kept by
+  name. The field list updates (doping appears at the first implant).
+- The cut plot's signed-log axis puts its linear band 8 decades below the
+  peak (doping profiles were unreadable).
+
+**Timing (M3 Pro).** Planar build: 8.1 s numpy -> 1.4 s with the Rust
+kernel and cropped implant re-distancing. 20 snapshots: 2.4 s (5.7 s
+before threading). About 32 MB on disk, git-ignored.
+
+**Checks**
+- `testsuite/test_fab.py`, 21 tests, with and without Rust:
+  - re-distancing (sphere, plane), polygon distances
+  - operations vs analytic geometry:
+    - conformal corner radius sqrt(t^2 - d^2) to 0.06 nm
+    - spacer exactly t at three heights, off-node edge
+    - etch stop, selective growth, CMP + isotropic etch
+    - implant peak depth / erfc 1/2 at the edge, dose integral to 1e-3
+    - ceiling error
+  - the planar build vs its parameters:
+    - gate edges, gate height and oxide top to 0.05 nm
+    - spacer 8.000, STI depth/recess/width edges
+    - junction depth vs the analytic Gaussians to 0.1 nm
+  - no gas below the surface, the layer-2 YAML round trip (bitwise),
+    snapshots in the viewer model, pmos
+- `test_native.py`: Rust vs numpy re-distancing, F-order rejection.
+- All suites pass in the venv and the conda env:
+  - 1D 6/6, 2D 4/4
+  - VTK, native, tcadview 16/16, fab 21/21
+
+## 42. Phase 3 (cont.): gate metal, a reference 3D solve, and a clean structure
+
+**Gate and contacts as process volumes.** The planar template now builds a
+real gate metal (TiN by default; work function 4.25 eV for NMOS, 4.95 eV
+for PMOS, or Poly at 4.05/5.17), and its whole surface is the gate
+terminal. Source and drain contacts are whole W volumes. Layer 3 points
+each contact at a region.
+
+**A reference 3D solve on a rectilinear grid** (`mesh3d/cartesian.py`,
+`fab/simulate.py`, `python -m fab simulate`).
+- What it is: a graded tensor-product grid sampled from the voxel labels.
+  It is an exact box-FV mesh (the Voronoi cell of a rectilinear node is
+  the box between midpoints, and per-material splits are exact).
+- Half width with a symmetry plane.
+- Bug found: the solver pairs contact boundary values (in
+  `boundary_point_index` order) with `psi[is_contact]` (in node order),
+  so the contact nodes must be sorted. Unsorted, Newton converged only
+  linearly.
+- ILU does not converge on its high-aspect cells (up to about 16:1), so
+  it runs on PETSc LU.
+- Result: 57,888 nodes, Vt 0.214 V and 0.065 V, DIBL 156 mV/V, SS
+  87 mV/dec, 332 s.
+- This is a stand-in only. Refinement planes cross the whole domain and
+  there is no mandatory quality gate. It is kept as the reference for the
+  octree mesher.
+
+**Octree transition study** (for the Phase 5 mesher). On random 2:1
+balanced octrees:
+- Centre-fan tets (the 2D quadtree's construction carried to 3D) give
+  negative edge couplings on about 15% of edges: circumcentres land in
+  the neighbouring cell. Rejected.
+- The exact Voronoi dual of the octree vertices is admissible by
+  construction:
+  - volumes sum to the box, all positive
+  - cells close to 4e-9
+  - facet areas symmetric
+- Cells differ from a cube only within one fine cell of a level change.
+
+**The structure had real defects, not just rendering.** The user spotted
+many tiny corners in the 3D view. Measuring the voxel labels the solver
+is built from showed three:
+1. The oxide strip etched *all* SiO2, so it recessed the STI 2.25 nm
+   below the silicon. That exposed a silicon sidewall step along every
+   active edge.
+2. The spacer etch left nitride stringers in that step.
+3. The gate oxide grown on silicon only left the gate 1.5 nm lower over
+   the STI than over the channel. A ledge at every active edge, with
+   eight single-voxel gas voids at the gate corners.
+
+Fixes:
+- The gate dielectric is deposited over the whole (flat, post-CMP)
+  surface.
+- The strip targets the `gate_oxide` region only, via a new
+  `etch(regions=...)`.
+
+Results:
+- The STI is flush with the silicon, and the gate bottom is flat.
+- Region cell counts are exact box volumes (STI 2 x 252,000; gate
+  216,000).
+- No voids, no slivers.
+
+**Structure check after every build** (`Structure.check`, logged by
+`flow.build`):
+- Warnings: enclosed gas voids, detached fragments of a region, and
+  layers one voxel thick.
+- One-voxel flakes are relabelled to their surroundings and counted
+  (`_despeckle`). A flake is a cell whose two neighbours along an axis
+  share a different label; it comes from the staircase of a curved
+  surface poking out by a voxel. In the default planar build that is 8
+  cells at the rounded spacer corners.
+- A real film between two different materials is never relabelled.
+- Re-distancing every region before labelling was tried. It made the
+  jitter worse (16 flakes), so it was not used.
+
+The rendered surfaces are separate. tcadview contours each level set
+with marching cubes, which bevels every sharp edge by up to one voxel.
+That is drawing only: the device is built from the cell labels.
+
+## 43. Phase 3 (cont.): exact device geometry in the viewer; ILD and full-height contacts
+
+**"Too many corners between materials."** After the fixes in section 42,
+the user still saw bevels and seams at every material edge. Those were
+the viewer, not the structure. tcadview drew each material as a separate
+marching-cubes contour of that material's level set, with smooth shading:
+- each sharp edge was cut by up to a voxel
+- two touching materials were two independently bevelled surfaces, so a
+  groove or seam showed where they meet
+- under the contacts there was a lip that does not exist in the labels
+
+The device is built from the voxel cell labels. Those are an exact
+partition: sharp edges, and every shared face is the same face.
+
+The viewer now draws that (`model.voxel_surface`, `model.voxel_slice`):
+- the boundary faces of each region's cells, built with numpy, closed
+  and outward-oriented
+- point fields taken at the grid nodes, not interpolated
+- the smooth contours stay behind a "smooth surfaces (level set)"
+  checkbox
+- test: watertight, positive exact volume, and a face shared by two
+  regions appears identically in both
+
+**Why sharp, staircased geometry is the right device representation.**
+- Every interface of the planar device is an axis-aligned plane on whole
+  nm, so it lies exactly on voxel faces.
+- The only curved surfaces are the conformal spacer's rounded corners.
+  They are real (radius = spacer thickness), insulator against insulator,
+  and away from the silicon.
+- The planned octree mesher snaps feature planes to cell faces anyway.
+- A rounded corner in a voxel or octree mesh is a staircase, which is
+  worse for the solver than a true sharp corner.
+- Sharp corners do concentrate field, as in a real device (corner
+  effect). That is physics to resolve with local refinement, not a
+  numerical defect. Corner rounding as a process option (STI top-corner
+  rounding oxidation) can come later.
+
+**ILD and contacts as in a real flow** (the user: there is never gas
+between spacer and contacts, and the contacts are as tall as the gate or
+taller - a big part of the off-state capacitance). After the S/D implant
+the planar template now:
+- fills an ILD (`ild_material`, SiO2) and CMPs it to `ild_cap` (10 nm)
+  above the gate
+- etches the contact trenches through the ILD region only (spacer and
+  STI untouched)
+- fills W up to the ILD top: contacts 50 nm tall, against a 41.5 nm gate
+  top
+
+Bugs found on the way:
+- *Material names in parameters.* `ild_material: SiO2` was parsed as an
+  expression (it contains a digit). A parameter that is a single word
+  and not another parameter's name is now a name.
+- *"Nobody's" cells.* With the ILD, the structure check found eight
+  4-cell gas pockets where the ILD wraps the spacer's rounded corner.
+  - At the nodes, the ILD is exactly the complement of the old solid.
+  - But a cell's mean of a minimum is below the minimum of the means,
+    so near a curved surface neither region's cell mean was negative.
+  - Fix: a cell is gas iff the cell mean of the union field (the field
+    that defines the solid) is >= 0. The region field means only choose
+    which material.
+
+**Device solve over the whole stack.** `fab simulate` cut the domain 10
+nm above the silicon, which dropped most of the gate and contact
+sidewalls and their coupling. The default is now the top of the solid
+(the ILD top).
+
+That exposed a solver bug (`solver2d/newton_solver_qf_2d.py`):
+- A metal-volume ohmic contact also touches insulator nodes (its
+  sidewalls in the ILD/spacer).
+- The local-neutrality contact formula divided by ni = 0 there. That gave
+  NaN quasi-Fermi boundary values and a metal potential at the intrinsic
+  level instead of at the n+ Fermi level. PETSc LU then failed on the
+  first factorization.
+- Fix: a metal contact is one equipotential. Its insulator nodes take
+  V + psi_bulk of the contacted region (median over the contact's
+  semiconductor nodes), with the quasi-Fermi levels at V.
+- Merge gate: only nodes that used to produce NaN are affected. The 2D
+  golden tests (`test_2d_examples`) pass unchanged.
+- A Schottky contact will later set this potential from the metal work
+  function.
+
+Reference 3D Id-Vg with the full stack (67,956 nodes, half width,
+PETSc LU, 434 s), against the earlier run cut 10 nm above the silicon:
+
+| | truncated (sec. 42) | full stack + ILD |
+|---|---|---|
+| Vt,cc lin -> sat | 0.214 -> 0.065 V | 0.218 -> 0.057 V |
+| DIBL | 156 mV/V | 170 mV/V |
+| SS | 87 mV/dec | 89 mV/dec |
+| Ion | 1907 uA/um | 1827 uA/um |
+| Ioff | 8.3e-7 A/um | 1.0e-6 A/um |
+
+The tall drain metal, now in the electrostatics through the spacer and
+ILD, couples more drain field into the channel. The capacitances
+themselves (Cgd, Cgs from charge vs bias) are not computed yet.
+
+## 44. Branch `3d-octree-mesh` started (Phase 5); passdown
+
+Branched from `3d-fab-planar`. Nothing implemented yet. The approved
+design and the night's passdown are at the top of
+`plans/3d_handoff.md`:
+- an adaptive box tree with per-axis splits
+- a local mirror rule at interfaces
+- an exact Voronoi dual (box fast path plus exact clipping)
+- a mandatory gate
+- validation against the rectilinear reference of section 43
+
+The octree transition study is saved as
+`mesh3d/studies/octree_transition_study.py`.
+
+## 45. Octree mesher, first working version (`mesh3d/octree.py`)
+
+What is implemented: the approved design in `plans/3d_handoff.md`.
+- A kd-style box tree over the fab voxels (per-axis splits).
+- Leaves are single-label. Sizing is graded from semiconductor
+  interfaces and junctions. 2:1 balance between vertex neighbours, and
+  face match across label changes.
+- The dual is the exact Voronoi diagram of all leaf corners:
+  - box fast path, decided by a KD-tree query on the 8 corners of each
+    candidate box
+  - exact half-space clipping elsewhere, nearest neighbour first with a
+    security radius
+  - per-material splits by clipping against the overlapping leaf boxes
+- A mandatory gate `check_octree_mesh` on every build.
+- `fab.simulate.build_device(..., mesher="octree")`.
+
+Bugs found by the gate:
+1. *Coplanar clip duplication.* Clipping a polyhedron with a plane that
+   one of its faces already lies in (axis-aligned cells meet leaf boxes
+   all the time) created a duplicate cut face. The divergence-theorem
+   volume then double-counted it: oxide 362.75 vs 360 nm^3. A plane
+   that cuts nothing now leaves the polyhedron unchanged.
+2. *Round-off facets.* Degenerate (cospherical) node sets gave diagonal
+   facets of about 1e-10 nm^2 on one side only. The cutoff is now
+   relative: area < 1e-8 * edge length^2 is a point or line contact.
+
+Validation on `configs/fab_planar_tiny.yaml` (Vds 0.05 V):
+
+| | octree | rectilinear |
+|---|---|---|
+| nodes | 18,791 | 20,328 |
+| Id(Vg=0) | 3.7268e-6 A | 3.7167e-6 A (0.3% apart) |
+| Id(Vg=0.6) | 1.0393e-5 A | 1.0394e-5 A |
+
+The gate passes (facet symmetry 2e-8).
+
+Not good enough yet, on the full planar device:
+- 144,370 device nodes against 67,956 rectilinear.
+- 565 s to build in Python: tree 165 s, and 400 s clipping 57,551 cells.
+
+Next:
+1. Cut the node count:
+   - face match only at semiconductor interfaces (conformity matters
+     only for carrier facets; the other splits are exact by clipping)
+   - coarser targets at insulator/metal surfaces
+   - look at where the leaves go
+2. Port the tree and the clipping to Rust.
+
+## 46. Octree mesher: Rust kernels, per-axis sizing, full-device validation
+
+**Speed: Rust kernels in `native/`.**
+- `boxtree_refine` (`boxtree.rs`) mirrors `BoxTree.refine` rule for rule
+  and in the same queue order. The leaves are identical (test). Small
+  device: 9.0 s -> 0.19 s (47x).
+- `voronoi_cells` (`voronoi.rs`) mirrors the Python clipper, threaded
+  over cells; it matches the Python reference to 5e-9 relative
+  (round-off from operation order).
+- The box fast path and the edge/volume assembly are vectorized numpy
+  (array keys instead of dictionaries).
+- Full planar device mesh build: 565 s -> 8.3 s (tree 2.5 s).
+
+**Node count: per-axis sizing.** The spacing along axis a is now graded
+only from interfaces and junctions crossed along a. An isotropic
+distance had put 0.5 nm y-spacing down the whole 50 nm STI sidewall.
+Full device: 144k -> 67.9k nodes (rectilinear: 68.0k).
+
+**Face match also at conductor surfaces.** The full device first failed
+the gate: facet area differed by 55% between the two sides of 6 edges at
+the gate's bottom corners. The face-match rule had been limited to
+semiconductor interfaces, so the gate metal / oxide plane fell between
+two nodes (y = 99 and 101), and each side gave the facet on that plane
+to a different material. A terminal is a Dirichlet surface and must
+carry nodes, so face match now applies at semiconductor and conductor
+interfaces. The gate passes, with facet symmetry 3e-12.
+
+**Validation on the full planar device** (half width, PETSc ILU, Id at
+Vds = 50 mV):
+
+| mesh | nodes | Id(Vg=0) | Id(Vg=0.6) | mesh / solve |
+|---|---|---|---|---|
+| rectilinear default | 67,956 | 8.38e-10 | 1.1394e-5 | 2.7 / 23 s |
+| octree default | 65,633 | 7.62e-10 | 1.0737e-5 | 8.3 / 29 s |
+| rectilinear fine | 168,808 | 7.88e-10 | 1.1274e-5 | 3.4 / 68 s |
+| octree fine | 94,067 | 7.47e-10 | 1.1297e-5 | 14 / 50 s |
+
+- The fine meshes agree to 0.2% on Id(0.6): converged near 1.128e-5 A.
+  At fine resolution the octree reaches it with 44% fewer nodes.
+- The default octree is 4.8% low on Id(0.6) and the default rectilinear
+  1.0% high. The defaults need tuning.
+- ILU now converges on the rectilinear mesh too. Its earlier failure
+  was most likely the NaN contact boundary values fixed in section 43,
+  not the 16:1 cells.
+
+**Known issue.** With SciPy SuperLU (the venv without PETSc), the
+rectilinear mesh's equilibrium Jacobian is "exactly singular" on the
+tiny device; the octree mesh solves. No node lacks carrier or Poisson
+coupling, so it is not structural. The likely cause is the known flat
+degeneracy of the first equilibrium Newton step, which PETSc's pivoting
+survives. The octree-vs-rectilinear test needs PETSc.
+
+Tests: `testsuite/test_octree.py`:
+- the gate on a synthetic device: exact volumes, sorted terminals, and
+  the gate catching a corrupted volume
+- the Rust tree and clipping against Python
+- octree vs rectilinear Id within 1% on the tiny device
+
+**`fab simulate --mesher octree`** (`write_state_octree`): each device
+and conductor leaf becomes a hexahedron, with point fields at the leaf
+corners (NaN inside metals) and mirroring to the full width. Tiny
+device: mesh 1.0 s, 5 bias points in 9 s with PETSc ILU; loads in
+tcadview.
+
+**Metals carry no unknowns** (the user asked; checked on the tiny device):
+- 0 of 14,773 mesh nodes lie strictly inside a metal. Metal leaves shape
+  the tree but contribute no control volume.
+- The nodes on a metal surface are Dirichlet.
+- Gate: one potential on all 705 surface nodes, Fermi level at Vg.
+- Source/drain: Fermi level exactly V on all surface nodes. The
+  electrostatic potential varies 5.5 mV over the silicon part, because
+  ohmic = local neutrality at each silicon node with its own doping. A
+  single metal potential with a barrier is the planned Schottky contact.
+
+**Sizing experiments** (full device, Id(0.6); converged value about
+1.128e-5):
+
+| octree setting | nodes | Id(0.6) |
+|---|---|---|
+| default | 65,633 | -4.8% |
+| h_fine (1, 0.5, 1) | 84,130 | -3.1% |
+| fine (also h_fine_other 1, h_max 4) | 94,067 | +0.2% |
+| growth 1.25, h_max 6 | 295,077 | +0.06% |
+
+The on-current is most sensitive to h_max / h_fine_other. Next: find out
+which region drives the error before choosing defaults.
+
+## 47. Octree on-current error: tree layout, not resolution; contact-node bug fixed
+
+**The study** (`mesh3d/studies/mesher_convergence.py`; one change at a
+time from the default; Id(Vg=0.6, Vd=0.05), converged about 1.128e-5 A):
+
+| setting | nodes | Id(0.6) |
+|---|---|---|
+| default | 65,633 | -4.8% |
+| h_max 4 (all axes) | 57,549 | +2.4% |
+| h_max 4 in x only / y only / z only | 73k / 59k / 59k | +2.3% / +3.5% / -4.7% |
+| h_fine_other 1 (all, or y only) | 88.6k / 66.9k | -5.4% / no change |
+| h_max 4 capped in semiconductor only / insulator only | 74k / 71k | no change / no change |
+| default sizing, root 8-16-8 / 16-16-16 voxels | 47k / 58k | +2.4% / +3.5% |
+
+- Finer leaves anywhere did not move Id. `h_max` also sets the root box
+  (2*h_max), and the root tiling alone moved Id by up to 16% and the node
+  count from 47k to 242k (a 12-24-12 root fragments the tree).
+- Two layouts with the same sheet charge (within 0.5%) and the same
+  surface phin profile (within 0.5 mV) carried different currents.
+  Current was conserved to 1e-13 (drain = source = every x-plane), so the
+  extraction was not the problem.
+
+**Cause: contact nodes that do not touch the metal.**
+- A node was a contact node if its Voronoi cell had any volume inside a
+  conductor leaf. At a 2:1 transition, a hanging node's cell can poke into
+  the metal past the surface nodes.
+- In the 16-16-16 layout, an oxide node 0.5 nm above the channel (gate
+  oxide 1.5 nm) was pinned to the gate potential: a local 3x Cox. The
+  surface node below it had n = 2.4e20 against 5.5e19 for its
+  neighbours, and that edge carried 3x the current.
+- Count of contact nodes not on their metal: 54 gate and 11 source
+  (16-16-16); 1 gate and 2 source (default).
+- *Fix* (`_assemble`): a contact node lies ON its conductor, meaning one of
+  its 8 voxels is that metal.
+- *New quality numbers* (measured, not gated yet): `stray_metal_volume`
+  and `stray_metal_nodes`, the metal volume in cells of non-contact
+  device nodes. It is dropped now, which loses the flux across that piece
+  of metal surface. Default 1.9 nm^3 (3 nodes), 16-16-16 86 nm^3 (65),
+  fine 52 nm^3 (24). These sit mostly in the ILD next to the contact
+  sidewalls, where 1 nm thick ILD leaves with 4 nm tangential size have
+  finer neighbours.
+
+**After the fix** (no velocity saturation / with velocity saturation):
+
+| layout | nodes | Id(0.6) no vsat | Id(0.6) vsat |
+|---|---|---|---|
+| default | 65.6k | 1.422e-5 | 1.074e-5 |
+| root 8-16-8 | 47.3k | 1.411e-5 | 1.155e-5 |
+| root 16-16-16 | 57.8k | 1.350e-5 (was 1.578e-5) | 1.009e-5 (was 1.168e-5) |
+| fine | 94.1k | 1.371e-5 | 1.130e-5 |
+| rectilinear default / fine | 68k / 169k | 1.369e-5 / 1.359e-5 | 1.139e-5 / 1.127e-5 |
+
+- Without velocity saturation the layouts agree within +4% / -1%; off
+  currents within 5%.
+- With velocity saturation the spread is about 14%. The driving force is
+  dpsi / edge_length. On the diagonal edges of transition cells in the
+  inversion layer it picks up the vertical gate field. In the default
+  layout about 1 uA of 14 uA crosses mid-channel on diagonal edges, and
+  0 in the fine octree.
+- Velocity saturation cuts Id by about 20% at Vd = 50 mV on BOTH meshers,
+  far more than the lateral channel field (about 2e4 V/cm) justifies. The
+  edge-projected field also includes the built-in S/D junction fields.
+  This is a physics-model issue in shared solver code, for the user to
+  decide.
+
+Also seen: below the Si surface, leaf heights alternate 0.5 / 1 nm,
+because the label split at the surface leaves odd voxel counts and
+`_rule_size` halves 3 into 1 + 2. That costs nodes, not accuracy.
+
+## 48. Octree: no stray metal volume (exact test, refinement loop, gated)
+
+The user asked for fixes that hold for every future structure (FinFET,
+nanosheet, other gate, dielectric and contact styles), not planar-only
+rules.
+
+- *Invariant.* No device node may have Voronoi cell volume inside a
+  metal it is not on. That volume would be dropped, and the flux across
+  that piece of metal surface lost.
+- *Test.* The test is the exact one, on the dual (`_stray_parts`), so it
+  makes no assumption about orientation, layers or shape.
+- *Repair* (`BoxTree.split_for_stray`). For each offending node, take the
+  nearest device leaves that share a face with a conductor and whose
+  tangential extent strictly contains the node (closed box first, then
+  rings 1-3 voxels out). Split them at the node's coordinates. Face
+  match carries the split into the metal leaf, so the surface gains a
+  node in line with the offender. Then `compact()` and refine again
+  (Rust or Python), rebuild the dual, and repeat (at most 6 passes).
+- *Gate.* `check_octree_mesh` now raises on any stray metal volume.
+
+**Results** (full planar device): every layout is clean after ONE extra
+pass.
+
+| layout | offenders | nodes added | build | Id(0.6), no vsat |
+|---|---|---|---|---|
+| default | 3 | 19 | 10 -> 15 s | 1.4222e-5 |
+| root 8-16-8 | 4 | 24 | 7 -> 9.5 s | 1.4108e-5 |
+| root 16-16-16 | 65 | 235 | 9 -> 13 s | 1.4205e-5 (1.578e-5 before 47, 1.3502e-5 after 47) |
+| fine | 24 | 32 | 13 -> 19.5 s | 1.3707e-5 |
+
+- The coarse layouts now agree within 0.8%. They sit about 3.5% above the
+  fine octree and the rectilinear meshes (1.36-1.37e-5): a resolution
+  question for choosing the defaults.
+- *Cost.* A second full dual pass. Only clipped (transition) cells can
+  reach into metal, because a box cell stops at the surface nodes, which
+  face match guarantees. So the check, and the rebuild, can later be
+  limited to the clipped cells near metal.
+
+## 49. Velocity saturation driven by the quasi-Fermi gradient ("hybrid"), opt-in
+
+The user's point: only the field along the current causes velocity
+saturation.
+- A literal E.J/|J| ("Eparallel") still throttles at the S/D junctions.
+  There the built-in field (about 5e5 V/cm) is parallel to the current
+  but balanced by diffusion, so it heats nobody.
+- The force that drives the carrier, and lies along its current, is the
+  quasi-Fermi gradient (J = -q mu n grad phin). That is Sentaurus'
+  default for high-field saturation (GradQuasiFermi).
+
+**What changed** (`solver2d/newton_solver_qf_2d.py`; backward compatible).
+- `velocity_saturation` = `False` | `True` / `"efield"` (unchanged, still
+  the default) | `"hybrid"` | `"gradqf"`.
+- `_edge_force` computes F per edge and carrier, with its 4 partials.
+  `hybrid` = w |dphi|/L + (1 - w) |dpsi|/L, w = c^2 / (c^2 + c_ref^2),
+  c_ref = 1e16: the gradient where the carrier is dense, the field where
+  it is sparse. This is the avalanche solver's resolution of the same
+  trade-off.
+- `edge_mobility` takes n, p, phin and phip and returns the full mobility
+  derivatives; `edge_currents` adds them to the psi AND phi partials.
+- The YAML can name the force: `physics: velocity_saturation: hybrid`
+  (`main2d_mosfet_sweep.py`; `btbt/main_btbt2d_sweep.py` no longer casts
+  it to bool).
+- *Warm-up* (`newton_solve_2d(vsat_warmup=True)`). With a quasi-Fermi
+  force, each point is converged with "efield" first, then with the
+  requested force from there.
+  - Why: a new contact bias enters as a phi jump across the first edge
+    (0.05 V / 0.5 nm, about 1e6 V/cm).
+  - A quasi-Fermi force reads that jump as saturation, and a saturated
+    edge carries about q c vsat whatever its phi drop. So the phi
+    conductance collapses and Newton diverged: residual 1e7 with LU too,
+    and ILU failures on every octree mesh.
+  - The edge field is blind to phi and settles it first.
+
+**Tests.** `testsuite/test_vsat_force.py`:
+- all 8 edge-current partials for every force against central finite
+  differences (densities 1e12-1e20). A 1% error in one partial is
+  caught (checked by mutation).
+- force physics: with a flat phi in a 1e6 V/cm field, efield saturates
+  and gradqf does not; hybrid follows gradqf when dense and efield when
+  sparse.
+
+The 2D golden tests pass (efield default unchanged).
+
+**2D NMOS sweep** (`configs/input_mosfet_2d.yaml`, Lg 0.5 um, 6 curves,
+138 points):
+
+| force | converged | Newton iterations | Ion | DIBL | SS lin/sat |
+|---|---|---|---|---|---|
+| efield | 138/138 | 811 | 201.1 uA/um | 40.6 | 68.3 / 70.9 |
+| hybrid | 138/138 | 875 | 201.9 uA/um | 40.3 | 68.3 / 70.8 |
+| gradqf | singular factorization | - | - | - | - |
+
+**3D planar device, Id(Vg=0.6, Vd=0.05)** (PETSc ILU):
+
+| mesh | nodes | hybrid | efield (section 47) | no vsat |
+|---|---|---|---|---|
+| oct default | 65.7k | 1.3447e-5 | 1.074e-5 | 1.422e-5 |
+| oct root 8-16-8 | 47.3k | 1.3324e-5 | 1.155e-5 | 1.411e-5 |
+| oct root 16-16-16 | 58.1k | 1.3437e-5 | 1.009e-5 | 1.421e-5 |
+| oct fine | 94.1k | 1.2970e-5 | 1.130e-5 | 1.371e-5 |
+| rect default / fine | 68k / 169k | 1.3012e-5 / 1.2891e-5 | 1.139e-5 / 1.127e-5 | 1.369e-5 / 1.359e-5 |
+
+- The layout spread drops from about 14% to 0.9%.
+- Saturation now costs about 5% at Vd = 50 mV, not 20%.
+- Solve time is about the same (default octree 31 s vs 30 s).
+- Coarse octrees remain about 3.5% above the fine meshes. That is
+  resolution, for the defaults study.
+- Off-current: octree 7.8-8.2e-10, rectilinear 8.5-9.3e-10.
+
+## 50. Hybrid is the default velocity-saturation force (user approved)
+
+- `velocity_saturation: true` now means "hybrid" (`vsat_force`). The old
+  force is still available as "efield". `fab/simulate.py` and the 2D
+  configs pick up hybrid through `true`.
+- *The warm-up became a fallback.* Warm-up first (section 49) broke the
+  2D continuation sweeps: 30 of 138 high-bias points were lost. From an
+  efield state the high-Vds pinch-off differs too much, and the previous
+  hybrid point is the better start. So `newton_solve_2d`:
+  - tries the requested force directly, capped at
+    `VSAT_DIRECT_MAXITER = 15` iterations; a linear-solver breakdown counts
+    as a failure;
+  - only if that fails, converges with efield from the same start and then
+    switches to the requested force.
+- *2D NMOS* (all 138 points converge):
+  - linear-region Id rises up to +9.4% (Vds = 0.05 V, high Vgs);
+  - saturation rises 0.3-3%;
+  - subthreshold is unchanged.
+  This is the junction built-in field no longer throttling the mobility.
+- *2D BTBT.* Only the "local" Kane model at Vsub <= -2 V moves, by up to
+  +46%; none, local_1d and nonlocal are unchanged to about 1e-6.
+  - The integrated generation is IDENTICAL (kane_bulk 1.5927e-7 A/um at
+    -3 V in both).
+  - What changes is collection: about 12% of the generated pairs reach the
+    terminals and the rest recombine where they are made. The pairs pile up
+    in a high field balanced by diffusion, which efield throttled.
+    Collection rises from 12.5% to 15.4%.
+- The 2D goldens `mosfet_2d` and `btbt_2d` were re-captured after these
+  checks.
+- *3D* (full planar device, ILU): values are as in section 49, all layouts
+  converge.
+  - But the solve takes 57 s instead of 31 s. Each bias JUMP (the study
+    script does no continuation) burns its capped direct attempt before the
+    fallback.
+  - The real fix is a better start when a contact bias changes: shift
+    phi and psi by dV over the contact's connected doped region, so the
+    jump lands at the junction instead of on the first contact edge.
+    Proposed to the user.
+- `test_octree` drain-current tolerance goes from 1% to 2%, with a comment.
+  Octree vs rectilinear on the tiny device is 1.8% with hybrid; that is the
+  default octree's resolution gap (+3.4% on the full device) and is
+  tightened again after the defaults study.
+
+## 51. Hybrid vsat cost in 3D: what was tried (no code change kept)
+
+The user asked to fix the 3D slowdown that came with hybrid velocity
+saturation (section 50) using a better start on a contact bias change.
+That approach did not hold up. Everything below was measured and then
+reverted; the code is as committed in 70cf3a7, and all tests pass.
+
+**The real cost, on the real 3D I-V path** (`fab.simulate.run_curve`,
+continuation, tiny planar device, octree, PETSc ILU):
+
+| | efield | hybrid (c_ref 1e16) |
+|---|---|---|
+| mesh + equilibrium | 6.1 s | 11.6 s |
+| Id-Vg, Vds = 0.05 V, 13 points | 47 iterations, 3.7 s | 61 iterations, 6.3 s |
+| Id-Vg, Vds = 1.0 V, 13 points | 98 iterations, 9.1 s | 240 iterations, 30.7 s |
+
+The cost is intrinsic, not a start-up artifact. In the velocity-saturated
+pinch-off region electrons are above c_ref, so the quasi-Fermi drive
+applies. A saturated edge carries about q n vsat whatever its phi drop, so
+its phi-conductance collapses and Newton stiffens.
+- The hybrid equilibrium alone needs 16 iterations against 10-11 for
+  efield, with no bias jump at all.
+- The full-system Jacobian against central differences on a real 3D state
+  (semiconductor rows): efield 6e-7, hybrid 4e-3 relative. That is looser,
+  consistent with the stronger nonlinearity of the weight; no missing term.
+- (Rows of insulator nodes differ for BOTH forces in that harness, because
+  of how their rows are pinned; this is not a Jacobian error.)
+
+**Tried and reverted:**
+
+1. *Contact-region shift of the start state.* For each ohmic contact,
+   shift psi and phi by its bias change over the same-doping-sign
+   connected region; graph-based. Variants: all of psi/phin/phip; psi plus
+   the majority phi only; and psi plus majority phi weighted by
+   majority / |doping|, to keep it out of the depletion layer.
+   - Every variant broke the forward-biased 2D diode (`main2d_sweep`)
+     from Va = 0.3 V. Newton stalls: the line search finds no descent
+     (step 1e-6, zero movement), even with exact linear solves
+     (`linear_solver="legacy"`), so it is not the inexact solve.
+   - The unshifted start also needs about 8 heavily damped iterations at
+     these points. The solver's row-scaled merit is the weak spot: worth
+     its own study.
+   - In 3D (tiny device, hybrid, no fallback) the shift did not help:
+     40-iteration failures with or without it.
+   - The region detection itself was right: the diode's 241 p-well nodes.
+2. *Per-mesh memory of the start strategy* (direct vs efield warm-up,
+   whichever last worked goes first). The 2D goldens still pass, but
+   Newton work rose up to 65% (Id-Vg at 1 V: 256 -> 424 iterations). One
+   direct failure flips the mesh to warm-up-first, which costs about 2x on
+   points where direct would have worked.
+3. *c_ref 1e16 -> 1e17.* In 3D this changed Id by only 0.2% while cutting
+   the Vds = 1 V curve from 240 to 156 iterations (1e18: 130, but Id
+   -2.6%). In the 2D NMOS (1e16 body) Id moved up to 5.5%. So c_ref is a
+   real model parameter for lightly doped devices, not a free speed knob.
+
+**Options for the user** (see the handoff):
+- (a) accept the hybrid cost for now and fold it into the speed pass;
+- (b) make c_ref doping-relative, e.g. a fraction of the local |doping|
+  or of the neighbouring S/D doping, so it does not depend on the device;
+- (c) study the Newton globalization (the row-scaled merit) that stalls on
+  reasonable starts;
+- (d) keep hybrid for accuracy runs and offer efield as a fast option in
+  `fab simulate`.
+
+## 52. Faster `fab simulate` (parallel segments); a quick 3D golden test; first full results
+
+The user chose option (a) from section 51: accept the hybrid cost for now,
+speed things up in general.
+
+**`fab simulate` runs every point on the performance cores.** Before, there
+was one process per Id-Vg curve: two curves meant two busy cores out of six,
+and each process rebuilt the mesh and equilibrium.
+- The parent builds the mesh, solves equilibrium, and ramps the drain to
+  each Vds at Vgs = 0, ONCE.
+- That context goes to every worker through the pool initializer. The fab
+  structure (level sets, hundreds of MB) is left out: the VTK writers now
+  need only `_region_info`.
+- Each curve is split into segments, n_cores / n_curves of them. A segment
+  walks from its curve's Vgs = 0 state to its first point (not recorded),
+  then through its points. Workers use 1 BLAS/OpenMP thread.
+
+Full planar device (65.7k nodes, octree, hybrid, PETSc ILU, 2 x 13 points):
+
+| | wall time | notes |
+|---|---|---|
+| before (one process per curve) | 347 s | Vds = 1 V curve 329 s on one core |
+| after (equal segments) | 243 s | mesh + equilibrium 33 s, drain ramp 43 s, slowest segment 165 s |
+| segments weighted by curve cost | 268 s | rejected, see below |
+
+- All 26 currents agree with the old path to 1.5e-10.
+- *Weighting rejected.* More segments for the high-Vds curve was slower,
+  because each extra segment repeats a walk from Vgs = 0 that costs about
+  as much as its points at Vds = 1 V (779 vs 551 Newton iterations).
+- *Where the rest is.* Each point at Vds = 1 V costs about 40 Newton
+  iterations with hybrid: the next lever, for the speed pass.
+
+**Results, full planar device** (Lg 30 nm, W 60 nm, tox 1.5 nm):
+Vt 0.204 -> 0.052 V, SS 82 mV/dec, DIBL 160 mV/V, Ion 1811 uA/um,
+Ioff 1.16e-6 A/um.
+- The field maps show a subsurface punch-through path in the off state
+  (about 1e17 cm^-3 under the channel). This is the known device-design
+  issue (high DIBL and Ioff), not a numerical one.
+
+**`testsuite/test_3d_examples.py`** (the user asked for a 3D case that is as
+quick as the 1D/2D ones):
+- tiny planar device, octree, default physics;
+- bias points: off (0, 0.05), linear (0.6, 0.05), saturation (0.6, 0.6),
+  reached through the sweep's own continuation driver;
+- checks: currents to rtol 2e-3, plus the exact node count and zero stray
+  metal nodes;
+- wall time 42 s in the venv (SuperLU), 52 s with PETSc LU, 26 s with
+  PETSc ILU; it passes in all three.
+
+## 53. Viewer: exact material outlines, zoomable cut plot, E and current vectors
+
+The user asked for three things.
+
+**1. Material outlines.** Sliced 3D results and the section view drew region
+boundaries with VTK feature/boundary edges.
+- On the octree mesh, every hanging-node seam (a large cell next to two
+  small ones) is also a "boundary" to VTK: 12,666 segments for silicon in
+  3D, and 800 on one slice where the true outline is a few lines.
+- Now `State.outline(axis, pos, regions)` traces the boundaries from the
+  region id sampled on a 0.25 nm pixel grid anchored at the device bounds,
+  with the boundaries on pixel edges. This is exact for the voxel-built
+  devices (the pixel divides the voxel), and runs of pixels merge into
+  single segments: 35 segments on the mid-width slice, about 1 s, cached.
+- A "material outlines" checkbox (default on) covers the 3D slices, the
+  section view and 2D results.
+- *Test:* each segment has different regions on its two sides.
+
+**2. Cut-line plot.**
+- A compact matplotlib navigation toolbar: home, back/forward, pan, box
+  zoom, save; 16 px icons, no coordinate row (the first version was too
+  big, per the user).
+- X axis linear/log; Y axis "field scale" (the field's Scale) / linear /
+  log / signed log. Changing either redraws the curves on the plot.
+
+**3. Vectors.**
+- *Export* (`solver2d/vtk_export.nodal_vectors`, every writer): the point
+  data gain ElectricField, eCurrentDensity, hCurrentDensity and
+  TotalCurrentDensity (3-vectors, V/cm and A/cm^2). Each is a per-node
+  weighted least-squares fit over the node's edges: dpsi/L for E, and the
+  solver's own edge currents / semiconductor facet area for J. For a box
+  cell this is exactly the axis components.
+- The 3D writers flip the z component in the mirrored half.
+- *Verified* on the tiny device (converged states, Vd 0.05 / 0.3 / 0.6 V):
+  the sampled J vectors integrated over 6 planes across the channel match
+  the exact plane current (sum of crossing edge currents) within 0.7%.
+  `test_3d_examples` now checks this (limit 2%; a 5% error is caught).
+- *Viewer:* a "Vectors" group with
+  - field: none / E / Jn / Jp / J;
+  - length: log over 6 decades (default) or linear;
+  - colour: black / white / by log magnitude;
+  - arrow spacing in nm.
+  Arrows sit on the active slices (full 3D vectors), in the section view
+  (in-plane part), and over the whole device for 2D results.
+- `test_vtk`'s ParaView array count goes 12 -> 16.
+
+## 54. Merge to main: Phase 3 (virtual fab) and the octree mesher
+
+The user asked to merge to main and push. `3d-octree-mesh`, which contains
+`3d-fab-planar`, is merged into `main` (no fast-forward) and pushed to
+origin.
+
+**Merge gate:** `unittest discover -s testsuite` (venv): 110 tests OK,
+1 skip, 198 s. `test_octree` under conda with PETSc: 6 OK.
+
+**What main now has, beyond Phases 0-2:**
+- *Virtual fab* (`fab/`): planar template, structure gate, `fab simulate`
+  with parallel curve segments.
+- *Octree mesher* (`mesh3d/octree.py`, `native/`): an exact Voronoi dual
+  with a mandatory gate (including the stray-metal check); contact nodes
+  must lie on their metal.
+- *Velocity saturation:* hybrid quasi-Fermi driving force by default,
+  with an efield fallback start.
+- *Vector export* (E, Jn, Jp, J), verified against the plane currents.
+- *Viewer:* exact material outlines, a cut-plot toolbar with axis scales,
+  vector arrows.
+- *Tests:* a quick 3D golden test.
+
+Handoff: the COLD START at the top of `plans/3d_handoff.md` was rewritten
+for a context clear. The user wants to be asked before the next phase
+starts.

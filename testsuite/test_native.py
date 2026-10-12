@@ -71,5 +71,32 @@ class TestTracer(unittest.TestCase):
                                      np.array([0]), np.array([-2]), z, z, 1.0, 1.12, 0.05, 5e-9, 2e-7)
 
 
+
+@unittest.skipIf(native is None, "tcad_native not built (see README, 'Compiled kernels')")
+class TestLevelSet(unittest.TestCase):
+    """fab/levelset.py redistance(): the Rust closest-point kernels against
+    the numpy path, on a distorted (non-distance) box field with sharp edges."""
+
+    def test_redistance_matches_numpy(self):
+        from fab import levelset
+        h = np.array([1.0, 0.5, 1.0])
+        X, Y, Z = np.meshgrid(*[np.arange(n) * hh for n, hh in zip((50, 90, 40), h)], indexing="ij")
+        q = np.abs(np.stack([X - 24.3, Y - 22.2, Z - 19.1], -1)) - np.array([12.4, 9.15, 10.7])
+        box = np.linalg.norm(np.maximum(q, 0), axis=-1) + np.minimum(q.max(-1), 0)
+        f = box * (1.0 + 0.6 * np.sin(X / 7.0) * np.cos(Z / 5.0)) ** 3
+        d_rust = levelset.redistance(f, h, band=8)
+        saved, levelset.native = levelset.native, None
+        try:
+            d_numpy = levelset.redistance(f, h, band=8)
+        finally:
+            levelset.native = saved
+        np.testing.assert_allclose(d_rust, d_numpy, rtol=0, atol=1e-9)
+
+    def test_rejects_fortran_order(self):
+        phi = np.zeros((3, 3, 3))
+        with self.assertRaises(ValueError):
+            native.ls_project(phi, np.ones(3), np.asfortranarray(np.ones((4, 3))), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

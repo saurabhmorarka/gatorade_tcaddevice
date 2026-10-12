@@ -212,42 +212,109 @@ def _mesh_mobility_nodal(mesh, mat):
     return mu_n_node, mu_p_node
 
 
-def edge_mobility(mesh, mat, psi, velocity_saturation=False):
-    """Per-edge (mu_n_e, mu_p_e, dmu_n/d(dpsi_e), dmu_p/d(dpsi_e)).
+VSAT_FORCES = ("efield", "hybrid", "gradqf")
+# Carrier density (cm^-3) where the hybrid driving force is half quasi-Fermi
+# gradient, half field - the avalanche solver's value
+# (avalanche/newton_solver_avalanche.py, DEFAULT_REF_DENSITY_CM3).
+VSAT_REF_DENSITY = 1.0e16
+# Newton iterations allowed to a quasi-Fermi-force solve from the given start
+# before falling back to the edge-field warm-up (newton_solve_2d).
+VSAT_DIRECT_MAXITER = 15
+
+
+def vsat_force(velocity_saturation):
+    """None (no velocity saturation) or one of VSAT_FORCES; True means the
+    default, "hybrid" (DEVELOPMENT_LOG 49-50; "efield" was the default
+    before)."""
+    if velocity_saturation is False or velocity_saturation is None:
+        return None
+    if velocity_saturation is True:
+        return "hybrid"
+    if velocity_saturation not in VSAT_FORCES:
+        raise ValueError(f"velocity_saturation must be a bool or one of {VSAT_FORCES}, not {velocity_saturation!r}")
+    return velocity_saturation
+
+
+def _edge_force(force, dpsi, dphi, c_i, c_j, L, Vt, sign):
+    """Driving force F (V/cm, >= 0) of one carrier per edge and its partials
+    (dF/dpsi_i, dF/dpsi_j, dF/dphi_i, dF/dphi_j). sign = +1 for electrons
+    (dc/dpsi = c/Vt, dc/dphi = -c/Vt), -1 for holes.
+
+      efield: |dpsi|/L
+      gradqf: |dphi|/L - the force that drives (and heats) the carrier;
+              parallel to its current, J = -q*mu*c*grad(phi)
+      hybrid: w*|dphi|/L + (1-w)*|dpsi|/L, w = c^2/(c^2 + c_ref^2), c the
+              edge-mean density: the quasi-Fermi gradient where the
+              carrier is dense, the field where it is sparse (where phi is
+              ill-determined and the carrier carries no current anyway).
+
+    |x| is smoothed to sqrt(x^2 + E_SMOOTH^2) so F is differentiable at 0."""
+    E = dpsi / L
+    G = dphi / L
+    Ea = np.sqrt(E ** 2 + E_SMOOTH ** 2)
+    Ga = np.sqrt(G ** 2 + E_SMOOTH ** 2)
+    z = np.zeros_like(E)
+    if force == "efield":
+        dE = E / Ea / L
+        return Ea, (-dE, dE, z, z)
+    if force == "gradqf":
+        dG = G / Ga / L
+        return Ga, (z, z, -dG, dG)
+    c = 0.5 * (c_i + c_j)
+    w = 1.0 / (1.0 + (VSAT_REF_DENSITY / np.maximum(c, 1e-300)) ** 2)
+    dw_dc = 2.0 * w * (1.0 - w) / np.maximum(c, 1e-300)
+    F = w * Ga + (1.0 - w) * Ea
+    dE = (1.0 - w) * E / Ea / L
+    dG = w * G / Ga / L
+    k = dw_dc * (Ga - Ea) * 0.5 / Vt                       # through c = (c_i + c_j)/2
+    return F, (-dE + sign * k * c_i, dE + sign * k * c_j, -dG - sign * k * c_i, dG - sign * k * c_j)
+
+
+def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phin=None, phip=None):
+    """Per-edge (mu_n_e, mu_p_e, dmu_n, dmu_p); dmu_* is None without
+    velocity saturation, else the 4 partials (d/dpsi_i, d/dpsi_j,
+    d/dphi_i, d/dphi_j) of that carrier's edge mobility.
 
     mu0 is the doping-dependent (Caughey-Thomas) low-field mobility,
-    averaged to the edge. With velocity_saturation=True it is further
-    reduced by the Caughey-Thomas high-field model (mobility_field) driven
-    by the electrostatic field PROJECTED ON THE EDGE, E_par = dpsi/edge_len
-    (the edge-based form of the "Eparallel" driving force).
+    averaged to the edge. With velocity saturation it is further reduced by
+    the Caughey-Thomas high-field model (mobility_field), driven per edge by
+    the force selected with velocity_saturation (see _edge_force):
 
-    Why this driving force:
-      * Not |E| at a node: that includes the large, current-free vertical
-        gate field across the inversion layer and throttles the channel
-        mobility more and more with Vgs (an earlier attempt's "Id-Vg
-        collapses at high Vgs"). On an edge, the channel's horizontal edges
-        see only the lateral field; the vertical field lives on vertical
-        edges, which carry almost no current.
-      * Not the quasi-Fermi gradient dphi/edge_len ("GradQuasiFermi"): in
-        a depletion region n ~ 0, so phin is numerically undetermined and
-        its gradient arbitrary - tried first, and Newton turned erratic
-        ramping Vds past ~0.5 V at Vgs=0 (the same low-density convergence
-        problem commercial simulators document for that driving force).
-        dpsi is always well defined.
-    In equilibrium the edge current is 0 whatever mu is, so this changes
-    nothing there."""
+      * "efield": the electrostatic field projected on the edge,
+        dpsi/edge_len. Not |E| at a node, which includes the large,
+        current-free vertical gate field. But the edge projection still
+        sees (a) the built-in field of the source/drain junctions, which is
+        balanced by diffusion and heats nobody - about a 20% Id cut at
+        Vd = 50 mV in the planar 3D device - and (b) part of the vertical
+        gate field on the diagonal edges of non-rectilinear (octree
+        Voronoi) meshes, which made Id depend on the tree layout
+        (DEVELOPMENT_LOG 47).
+      * "gradqf": the carrier's quasi-Fermi gradient, the force parallel to
+        its current. Tried first in 2D (session notes in
+        DEVELOPMENT_LOG): phin is undetermined where n ~ 0, and Newton
+        turned erratic ramping Vds past ~0.5 V at Vgs = 0.
+      * True / "hybrid" (the default): the quasi-Fermi gradient where the
+        carrier is dense, the field where it is sparse - the avalanche solver's resolution of the
+        same trade-off (FLOOXS/Charon damp the gradient force the same way).
+    In equilibrium the edge current is 0 whatever mu is."""
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
     mu_n0 = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
     mu_p0 = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
-    if not velocity_saturation:
-        z = np.zeros_like(mu_n0)
-        return mu_n0, mu_p0, z, z
-    edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
-    E = (psi[jj] - psi[ii]) / edge_len
-    mu_n, dmu_n_dE = mobility_field(E, mu_n0, mat.vsat_n, mat.beta_n)
-    mu_p, dmu_p_dE = mobility_field(E, mu_p0, mat.vsat_p, mat.beta_p)
-    return mu_n, mu_p, dmu_n_dE / edge_len, dmu_p_dE / edge_len
+    force = vsat_force(velocity_saturation)
+    if force is None:
+        return mu_n0, mu_p0, None, None
+    L = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
+    dpsi = psi[jj] - psi[ii]
+    if force == "efield":
+        z = np.zeros_like(dpsi)
+        n = p = np.ones_like(psi)
+        phin = phip = np.zeros_like(psi)
+    Fn, dFn = _edge_force(force, dpsi, phin[jj] - phin[ii], n[ii], n[jj], L, mat.Vt, +1.0)
+    Fp, dFp = _edge_force(force, dpsi, phip[jj] - phip[ii], p[ii], p[jj], L, mat.Vt, -1.0)
+    mu_n, dmu_n_dF = mobility_field(Fn, mu_n0, mat.vsat_n, mat.beta_n)
+    mu_p, dmu_p_dF = mobility_field(Fp, mu_p0, mat.vsat_p, mat.beta_p)
+    return mu_n, mu_p, tuple(dmu_n_dF * d for d in dFn), tuple(dmu_p_dF * d for d in dFp)
 
 
 def _semiconductor_edge_mask(mesh):
@@ -349,7 +416,7 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
     facet_semi, _, _ = _mesh_semi_geometry(mesh)
-    mu_n, mu_p, dmu_n, dmu_p = edge_mobility(mesh, mat, psi, velocity_saturation)
+    mu_n, mu_p, dmu_n, dmu_p = edge_mobility(mesh, mat, psi, velocity_saturation, n, p, phin, phip)
     geo = Q * Vt * facet_semi / edge_len
     if edge_mask is not None:
         geo = geo * edge_mask
@@ -372,17 +439,25 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     dSn_dpsi_i = -(n[ii] * Bm + n[jj] * dBp + n[ii] * dBm) / Vt
     dSp_dpsi_j = (p[jj] * Bmp + p[ii] * dBpp + p[jj] * dBmp) / Vt
     dSp_dpsi_i = -(p[ii] * Bpp + p[ii] * dBpp + p[jj] * dBmp) / Vt
-    vn = geo * Sn * dmu_n
-    vp = geo * Sp * dmu_p
-    dIn_dpsi_i = cn * dSn_dpsi_i - vn
-    dIn_dpsi_j = cn * dSn_dpsi_j + vn
-    dIp_dpsi_i = cp * dSp_dpsi_i - vp
-    dIp_dpsi_j = cp * dSp_dpsi_j + vp
-    # d/dphi: only through n,p (dn/dphin = -n/Vt, dp/dphip = p/Vt).
+    dIn_dpsi_i = cn * dSn_dpsi_i
+    dIn_dpsi_j = cn * dSn_dpsi_j
+    dIp_dpsi_i = cp * dSp_dpsi_i
+    dIp_dpsi_j = cp * dSp_dpsi_j
+    # d/dphi: through n,p (dn/dphin = -n/Vt, dp/dphip = p/Vt).
     dIn_dphin_i = cn * n[ii] * Bm / Vt
     dIn_dphin_j = -cn * n[jj] * Bp / Vt
     dIp_dphip_i = cp * p[ii] * Bpp / Vt
     dIp_dphip_j = -cp * p[jj] * Bmp / Vt
+    if dmu_n is not None:          # velocity saturation: mu depends on the edge's psi and phi
+        vn, vp = geo * Sn, geo * Sp
+        dIn_dpsi_i = dIn_dpsi_i + vn * dmu_n[0]
+        dIn_dpsi_j = dIn_dpsi_j + vn * dmu_n[1]
+        dIn_dphin_i = dIn_dphin_i + vn * dmu_n[2]
+        dIn_dphin_j = dIn_dphin_j + vn * dmu_n[3]
+        dIp_dpsi_i = dIp_dpsi_i + vp * dmu_p[0]
+        dIp_dpsi_j = dIp_dpsi_j + vp * dmu_p[1]
+        dIp_dphip_i = dIp_dphip_i + vp * dmu_p[2]
+        dIp_dphip_j = dIp_dphip_j + vp * dmu_p[3]
     return In, Ip, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
                     dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j)
 
@@ -694,7 +769,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                      psi_init=None, phin_init=None, phip_init=None,
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
                      damping="line_search", cold_retry=True, velocity_saturation=False,
-                     generation=None, linear_solver="auto"):
+                     generation=None, linear_solver="auto", vsat_warmup=True):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -778,7 +853,51 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     core.linsolve.LinearSolver (factorization reuse + inexact Newton, see
     _run_newton); a LinearSolver instance - use that one; "legacy" - the
     original equilibrated SuperLU spsolve with an exact solve every
-    iteration (kept for A/B comparisons)."""
+    iteration (kept for A/B comparisons).
+
+    velocity_saturation: False, "efield", True / "hybrid" or "gradqf" - the
+    driving force of the high-field mobility (edge_mobility). With a
+    quasi-Fermi force (hybrid, gradqf) and vsat_warmup=True (default), a
+    point that does not converge within VSAT_DIRECT_MAXITER iterations is
+    redone: converged with "efield" from the same start, then with the
+    requested force from there. "iters" counts everything, "iters_warmup"
+    the iterations before the final stage (0 if the direct solve worked)."""
+    if vsat_warmup and vsat_force(velocity_saturation) in ("hybrid", "gradqf"):
+        # A quasi-Fermi force can derail Newton from a poor start: a new
+        # contact bias enters as a jump of phin/phip across the first edge
+        # at the contact (0.05 V over 0.5 nm ~ 1e6 V/cm), the force reads
+        # that as velocity saturation, the edge's phi-conductance collapses
+        # (a saturated edge carries ~q*c*vsat whatever its phi drop), and
+        # Newton diverges (3D planar device, DEVELOPMENT_LOG 49-50).
+        # So: try the requested force directly (a good start - the previous
+        # point of a continuation - converges as usual), capped so a bad
+        # start fails fast; if it fails, converge with the edge-field force
+        # (blind to phi, so it settles phi) and continue from there. Not
+        # the warm-up first: from an efield state the high-bias pinch-off
+        # differs so much that continuation sweeps failed (2D NMOS).
+        kw = dict(f_tol=f_tol, verbose=verbose, psi_bc_override=psi_bc_override,
+                  phin_bc_override=phin_bc_override, phip_bc_override=phip_bc_override, damping=damping,
+                  generation=generation, linear_solver=linear_solver)
+        try:
+            r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
+                                phip_init=phip_init, maxiter=min(maxiter, VSAT_DIRECT_MAXITER), cold_retry=False,
+                                velocity_saturation=velocity_saturation, vsat_warmup=False, **kw)
+        except RuntimeError:              # e.g. an iterative linear solve that broke down on the bad start
+            r = {"converged": False, "iters": min(maxiter, VSAT_DIRECT_MAXITER)}
+        if r["converged"]:
+            r["iters_warmup"] = 0
+            return r
+        it_direct = r["iters"]
+        w = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
+                            phip_init=phip_init, maxiter=maxiter, cold_retry=cold_retry,
+                            velocity_saturation="efield", **kw)
+        r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=w["psi"], phin_init=w["phin"],
+                            phip_init=w["phip"], maxiter=maxiter, cold_retry=False,
+                            velocity_saturation=velocity_saturation, vsat_warmup=False, **kw)
+        r["iters_warmup"] = it_direct + w["iters"]
+        r["iters"] = r["iters_warmup"] + r["iters"]
+        return r
+
     N = len(mesh.points)
     Vt = mat.Vt
     ni_arr, _ = _mesh_ni_edge_g(mesh, mat)
@@ -810,12 +929,30 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     psi_bc = np.empty(len(contact_point_idx))
     phin_bc = np.empty(len(contact_point_idx))
     phip_bc = np.empty(len(contact_point_idx))
+    # An ohmic contact that is a metal VOLUME (3D virtual-fab devices) also
+    # touches insulator nodes (its sidewalls in the ILD/spacer). The metal is
+    # one equipotential: those nodes take the potential of the contact's
+    # semiconductor side (ohmic = metal at the contacted region's Fermi
+    # level, psi = V + psi_bulk), median over its semiconductor nodes; the
+    # local-neutrality formula below would divide by ni = 0 there.
+    names_arr = np.array(contact_names, dtype=object)
+    metal_psi0 = {}
+    for name in set(contact_names) - set(psi_bc_override):
+        pts = contact_point_idx[names_arr == name]
+        semi_pts = pts[~is_insulator[pts]]
+        if len(semi_pts) < len(pts):
+            if not len(semi_pts):
+                raise ValueError(f"ohmic contact {name!r} touches no semiconductor node")
+            metal_psi0[name] = float(np.median(psi_eq[semi_pts]))
     for k, (pt, name) in enumerate(zip(contact_point_idx, contact_names)):
         v_applied = bias_by_contact.get(name, 0.0)
         if name in psi_bc_override:
             psi_bc[k] = psi_bc_override[name]
             phin_bc[k] = phin_bc_override[name]
             phip_bc[k] = phip_bc_override[name]
+        elif is_insulator[pt]:
+            psi_bc[k] = metal_psi0[name] + v_applied
+            phin_bc[k] = phip_bc[k] = v_applied
         else:
             n_bc, p_bc = contact_values(mat, mesh.Cdop[pt], ni=ni_arr[pt])
             psi_bc[k] = psi_eq[pt] + v_applied

@@ -114,6 +114,36 @@ class TestModel(unittest.TestCase):
 
 
 @unittest.skipIf(not HAVE_VIEWER, "viewer dependencies not installed")
+class TestVoxelSurface(unittest.TestCase):
+    """The process view's exact surfaces: closed, outward, exact volume."""
+
+    def test_closed_outward_exact(self):
+        import pyvista as pv
+        from tcadview.model import _voxel_boundary
+        g = pv.ImageData(dimensions=(7, 6, 5), spacing=(1.0, 0.5, 2.0))
+        rid = np.full((4, 5, 6), -1)                          # [z, y, x]
+        rid[1:3, 0:3, 2:5] = 0                                # a block on the y = 0 wall
+        rid[0, 0, 0] = 0                                      # and a detached voxel
+        rid[1:3, 3:5, 2:5] = 1                                # a neighbour sharing one face
+        g.cell_data["region_id"] = rid.ravel()
+        g.point_data["f"] = np.arange(g.n_points, dtype=float)
+        s0, s1 = _voxel_boundary(g, 0), _voxel_boundary(g, 1)
+        self.assertEqual(s0.n_cells, 48)
+        open_edges = s0.triangulate().extract_feature_edges(boundary_edges=True, feature_edges=False,
+                                                            manifold_edges=False, non_manifold_edges=False)
+        self.assertEqual(open_edges.n_cells, 0)
+        P, F = s0.points, s0.faces.reshape(-1, 5)[:, 1:]
+        vol = sum(np.dot(P[q][0], np.cross(P[q][j], P[q][j + 1])) / 6 for q in F for j in (1, 2))
+        self.assertAlmostEqual(vol, 19 * 1.0 * 0.5 * 2.0)    # positive: faces point outward
+        # point fields are the node values, unchanged
+        np.testing.assert_array_equal(s0.point_data["f"],
+                                      [g.find_closest_point(p) for p in P])
+        # the shared face is the same face in both regions
+        c0 = {tuple(np.round(c, 9)) for c in s0.cell_centers().points}
+        c1 = {tuple(np.round(c, 9)) for c in s1.cell_centers().points}
+        self.assertEqual(len(c0 & c1), 2 * 3)                  # z 2 x x 3 voxel faces
+
+
 class TestSection(unittest.TestCase):
     """Section views of an extruded 3D state: the flattened plane, and that
     probes/cuts made in it equal the 3D samples at the same points."""
@@ -128,6 +158,42 @@ class TestSection(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
+
+    def test_outline_is_material_boundaries_only(self):
+        """Every outline segment separates two different regions (or a
+        region and the outside): sample just either side of its midpoint.
+        VTK feature edges also returned internal mesh seams."""
+        st = self.st
+        for ax, pos in (("z", 0.5 * (st.grid.bounds[4] + st.grid.bounds[5])), ("x", 0.37 * st.grid.bounds[1])):
+            o = st.outline(ax, pos)
+            self.assertGreater(o.n_cells, 0)
+            seg = o.points.reshape(-1, 2, 3)
+            mid = seg.mean(axis=1)
+            d = seg[:, 1] - seg[:, 0]
+            nrm = np.zeros_like(d)
+            n = "xyz".index(ax)
+            # in-plane normal: rotate the segment direction by 90 degrees within the plane
+            u, v = [i for i in range(3) if i != n]
+            nrm[:, u], nrm[:, v] = -d[:, v], d[:, u]
+            nrm /= np.linalg.norm(nrm, axis=1)[:, None]
+            eps = 1e-5
+            def label(pts):
+                import pyvista as pv
+                sm = pv.PolyData(pts).sample(st.grid, tolerance=1e-9)
+                lab = np.asarray(sm.point_data["region_id"], dtype=int)
+                return np.where(np.asarray(sm.point_data["vtkValidPointMask"], dtype=bool), lab, -1)
+            a, b = label(mid + eps * nrm), label(mid - eps * nrm)
+            self.assertTrue((a != b).all(), f"{int((a == b).sum())} of {len(a)} outline segments inside one region")
+
+    def test_vector_samples(self):
+        st = self.st
+        self.assertEqual(set(st.vector_fields()),
+                         {"ElectricField", "eCurrentDensity", "hCurrentDensity", "TotalCurrentDensity"})
+        zmid = 0.5 * (st.grid.bounds[4] + st.grid.bounds[5])
+        pts, vec = st.vector_samples("ElectricField", "z", zmid, 0.02)
+        self.assertGreater(len(pts), 10)
+        np.testing.assert_allclose(pts[:, 2], zmid)
+        self.assertTrue(np.isfinite(vec).all())
 
     def test_mapping(self):
         from tcadview.model import Section

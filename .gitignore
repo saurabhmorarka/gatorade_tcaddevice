@@ -6,3 +6,6 @@ __pycache__/
 # per bias point) - not worth tracking, regenerate with
 # `python3 -m viz2d.plot2d <structure.json> --interactive`.
 out/**/*_viewer.html
+
+# virtual-fab builds (python3 -m fab build): binary VTK snapshots, regenerable
+out/fab_*/

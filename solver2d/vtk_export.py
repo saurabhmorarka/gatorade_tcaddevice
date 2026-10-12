@@ -21,6 +21,10 @@ them; units listed in the file's `field_units`):
                eQuasiFermiEnergy             eV   (= -phin)
                hQuasiFermiEnergy             eV   (= -phip)
                contact_id                    index into contact_names, -1 = none
+               ElectricField                 V/cm, 3-vector per node (nodal_vectors)
+               eCurrentDensity               A/cm^2, 3-vector (NaN in insulators)
+               hCurrentDensity               A/cm^2, 3-vector (NaN in insulators)
+               TotalCurrentDensity           A/cm^2, 3-vector (NaN in insulators)
   cell data    region_id                     index into region_names, -1 = none
                material_id                   index into material_names
                ElectricField                 V/cm, 3 components (constant per cell)
@@ -53,7 +57,66 @@ FIELD_UNITS = {
     "eDensity": "cm^-3", "hDensity": "cm^-3", "DopingConcentration": "cm^-3", "SpaceCharge": "C/cm^3",
     "ConductionBandEnergy": "eV", "ValenceBandEnergy": "eV", "eQuasiFermiEnergy": "eV",
     "hQuasiFermiEnergy": "eV", "ElectricField": "V/cm", "AbsElectricField": "V/cm",
+    "eCurrentDensity": "A/cm^2", "hCurrentDensity": "A/cm^2", "TotalCurrentDensity": "A/cm^2",
 }
+
+
+def _edge_fit(mesh, values, weights):
+    """Per-node vector g (N, 3) that best fits, in weighted least squares,
+    the directional values `values` (E,) along each edge's unit direction:
+    min sum_e w_e (t_e . g - value_e)^2 over the edges of each node. Exact
+    for a uniform vector field on any mesh whose edges at a node span the
+    space (a box cell's 6 axis edges give the components directly). Nodes
+    with no weighted edge get NaN."""
+    P = np.asarray(mesh.points, dtype=float)
+    if P.shape[1] == 2:
+        P = np.c_[P, np.zeros(len(P))]
+    N = len(P)
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    d = P[jj] - P[ii]
+    t = d / np.linalg.norm(d, axis=1)[:, None]
+    w = np.asarray(weights, dtype=float)
+    A = np.zeros((N, 3, 3))
+    b = np.zeros((N, 3))
+    wtt = w[:, None, None] * t[:, :, None] * t[:, None, :]
+    wtv = (w * values)[:, None] * t
+    for idx in (ii, jj):
+        np.add.at(A, idx, wtt)
+        np.add.at(b, idx, wtv)
+    tr = np.trace(A, axis1=1, axis2=2)
+    ok = tr > 0
+    # a node whose edges lie in a plane (or a line) is singular there: a
+    # tiny relative ridge keeps the out-of-plane component at 0
+    A[ok] += (1e-9 * tr[ok])[:, None, None] * np.eye(3)
+    g = np.full((N, 3), np.nan)
+    g[ok] = np.linalg.solve(A[ok], b[ok][:, :, None])[:, :, 0]
+    return g
+
+
+def nodal_vectors(mesh, mat, state):
+    """Vector fields at the nodes of a solved state:
+      ElectricField   -grad psi, fitted to dpsi / L along every edge (weights:
+                      the edge's facet area, all materials)
+      e/h/TotalCurrentDensity  fitted to I_e / facet_semi along every
+                      semiconductor edge - the solver's own Scharfetter-
+                      Gummel edge currents (solver2d.newton_solver_qf_2d.
+                      edge_currents), so the arrows carry the conserved
+                      current; NaN where a node has no semiconductor edge.
+    Units V/cm and A/cm^2 (the mesh is in cm); 3 components (z = 0 in 2D)."""
+    from solver2d.newton_solver_qf_2d import edge_currents, _mesh_semi_geometry
+    psi, n, p = state["psi"], state["n"], state["p"]
+    zero = np.zeros(len(psi))
+    phin, phip = state.get("phin", zero), state.get("phip", zero)
+    P = np.asarray(mesh.points, dtype=float)
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    L = np.linalg.norm(P[jj] - P[ii], axis=1)
+    facet_semi, _, _ = _mesh_semi_geometry(mesh)
+    E = -_edge_fit(mesh, (psi[jj] - psi[ii]) / L, mesh.facet_length)
+    In, Ip = edge_currents(mesh, mat, psi, n, p, phin, phip, state.get("velocity_saturation", False))
+    fs = np.where(facet_semi > 0, facet_semi, 1.0)
+    Jn = _edge_fit(mesh, In / fs, facet_semi)
+    Jp = _edge_fit(mesh, Ip / fs, facet_semi)
+    return {"ElectricField": E, "eCurrentDensity": Jn, "hCurrentDensity": Jp, "TotalCurrentDensity": Jn + Jp}
 
 
 def _material_name(eps_r, Eg_eV, insulator):
@@ -160,9 +223,10 @@ def contact_ids(mesh):
     return cid, names
 
 
-def state_point_data(mesh, mat, state):
+def state_point_data(mesh, mat, state, vectors=True):
     """Named per-node fields of one solved state (dict with psi, phin, phip,
-    n, p), or just the structure (doping) when state is None."""
+    n, p), or just the structure (doping) when state is None. vectors: also
+    the nodal E and current-density vectors (nodal_vectors)."""
     pd = {"DopingConcentration": np.asarray(mesh.Cdop, dtype=float)}
     if state is None:
         return pd
@@ -186,6 +250,8 @@ def state_point_data(mesh, mat, state):
         "ConductionBandEnergy": Ec, "ValenceBandEnergy": Ec - Eg,
         "eQuasiFermiEnergy": semi(-phin), "hQuasiFermiEnergy": semi(-phip),
     })
+    if vectors and "n" in state and getattr(mesh, "edges", None) is not None:
+        pd.update(nodal_vectors(mesh, mat, state))
     return pd
 
 

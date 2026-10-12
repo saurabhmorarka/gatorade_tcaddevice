@@ -81,3 +81,17 @@ only - no plotting), register it in the `EXAMPLES` dict at the bottom of
 that file, then run `python3 testsuite/capture_golden.py <name>` once to
 create its golden file. `test_examples.py` picks it up automatically (one
 test method is generated per entry in `EXAMPLES`).
+
+## 3D
+
+`test_3d_examples.py` is the tiny planar NMOS from the virtual fab
+(`configs/fab_planar_tiny.yaml`) on the octree mesh, solved at 3 bias points:
+off (Vg 0, Vd 0.05), linear (0.6, 0.05) and saturation (0.6, 0.6). Golden
+file: `golden/3d_planar_tiny.json`, rtol 2e-3; the node count and the mesh
+gate's stray-metal count must match exactly. Wall time: about 42 s in the
+venv (SuperLU), 26 s in conda with `TCAD_LINSOLVE=petsc_ilu`.
+
+```
+python3 testsuite/test_3d_examples.py -v
+python3 testsuite/test_3d_examples.py --capture   # only after verifying new numbers
+```

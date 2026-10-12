@@ -8,10 +8,17 @@
 //! BTBT curve at ~1 ms each); here every path is traced to completion in a
 //! tight loop. Point location walks the triangle adjacency from the previous
 //! triangle instead of matplotlib's trapezoid map.
+//!
+//! ls_project / ls_refine (levelset.rs): the closest-point steps of the
+//! virtual fab's re-distancing (fab/levelset.py redistance).
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+mod levelset;
+mod voronoi;
+mod boxtree;
 
 const LAM_TOL: f64 = -1e-10; // same inside-test tolerance as TriGeom.locate
 const WALK_MAX: usize = 4096;
@@ -314,5 +321,9 @@ fn trace_field_lines<'py>(
 #[pymodule]
 fn tcad_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trace_field_lines, m)?)?;
+    m.add_function(wrap_pyfunction!(levelset::ls_project, m)?)?;
+    m.add_function(wrap_pyfunction!(levelset::ls_refine, m)?)?;
+    m.add_function(wrap_pyfunction!(voronoi::voronoi_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(boxtree::boxtree_refine, m)?)?;
     Ok(())
 }
