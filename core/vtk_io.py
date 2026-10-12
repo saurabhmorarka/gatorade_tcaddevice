@@ -57,7 +57,7 @@ def _encode(a, compress):
     if not compress:
         return struct.pack("<Q", len(raw)) + raw
     blocks = [raw[i:i + _BLOCK] for i in range(0, len(raw), _BLOCK)] or [b""]
-    comp = [zlib.compress(b, 6) for b in blocks]
+    comp = [zlib.compress(b, 1) for b in blocks]     # level 1: 0.64 -> 0.36 s per 3D state file, 4% larger (DEVELOPMENT_LOG 59)
     last = len(blocks[-1]) if len(raw) else 0
     head = struct.pack(f"<{3 + len(comp)}Q", len(comp), _BLOCK, last, *map(len, comp))
     return head + b"".join(comp)

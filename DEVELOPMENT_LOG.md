@@ -5490,3 +5490,43 @@ no golden changed.
 
 **Where the 73 s goes now:** mesh build ~9 s, equilibrium 2 s, drain ramps
 22 s (serial), the Vds = 1 V curve 39 s (69 Newton iterations + VTK).
+
+## 59. Phase A speed pass, part 5: per-iteration cost and VTK output
+
+Branch `3d-speed`. Profile of the Vds = 1 V walk (one process): linear
+solve 63%, assembly + line-search residuals 35%. Part 2 had already ruled
+out other preconditioners, so this part went after the rest. Drain-ramp
+step control was re-checked first: doubling after <= 6-7 iterations made
+0.2 V steps of 10-15 iterations, 21 -> 44 s. Rejected; the ramp keeps its
+settings.
+
+**VTK output (on the slowest curve's path):**
+- zlib level 6 -> 1 in `core/vtk_io.py`: 0.64 -> 0.36 s per 3D state
+  file, 8.6 -> 8.9 MB.
+- `fab simulate` writes each point's .vtu in a background thread as soon
+  as it converges (`continuation(on_point=...)`), overlapping the next
+  Newton solves. Octree I-V 73 -> 70 s.
+
+**Assembly and residual (micro-benchmark on a real Jacobian, Vgs = 0.3 V,
+Vds = 1 V, full planar octree device): F+J 98.8 -> 43.1 ms, residual
+57.3 -> 23.4 ms.** All of it numerics-neutral (F, J equal to 2e-14 /
+2e-13 relative) and independent of the mobility model:
+- per-mesh cache (`_mesh_cached`) for edge lengths, nodal doping
+  mobility (keyed by the material's mobility parameters) and the
+  heterojunction SG shifts; two unused edge-length computations removed;
+- `bernoulli_pair`: B(-x) = B(x) + x and B'(-x) = -B'(x) - 1 from one
+  evaluation at |x| (no cancellation: both terms >= 0), and shared by
+  electrons and holes on a single-material mesh - 4 exp passes -> 1;
+- `np.bincount` instead of `np.add.at` for the edge divergences;
+- `_jacobian_index`: the blocks' row/column indices depend only on the
+  mesh and the contact set - built once (int32), each call computes only
+  values; the Dirichlet column maxima use a cached selection;
+- `mobility_field`: beta = 2 / 1 without the general pow.
+Meshes that cannot be weak-referenced (test stand-ins) are not cached.
+
+**Result.** Octree full I-V 70 -> 57 s (mesh+eq 11, ramps 17, Vds = 1 V
+curve 28). Rectilinear 54 -> 38 s. Metrics unchanged (octree Vt 0.204 ->
+0.052 V, SS 82, DIBL 160, Ion 1792, Ioff 1.17e-6; rectilinear Vt 0.200 ->
+0.044, Ion 1775). Tests: 114 + 6 octree pass, 3D octree test 14 -> 13 s.
+The I-V gained more than the per-call numbers suggest: the two workers
+also compete less for memory bandwidth.

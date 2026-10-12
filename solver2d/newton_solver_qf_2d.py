@@ -171,11 +171,23 @@ def mobility_field(E, mu0, vsat, beta):
     without the E_SMOOTH regularization - E_SMOOTH is still kept for
     robustness against any future non-default beta<1 choice.
     """
-    Ereg = np.sqrt(E ** 2 + E_SMOOTH ** 2)
+    Ereg = np.sqrt(E * E + E_SMOOTH ** 2)
     x = mu0 * Ereg / vsat
-    base = 1.0 + x ** beta
-    mu = mu0 * base ** (-1.0 / beta)
-    dmu_dEreg = -mu0 * (mu0 / vsat) * x ** (beta - 1.0) * base ** (-1.0 / beta - 1.0)
+    # dmu/dEreg = -mu * (mu0/vsat) * x^(beta-1) / base; beta = 2 and 1 (the
+    # electron and hole defaults) spelled out - the same values without
+    # the general pow (DEVELOPMENT_LOG 59)
+    if beta == 2.0:
+        base = 1.0 + x * x
+        mu = mu0 / np.sqrt(base)
+        dmu_dEreg = -mu * (mu0 / vsat) * x / base
+    elif beta == 1.0:
+        base = 1.0 + x
+        mu = mu0 / base
+        dmu_dEreg = -mu * (mu0 / vsat) / base
+    else:
+        base = 1.0 + x ** beta
+        mu = mu0 * base ** (-1.0 / beta)
+        dmu_dEreg = -mu * (mu0 / vsat) * x ** (beta - 1.0) / base
     dmu_dE = dmu_dEreg * (E / Ereg)
     return mu, dmu_dE
 
@@ -192,6 +204,40 @@ def _mesh_dEi(mesh):
     return mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else 0.0
 
 
+_MESH_CACHE = {}
+
+
+def _mesh_cached(mesh, key, build):
+    """build() once per (mesh, key): mesh-only quantities (edge lengths,
+    nodal mobility, heterojunction shifts) that every residual and
+    Jacobian evaluation used to recompute - ~15% of a 3D Newton iteration
+    (DEVELOPMENT_LOG 59). Mesh arrays are never modified after the mesh is
+    built; anything that also depends on the material carries the
+    material's parameters in `key`."""
+    entry = _MESH_CACHE.get(id(mesh))
+    if entry is None or entry[0]() is not mesh:
+        try:
+            entry = (weakref.ref(mesh), {})
+        except TypeError:                 # a stand-in mesh (e.g. a SimpleNamespace in a test): no cache
+            return build()
+        _MESH_CACHE[id(mesh)] = entry
+    store = entry[1]
+    if key not in store:
+        store[key] = build()
+    return store[key]
+
+
+def _edge_len(mesh):
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    return _mesh_cached(mesh, "edge_len", lambda: np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1))
+
+
+def _edge_divergence(ii, jj, flux, N):
+    """sum over edges of +flux at node i and -flux at node j (np.bincount:
+    several times faster than np.add.at)."""
+    return np.bincount(ii, flux, minlength=N) - np.bincount(jj, flux, minlength=N)
+
+
 def _sg_shifts(mesh, ii, jj, Vt):
     """Per-edge additions to the Scharfetter-Gummel argument d =
     (psi_j - psi_i)/Vt at a heterojunction (the 2D form of core/physics.py's
@@ -205,6 +251,11 @@ def _sg_shifts(mesh, ii, jj, Vt):
     dEi = getattr(mesh, "dEi_arr", None)
     if dEi is None or mesh.ni_arr is None:
         return 0.0, 0.0
+    return _mesh_cached(mesh, ("sg_shifts", Vt), lambda: _sg_shifts_build(mesh, ii, jj, Vt))
+
+
+def _sg_shifts_build(mesh, ii, jj, Vt):
+    dEi = mesh.dEi_arr
     ni = mesh.ni_arr
     ok = (ni[ii] > 0) & (ni[jj] > 0)
     lr = np.where(ok, np.log(np.where(ok, ni[jj], 1.0) / np.where(ok, ni[ii], 1.0)), 0.0)
@@ -218,8 +269,14 @@ def _mesh_mobility_nodal(mesh, mat):
     _mesh_ni_edge_g's ni_arr/edge_g below (mesh.Cdop is always populated,
     homogeneous mesh or not, so - unlike ni_arr - this needs no
     homogeneous-mesh fallback branch)."""
-    N_abs = np.abs(mesh.Cdop)
     model = getattr(mat, "doping_mobility", "caughey_thomas")
+    key = ("mu_nodal", model, tuple(mat.masetti_n), tuple(mat.masetti_p), mat.mu_n_max, mat.mu_n_min,
+           mat.N_ref_n, mat.alpha_n, mat.mu_p_max, mat.mu_p_min, mat.N_ref_p, mat.alpha_p)
+    return _mesh_cached(mesh, key, lambda: _mesh_mobility_nodal_build(mesh, mat, model))
+
+
+def _mesh_mobility_nodal_build(mesh, mat, model):
+    N_abs = np.abs(mesh.Cdop)
     if model == "masetti":
         return mobility_masetti(N_abs, mat.masetti_n), mobility_masetti(N_abs, mat.masetti_p)
     if model != "caughey_thomas":
@@ -321,7 +378,7 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
     force = vsat_force(velocity_saturation)
     if force is None:
         return mu_n0, mu_p0, None, None
-    L = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
+    L = _edge_len(mesh)
     dpsi = psi[jj] - psi[ii]
     if force == "efield":
         z = np.zeros_like(dpsi)
@@ -407,6 +464,21 @@ def bernoulli(x):
     return B, dB
 
 
+def bernoulli_pair(x):
+    """(B(x), B'(x), B(-x), B'(-x)) from ONE evaluation, by B(-x) = B(x) + x
+    and B'(-x) = -B'(x) - 1. Evaluated at a = |x| and shifted to the other
+    side, so the added term never cancels (B(a) and a are both >= 0);
+    bernoulli() at -x as well would cost a second exp - 4 Bernoulli calls
+    per edge-current evaluation became 1 (DEVELOPMENT_LOG 59)."""
+    x = np.asarray(x, dtype=float)
+    a = np.abs(x)
+    b, db = bernoulli(a)
+    b_neg, db_neg = b + a, -db - 1.0          # B(-a), B'(-a)
+    pos = x >= 0.0
+    return (np.where(pos, b, b_neg), np.where(pos, db, db_neg),
+            np.where(pos, b_neg, b), np.where(pos, db_neg, db))
+
+
 def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, edge_mask=None,
                   jacobian=False):
     """Electron/hole current through every edge's (semiconductor) facet,
@@ -431,7 +503,7 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
      dIp/dpsi_i, dIp/dpsi_j, dIp/dphip_i, dIp/dphip_j)."""
     Vt = mat.Vt
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
-    edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
+    edge_len = _edge_len(mesh)
     facet_semi, _, _ = _mesh_semi_geometry(mesh)
     mu_n, mu_p, dmu_n, dmu_p = edge_mobility(mesh, mat, psi, velocity_saturation, n, p, phin, phip)
     geo = Q * Vt * facet_semi / edge_len
@@ -439,10 +511,11 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
         geo = geo * edge_mask
     d = (psi[jj] - psi[ii]) / Vt
     sn, sp_ = _sg_shifts(mesh, ii, jj, Vt)
-    Bp, dBp = bernoulli(d + sn)
-    Bm, dBm = bernoulli(-(d + sn))
-    Bpp, dBpp = bernoulli(d + sp_)
-    Bmp, dBmp = bernoulli(-(d + sp_))
+    Bp, dBp, Bm, dBm = bernoulli_pair(d + sn)
+    if sp_ is sn:                  # single material: both shifts are the same 0.0
+        Bpp, dBpp, Bmp, dBmp = Bp, dBp, Bm, dBm
+    else:
+        Bpp, dBpp, Bmp, dBmp = bernoulli_pair(d + sp_)
     Sn = n[jj] * Bp - n[ii] * Bm
     Sp = p[ii] * Bpp - p[jj] * Bmp
     In = geo * mu_n * Sn
@@ -509,24 +582,17 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     n, p = _densities(psi, phin, phip, ni_arr, mat.Vt, _mesh_dEi(mesh))
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
-    edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
 
     _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
     # Semiconductor-only facets already make every oxide edge carry zero
     # current; edge_mask (optional) can exclude further edges.
     In_e, Ip_e = edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask)
 
-    div_psi = np.zeros(N)
-    np.add.at(div_psi, ii, g_e * (psi[jj] - psi[ii]))
-    np.add.at(div_psi, jj, g_e * (psi[ii] - psi[jj]))
+    div_psi = _edge_divergence(ii, jj, g_e * (psi[jj] - psi[ii]), N)
 
-    div_n = np.zeros(N)
-    np.add.at(div_n, ii, In_e)
-    np.add.at(div_n, jj, -In_e)
+    div_n = _edge_divergence(ii, jj, In_e, N)
 
-    div_p = np.zeros(N)
-    np.add.at(div_p, ii, Ip_e)
-    np.add.at(div_p, jj, -Ip_e)
+    div_p = _edge_divergence(ii, jj, Ip_e, N)
 
     # SRH denom is exactly 0 at an insulator node (n=p=ni_arr=0 there,
     # since ni_arr=0 makes _densities return 0 regardless of psi/phin/phip)
@@ -585,22 +651,15 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
-    edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
 
     _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
     In_e, Ip_e, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
                  dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j) = edge_currents(
         mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, jacobian=True)
 
-    div_psi = np.zeros(N)
-    np.add.at(div_psi, ii, g_e * (psi[jj] - psi[ii]))
-    np.add.at(div_psi, jj, g_e * (psi[ii] - psi[jj]))
-    div_n = np.zeros(N)
-    np.add.at(div_n, ii, In_e)
-    np.add.at(div_n, jj, -In_e)
-    div_p = np.zeros(N)
-    np.add.at(div_p, ii, Ip_e)
-    np.add.at(div_p, jj, -Ip_e)
+    div_psi = _edge_divergence(ii, jj, g_e * (psi[jj] - psi[ii]), N)
+    div_n = _edge_divergence(ii, jj, In_e, N)
+    div_p = _edge_divergence(ii, jj, Ip_e, N)
 
     # SRH denom is exactly 0 at an insulator node (n=p=ni_arr=0 there) -
     # guard the divide; R and its derivatives are physically moot there
@@ -643,6 +702,15 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     dR_dn = np.where(denom > 0.0, (p * denom - num * mat.tau_p) / denom_safe ** 2, 0.0)
     dR_dp = np.where(denom > 0.0, (n * denom - num * mat.tau_n) / denom_safe ** 2, 0.0)
 
+    # The (rows, cols) of every block below depend only on the mesh and on
+    # which nodes are contacts / pinned oxide: built once (_jacobian_index)
+    # and reused, so a call computes only the values (DEVELOPMENT_LOG 59).
+    P = _jacobian_index(mesh, is_contact, is_oxide_free)
+    Ai, Aj, Ci, Cj = P["Ai"], P["Aj"], P["Ci"], P["Cj"]
+    iAi, jAi, iAj, jAj = P["iAi"], P["jAi"], P["iAj"], P["jAj"]
+    iCi, jCi, iCj, jCj = P["iCi"], P["jCi"], P["iCj"], P["jCj"]
+    free, free_np, oxide_free_idx = P["free"], P["free_np"], P["oxide_free"]
+    is_np_fixed = P["is_np_fixed"]
     rows_list, cols_list, data_list = [], [], []
 
     def add(rows, cols, vals):
@@ -650,68 +718,43 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
         cols_list.append(cols)
         data_list.append(vals)
 
-    # --- Poisson: per-edge Laplacian coupling, row masked to non-contact ---
-    active_i = ~is_contact[ii]
-    active_j = ~is_contact[jj]
-    cv_i, cv_j = mesh.cv_area[ii], mesh.cv_area[jj]
     semi_frac = cv_semi / mesh.cv_area     # charge lives only in the semiconductor part
-    cvs_i, cvs_j = cv_semi_safe[ii], cv_semi_safe[jj]
+    cv = mesh.cv_area
 
-    # Electron/hole continuity rows additionally exclude is_oxide_free
-    # nodes (pinned to phin=0/phip=0 above, not assembled normally here).
-    is_np_fixed = is_contact | is_oxide_free
-    cont_active_i = ~is_np_fixed[ii]
-    cont_active_j = ~is_np_fixed[jj]
-
-    add(ii[active_i], ii[active_i], (-g_e / cv_i / poisson_scale)[active_i])
-    add(ii[active_i], jj[active_i], (g_e / cv_i / poisson_scale)[active_i])
-    add(jj[active_j], jj[active_j], (-g_e / cv_j / poisson_scale)[active_j])
-    add(jj[active_j], ii[active_j], (g_e / cv_j / poisson_scale)[active_j])
+    # --- Poisson: per-edge Laplacian coupling, row masked to non-contact ---
+    gA_i = g_e[Ai] / cv[iAi] / poisson_scale
+    gA_j = g_e[Aj] / cv[jAj] / poisson_scale
+    add(iAi, iAi, -gA_i)
+    add(iAi, jAi, gA_i)
+    add(jAj, jAj, -gA_j)
+    add(jAj, iAj, gA_j)
 
     # --- Poisson: per-node local charge derivative, non-contact nodes only ---
-    node = np.arange(N)
-    free = node[~is_contact]
     add(free, free,
         (-Q * (dn_dpsi[free] - dp_dpsi[free]) * semi_frac[free] / poisson_scale))
     add(free, N + free, (-Q * dn_dphin[free] * semi_frac[free] / poisson_scale))
     add(free, 2 * N + free, (Q * dp_dphip[free] * semi_frac[free] / poisson_scale))
 
-    # --- Electron continuity: per-edge current derivative ---
-    r_n_i, r_n_j = N + ii, N + jj
-    add(r_n_i[cont_active_i], ii[cont_active_i], (dIn_dpsi_i / cvs_i / cont_scale)[cont_active_i])
-    add(r_n_i[cont_active_i], jj[cont_active_i], (dIn_dpsi_j / cvs_i / cont_scale)[cont_active_i])
-    add(r_n_i[cont_active_i], N + ii[cont_active_i], (dIn_dphin_i / cvs_i / cont_scale)[cont_active_i])
-    add(r_n_i[cont_active_i], N + jj[cont_active_i], (dIn_dphin_j / cvs_i / cont_scale)[cont_active_i])
-
-    add(r_n_j[cont_active_j], ii[cont_active_j], (-dIn_dpsi_i / cvs_j / cont_scale)[cont_active_j])
-    add(r_n_j[cont_active_j], jj[cont_active_j], (-dIn_dpsi_j / cvs_j / cont_scale)[cont_active_j])
-    add(r_n_j[cont_active_j], N + ii[cont_active_j], (-dIn_dphin_i / cvs_j / cont_scale)[cont_active_j])
-    add(r_n_j[cont_active_j], N + jj[cont_active_j], (-dIn_dphin_j / cvs_j / cont_scale)[cont_active_j])
-
-    # --- Electron continuity: per-node recombination derivative ---
-    free_np = node[~is_np_fixed]
-    r_n_free = N + free_np
-    add(r_n_free, free_np, -Q * (dR_dn[free_np] * dn_dpsi[free_np] + dR_dp[free_np] * dp_dpsi[free_np]) / cont_scale)
-    add(r_n_free, N + free_np, -Q * dR_dn[free_np] * dn_dphin[free_np] / cont_scale)
-    add(r_n_free, 2 * N + free_np, -Q * dR_dp[free_np] * dp_dphip[free_np] / cont_scale)
-
-    # --- Hole continuity: per-edge current derivative ---
-    r_p_i, r_p_j = 2 * N + ii, 2 * N + jj
-    add(r_p_i[cont_active_i], ii[cont_active_i], (dIp_dpsi_i / cvs_i / cont_scale)[cont_active_i])
-    add(r_p_i[cont_active_i], jj[cont_active_i], (dIp_dpsi_j / cvs_i / cont_scale)[cont_active_i])
-    add(r_p_i[cont_active_i], 2 * N + ii[cont_active_i], (dIp_dphip_i / cvs_i / cont_scale)[cont_active_i])
-    add(r_p_i[cont_active_i], 2 * N + jj[cont_active_i], (dIp_dphip_j / cvs_i / cont_scale)[cont_active_i])
-
-    add(r_p_j[cont_active_j], ii[cont_active_j], (-dIp_dpsi_i / cvs_j / cont_scale)[cont_active_j])
-    add(r_p_j[cont_active_j], jj[cont_active_j], (-dIp_dpsi_j / cvs_j / cont_scale)[cont_active_j])
-    add(r_p_j[cont_active_j], 2 * N + ii[cont_active_j], (-dIp_dphip_i / cvs_j / cont_scale)[cont_active_j])
-    add(r_p_j[cont_active_j], 2 * N + jj[cont_active_j], (-dIp_dphip_j / cvs_j / cont_scale)[cont_active_j])
-
-    # --- Hole continuity: per-node recombination derivative ---
-    r_p_free = 2 * N + free_np
-    add(r_p_free, free_np, Q * (dR_dn[free_np] * dn_dpsi[free_np] + dR_dp[free_np] * dp_dpsi[free_np]) / cont_scale)
-    add(r_p_free, N + free_np, Q * dR_dn[free_np] * dn_dphin[free_np] / cont_scale)
-    add(r_p_free, 2 * N + free_np, Q * dR_dp[free_np] * dp_dphip[free_np] / cont_scale)
+    # Continuity rows additionally exclude is_oxide_free nodes (pinned to
+    # phin=0/phip=0 above, not assembled normally here).
+    s_i = 1.0 / (cv_semi_safe[iCi] * cont_scale)
+    s_j = -1.0 / (cv_semi_safe[jCj] * cont_scale)
+    for row0, dI in ((N, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j)),
+                     (2 * N, (dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j))):
+        # --- per-edge current derivative: d/dpsi_i, d/dpsi_j, d/dphi_i, d/dphi_j ---
+        add(row0 + iCi, iCi, dI[0][Ci] * s_i)
+        add(row0 + iCi, jCi, dI[1][Ci] * s_i)
+        add(row0 + iCi, row0 + iCi, dI[2][Ci] * s_i)
+        add(row0 + iCi, row0 + jCi, dI[3][Ci] * s_i)
+        add(row0 + jCj, iCj, dI[0][Cj] * s_j)
+        add(row0 + jCj, jCj, dI[1][Cj] * s_j)
+        add(row0 + jCj, row0 + iCj, dI[2][Cj] * s_j)
+        add(row0 + jCj, row0 + jCj, dI[3][Cj] * s_j)
+        # --- per-node recombination derivative (electrons -R, holes +R) ---
+        sg = -Q / cont_scale if row0 == N else Q / cont_scale
+        add(row0 + free_np, free_np, sg * (dR_dn[free_np] * dn_dpsi[free_np] + dR_dp[free_np] * dp_dpsi[free_np]))
+        add(row0 + free_np, N + free_np, sg * dR_dn[free_np] * dn_dphin[free_np])
+        add(row0 + free_np, 2 * N + free_np, sg * dR_dp[free_np] * dp_dphip[free_np])
 
     # --- Extra generation: d(Gn)/dU, d(Gp)/dU (sparse N x 3N over
     # U = (psi, phin, phip), or None for a source held fixed during this
@@ -726,25 +769,36 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     # (see the matching Rn/Rp override above) - these rows have NO other
     # contribution (excluded from every block above via is_np_fixed), so a
     # plain diagonal 1 is exact, not just a pivoting safety net. ---
-    oxide_free_idx = node[is_oxide_free]
     add(N + oxide_free_idx, N + oxide_free_idx, np.ones(len(oxide_free_idx)))
     add(2 * N + oxide_free_idx, 2 * N + oxide_free_idx, np.ones(len(oxide_free_idx)))
 
-    interior_rows = np.concatenate(rows_list)
-    interior_cols = np.concatenate(cols_list)
+    with_gen = dGn_dU is not None or dGp_dU is not None
     interior_data = np.concatenate(data_list)
-
+    dirichlet_idx = P["dirichlet"]
     # --- Dirichlet rows: scaled-identity, same pivoting-safety trick as
     # core/newton_solver_qf.py (diag = max(1.0, largest existing entry in
     # that column) so equilibration/pivoting never dilutes it). ---
-    contact_idx = node[is_contact]
-    dirichlet_idx = np.concatenate([contact_idx, N + contact_idx, 2 * N + contact_idx])
-    col_max = np.zeros(3 * N)
-    np.maximum.at(col_max, interior_cols, np.abs(interior_data))
-    dirichlet_data = np.maximum(1.0, col_max[dirichlet_idx])
-
-    rows = np.concatenate([interior_rows, dirichlet_idx])
-    cols = np.concatenate([interior_cols, dirichlet_idx])
+    if with_gen:
+        interior_rows = np.concatenate(rows_list)
+        interior_cols = np.concatenate(cols_list)
+        col_max = np.zeros(3 * N)
+        np.maximum.at(col_max, interior_cols, np.abs(interior_data))
+        dirichlet_data = np.maximum(1.0, col_max[dirichlet_idx])
+        rows = np.concatenate([interior_rows, dirichlet_idx])
+        cols = np.concatenate([interior_cols, dirichlet_idx])
+    else:
+        if "rows" not in P:
+            interior_cols = np.concatenate(cols_list)
+            P["rows"] = np.concatenate(rows_list + [dirichlet_idx]).astype(np.int32)
+            P["cols"] = np.concatenate([interior_cols, dirichlet_idx]).astype(np.int32)
+            slot_of = np.full(3 * N, -1)
+            slot_of[dirichlet_idx] = np.arange(len(dirichlet_idx))
+            P["dir_pos"] = np.flatnonzero(slot_of[interior_cols] >= 0)       # entries in a Dirichlet column
+            P["dir_slot"] = slot_of[interior_cols[P["dir_pos"]]]
+        col_max = np.zeros(len(dirichlet_idx))
+        np.maximum.at(col_max, P["dir_slot"], np.abs(interior_data[P["dir_pos"]]))
+        dirichlet_data = np.maximum(1.0, col_max)
+        rows, cols = P["rows"], P["cols"]
     data = np.concatenate([interior_data, dirichlet_data])
     # CSR with explicit zeros kept: the sparsity pattern then never changes
     # between iterations, which core/linsolve.py relies on to reuse its
@@ -756,9 +810,41 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     # derivative (tunneling) adds entries whose pattern is usually, but not
     # always, the same every iteration, so its plan is reused only after
     # checking that (rows, cols) match the ones it was built from.
-    with_gen = dGn_dU is not None or dGp_dU is not None
     J = _assemble_with_plan(mesh, is_contact, rows, cols, data, 3 * N, verify=with_gen)
     return F, J
+
+
+_JAC_INDEX = {}
+
+
+def _jacobian_index(mesh, is_contact, is_oxide_free):
+    """The mesh/contact-only index arrays of _residual_and_jacobian's
+    blocks (edges whose i / j row is assembled, their endpoints, free
+    nodes), once per (mesh, contact set)."""
+    key = (id(mesh), is_contact.tobytes())
+    P = _JAC_INDEX.get(key)
+    if P is not None and P["mesh"] is not None and P["mesh"]() is mesh:
+        return P
+    N = len(mesh.points)
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    is_np_fixed = is_contact | is_oxide_free
+    node = np.arange(N)
+    Ai, Aj = np.flatnonzero(~is_contact[ii]), np.flatnonzero(~is_contact[jj])
+    Ci, Cj = np.flatnonzero(~is_np_fixed[ii]), np.flatnonzero(~is_np_fixed[jj])
+    contact_idx = node[is_contact]
+    try:
+        ref = weakref.ref(mesh)
+    except TypeError:                     # a stand-in mesh: not cached
+        ref = None
+    P = dict(mesh=ref, Ai=Ai, Aj=Aj, Ci=Ci, Cj=Cj,
+             iAi=ii[Ai], jAi=jj[Ai], iAj=ii[Aj], jAj=jj[Aj],
+             iCi=ii[Ci], jCi=jj[Ci], iCj=ii[Cj], jCj=jj[Cj],
+             free=node[~is_contact], free_np=node[~is_np_fixed], oxide_free=node[is_oxide_free],
+             is_np_fixed=is_np_fixed,
+             dirichlet=np.concatenate([contact_idx, N + contact_idx, 2 * N + contact_idx]))
+    if ref is not None:
+        _JAC_INDEX[key] = P
+    return P
 
 
 def _assemble_with_plan(mesh, is_contact, rows, cols, data, n, verify=False):

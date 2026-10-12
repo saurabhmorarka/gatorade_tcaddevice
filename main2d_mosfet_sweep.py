@@ -165,13 +165,14 @@ def _predict_psi(prev, cur, p_next):
 
 
 def continuation(solve_at, p0, s0, targets, prev=None, log=None, h_init=H_INIT, fast_iters=FAST_ITERS,
-                 psi_only=False):
+                 psi_only=False, on_point=None):
     """Walk the bias parameter from p0 (converged state s0) through each
     value in `targets` (in order), with a secant predictor (psi only if
     psi_only: for a gate walk, see _predict_psi) and adaptive sub-stepping
     from a first step h_init: a step that fails is retried at half size (up
     to MAX_HALVINGS times), a step that converges in <= fast_iters iterations
     doubles the next step (never overshooting the next requested target).
+    on_point(target, state), if given, is called as each target converges.
     Returns ({target: state}, n_newton_iterations, last (prev, cur) pair);
     stops early (keeping what converged) if a step can't be completed."""
     out = {}
@@ -197,6 +198,8 @@ def continuation(solve_at, p0, s0, targets, prev=None, log=None, h_init=H_INIT, 
             if r["iters"] <= fast_iters:
                 h *= 2.0
         out[float(tgt)] = cur[1]
+        if on_point is not None:
+            on_point(float(tgt), cur[1])
     return out, total_it, (prev, cur)
 
 

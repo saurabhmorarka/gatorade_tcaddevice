@@ -22,7 +22,7 @@ output.
 import csv
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
 from scipy import ndimage
@@ -271,17 +271,17 @@ def _solver_at(d, Vgs, Vds):
                                         cold_retry=False, velocity_saturation=True, vsat_fallback=False)
 
 
-def _write_states(task, d, states):
-    entries = []
+def _write_point(task, d, v, state):
+    """One solved point as a .vtu (if task['vtk'] asks for it); its .pvd
+    entry or None."""
+    if not (task["vtk"] == "all" or v in task.get("vtk_keep", ())):
+        return None
     os.makedirs(task["vtk_dir"], exist_ok=True)
     writer = write_state_octree if d.get("mesher") == "octree" else write_state
-    for v in sorted(states):
-        if task["vtk"] == "all" or v in task.get("vtk_keep", ()):
-            f = f"vds{task['Vds']:g}_vgs{v:+.3f}.vtu"
-            writer(os.path.join(task["vtk_dir"], f), d, states[v], {"gate": v, "drain": task["Vds"]},
-                   f"Vgs={v:+.3f}V Vds={task['Vds']:+.3f}V")
-            entries.append(dict(file=f, timestep=v, name=f"Vgs={v:+.3f}V Vds={task['Vds']:+.3f}V"))
-    return entries
+    f = f"vds{task['Vds']:g}_vgs{v:+.3f}.vtu"
+    name = f"Vgs={v:+.3f}V Vds={task['Vds']:+.3f}V"
+    writer(os.path.join(task["vtk_dir"], f), d, state, {"gate": v, "drain": task["Vds"]}, name)
+    return dict(file=f, timestep=v, name=name)
 
 
 # Gate-walk step control (DEVELOPMENT_LOG 57): extrapolate only psi (the
@@ -309,11 +309,22 @@ def run_curve(task):
             return dict(task=task, points={}, entries=[], iters=it0, time_s=time.perf_counter() - t0)
         base = ramp[Vds]
     vgs = sorted(v for v in task["vgs"] if v > 0)
-    states, it1, _ = continuation(_solver_at(d, None, Vds), 0.0, base, vgs, **GATE_WALK)
-    if task.get("include_zero", True):
-        states = {0.0: base, **states}
-    pts = {v: drain_current(d, r) for v, r in states.items()}
-    entries = _write_states(task, d, states)
+    # Each point's .vtu is written in a background thread while Newton
+    # walks on (zlib and most of numpy release the GIL): the writes were
+    # ~0.4-0.6 s x 13 on the slowest curve's path (DEVELOPMENT_LOG 59).
+    with ThreadPoolExecutor(max_workers=1) as io:
+        pending = []
+
+        def on_point(v, r):
+            pending.append(io.submit(_write_point, task, d, v, r))
+        if task.get("include_zero", True):
+            on_point(0.0, base)
+        states, it1, _ = continuation(_solver_at(d, None, Vds), 0.0, base, vgs, on_point=on_point,
+                                      **GATE_WALK)
+        if task.get("include_zero", True):
+            states = {0.0: base, **states}
+        pts = {v: drain_current(d, r) for v, r in states.items()}
+        entries = sorted((e for e in (f.result() for f in pending) if e), key=lambda e: e["timestep"])
     return dict(task=task, points=pts, entries=entries, iters=it0 + it1, time_s=time.perf_counter() - t0)
 
 

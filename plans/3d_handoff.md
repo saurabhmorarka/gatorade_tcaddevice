@@ -30,7 +30,14 @@ tell the full story with numbers.
   - the repeated Vgs = 0 walks of the segments.
 - Profiling tool: `fab/profile_iv.py` (`--dump DIR` saves the walk's
   linear systems for offline solver comparisons).
-- RESUME HERE, NEWEST (2026-10-12): parts 1-2 merged to `main` and pushed
+- RESUME HERE, NEWEST (2026-10-12, later): part 5 on `3d-speed`
+  (DEVELOPMENT_LOG 59: background VTK writes + zlib level 1, assembly
+  and residual 2.3x faster by caching mesh-only data). Octree full I-V
+  57 s, rectilinear 38 s - the ~1 minute target is met on the planar
+  device. Remaining: mesh build ~9 s (Rust refine/Voronoi single-thread,
+  a second octree pass for stray metal), drain ramp 17 s serial, the
+  linear solve (~2/3 of a Newton iteration).
+- RESUME HERE (2026-10-12): parts 1-2 merged to `main` and pushed
   (fb6fa9e); parts 3-4 merged to `main` and pushed too (01974b3):
   part 3 (DEVELOPMENT_LOG 57: psi-only gate-walk predictor, one worker
   per curve, cached octree VTU geometry) and part 4 (58: Poisson-first
