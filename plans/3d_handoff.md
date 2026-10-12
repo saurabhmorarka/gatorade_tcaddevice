@@ -1,10 +1,71 @@
 # 3D program: handoff
 
-## COLD START (2026-10-11, after the merge): read this first
+## COLD START: read this first (newest block: "LATEST 2026-10-12")
 
 Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
+
+### LATEST 2026-10-12: Phase A (speed) DONE and merged - START HERE
+- *State:* everything is merged into `main` and pushed (parts 1-5 of the
+  speed pass, DEVELOPMENT_LOG 55-59). `3d-speed` equals `main` and can
+  be deleted. New work: a new feature branch from `main`.
+- *Speed now (full planar device, 2 Id-Vg curves x 13 points, 6 perf cores):*
+  octree 243 s -> **57 s** (mesh+eq 11, drain ramps 17, Vds = 1 V curve
+  28); rectilinear 38 s. The ~1 min target is met on planar.
+  Reference metrics (octree): Vt 0.204 -> 0.052 V, SS 82, DIBL 160,
+  Ion 1792 uA/um, Ioff 1.17e-6. Rectilinear: Vt 0.200 -> 0.044, SS 81,
+  DIBL 165, Ion 1775, Ioff 1.38e-6.
+  Command: `TCAD_LINSOLVE=petsc_ilu ~/miniconda3/envs/tcad/bin/python -W ignore -m fab simulate configs/fab_planar.yaml --mesher octree --out out/x`
+- *What the speed pass changed (read the log entries for numbers):*
+  - 55: quasi-Fermi box (phin/phip clipped to the contacts' Fermi-level
+    range, the maximum principle; off with generation and in
+    equilibrium); halve the bias step instead of the vsat fallback in
+    3D; Rust ball_query; Masetti mobility (default).
+  - 56: linear solver - numeric-only ILU refactor, reuse budget, ILU
+    rtol cap 1e-6; `fab simulate` uses ILU, not MUMPS.
+  - 57: gate walk - psi-only secant predictor (`psi_only=True`),
+    h_init 0.05 V, double after <= 5 iterations (`GATE_WALK` in
+    fab/simulate.py); one worker per curve (splitting a curve cannot
+    help: a segment's walk = the curve's own steps). The drain ramp
+    keeps the full secant (psi-only was 6x slower there).
+  - 58: Poisson-first equilibrium cold start (`poisson_solve`, phin/phip
+    frozen; only when all contacts share one Fermi level; >= 2 coupled
+    iterations after). As a predictor before every warm step it was
+    measured and rejected (Gummel half-step, slower under bias).
+  - 59: VTK writes in a background thread + zlib level 1; assembly and
+    residual 2.3x faster via mesh-only caches (`_mesh_cached`,
+    `_jacobian_index`, `bernoulli_pair`, bincount).
+- *If speed matters again later:* the linear solve is ~2/3 of a Newton
+  iteration (no better preconditioner found, log 56); the mesh build
+  ~8 s (Rust refine is sequential; a second octree pass for stray metal
+  costs 1-2 s); the 17 s drain ramp is serial and its step control is at
+  its optimum (log 59). Re-measure per-iteration cost whenever new
+  mobility/stress terms are added (user's concern: speed must survive
+  richer physics). Profiler: `fab/profile_iv.py` (`--cprofile`).
+- *NEXT (user said "new physics now?" - confirm the choice before
+  starting):* section 6 option C, the user's ordered roadmap:
+  1. **Schottky S/D contacts** (the metal contact volumes meet heavily
+     doped S/D: tunneling/thermionic-field-emission contact model).
+     Research how others model it first (Sentaurus/Silvaco Schottky with
+     barrier lowering and nonlocal/field-emission tunneling; contact
+     resistivity vs doping). Prototype in 1D first (user rule), then 2D,
+     then 3D. Contacts are already metal volumes from the process.
+  2. Schrodinger-Poisson / quantum correction (density-gradient or
+     modified local density as cheaper options; charge peak away from
+     the interface).
+  3. Mobility stack: surface orientation, surface roughness, Coulomb,
+     phonon, interface charge.
+  4. Stress and its effect on mobility.
+  5. FinFET, nanosheet - and then option B (octree defaults study, on a
+     FinFET) and the deferred `test_octree` tolerance (2.5% -> 1%).
+  Show the user a plan (physics, equations, validation against 1D/
+  analytic/literature) before implementing (user rule).
+- *User rules that keep applying:* plan before big work; ask before
+  starting a phase; ask before push unless told; no Claude attribution
+  in commits; update DEVELOPMENT_LOG with every commit; fixes must be
+  general (planar/FinFET/nanosheet), not planar-only; tests (114 venv +
+  6 octree under conda) before every merge.
 
 ### UPDATE 2026-10-11 (later): Phase A speed pass in progress on `3d-speed`
 - The user chose A (speed). B (octree defaults study) is DEFERRED to a
@@ -30,7 +91,14 @@ tell the full story with numbers.
   - the repeated Vgs = 0 walks of the segments.
 - Profiling tool: `fab/profile_iv.py` (`--dump DIR` saves the walk's
   linear systems for offline solver comparisons).
-- RESUME HERE, NEWEST (2026-10-12): parts 1-2 merged to `main` and pushed
+- RESUME HERE, NEWEST (2026-10-12, later): part 5 on `3d-speed`
+  (DEVELOPMENT_LOG 59: background VTK writes + zlib level 1, assembly
+  and residual 2.3x faster by caching mesh-only data). Octree full I-V
+  57 s, rectilinear 38 s - the ~1 minute target is met on the planar
+  device. Remaining: mesh build ~9 s (Rust refine/Voronoi single-thread,
+  a second octree pass for stray metal), drain ramp 17 s serial, the
+  linear solve (~2/3 of a Newton iteration).
+- RESUME HERE (2026-10-12): parts 1-2 merged to `main` and pushed
   (fb6fa9e); parts 3-4 merged to `main` and pushed too (01974b3):
   part 3 (DEVELOPMENT_LOG 57: psi-only gate-walk predictor, one worker
   per curve, cached octree VTU geometry) and part 4 (58: Poisson-first
@@ -180,7 +248,8 @@ tell the full story with numbers.
   - The rectilinear default is 68k nodes and about 1% off.
 
 ### 6. Next phases: OPTIONS TO PRESENT, wait for the user's choice
-A. *Speed pass toward the 1-minute 3D I-V* (the user asked for "whatever
+(2026-10-12: A is DONE - 57 s, see LATEST at the top; C is next.)
+A. *(DONE) Speed pass toward the 1-minute 3D I-V* (the user asked for "whatever
    speeds it up"; parked items):
    - per-point Newton cost at high Vds with hybrid (about 40 iterations).
      Candidates: a doping-relative c_ref (option b of log 51), Newton
