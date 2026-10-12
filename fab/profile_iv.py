@@ -144,7 +144,7 @@ def main():
         pr.enable()
     if a.dump:
         instrument(a.dump, a.dump_from, a.dump_max)
-    states, _, _ = continuation(stepper(fs._solver_at(d, None, a.vds), steps), 0.0, ramp[a.vds], vgs)
+    states, _, _ = continuation(stepper(fs._solver_at(d, None, a.vds), steps), 0.0, ramp[a.vds], vgs, **fs.GATE_WALK)
     if pr:
         pr.disable()
     report(f"Id-Vg walk at Vds={a.vds}", time.perf_counter() - t)

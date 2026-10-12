@@ -5402,3 +5402,51 @@ default is now `core/linsolve`'s "auto" (PETSc block ILU at these sizes).
   line-search residuals (~46 ms each) are the other half.
 - Each Vds = 1 V segment repeats the walk from Vgs = 0 (the slowest
   segment is 70 s, the serial part 35 s).
+
+## 57. Phase A speed pass, part 3: the gate walk and the curve split
+
+Branch `3d-speed` (parts 1-2 merged to `main` as fb6fa9e). Full planar
+device, 6 performance cores, `TCAD_LINSOLVE=petsc_ilu`.
+
+**Measured first.** Per-segment timing of the 2 curves x 3 segments split:
+at Vds = 1 V the last segment (Vgs 0.9-1.2) walked 58 s from Vgs = 0 to do
+11 s of its own points; the first segment's 4 points cost 55 s. In one
+process the same walk ran ~1.7x faster than with 6 busy processes.
+One worker per curve (no split) was already faster: 105 -> 99 s, and the
+Vds = 1 V curve took 119 Newton iterations instead of 298. A segment's
+walk takes the same continuation steps as the curve itself, so splitting
+a curve cannot shorten it.
+
+**The slow steps.** The Vds = 1 V gate walk: the first 0.1 V step failed
+after 15 iterations; the halved walk then crawled at 0.05 V, with 15, 8
+and 10 iterations at 0.1-0.2 V. From the plain previous state the 0.1 V
+step took 8 iterations, from the secant guess 15: the extrapolated phin /
+phip change is noise (the gate moves psi; the contacts pin the quasi-Fermi
+levels). Predictor comparison (Vds = 1 V, one process):
+
+| gate-walk predictor | walk | iterations | drain ramp |
+|---|---|---|---|
+| secant psi, phin, phip (was) | 43.6 s | 119 | 21 s |
+| previous state | 34.2 s | 101 | 28 s |
+| secant psi only | 36.3 s, every step 5 its | 98 | 141 s (rejected for the ramp) |
+| psi only + first step 0.05 V + double after <= 5 its (kept) | 28.6 s | 69 | - |
+
+Vds = 0.05 V walk unchanged (17 s, 48 its). Currents agree to 3e-9.
+
+**Kept.**
+- `continuation(..., h_init, fast_iters, psi_only)`: defaults unchanged
+  (the 2D drivers and tests are untouched). `fab/simulate.py`'s
+  `GATE_WALK = dict(h_init=0.05, fast_iters=5, psi_only=True)` for the gate
+  walk; the drain ramp keeps the full secant.
+- `fab simulate` runs one worker per curve (the split is gone).
+- `write_state_octree` caches its mesh-only geometry (np.unique of the
+  corner indices, 0.58 of 1.25 s per file, 13 files per curve).
+
+**Result.** Octree full I-V 105 -> 75 s (mesh+eq 13, ramps 22, Vds = 1 V
+curve 39). Rectilinear 70 -> 57 s. Metrics unchanged: octree Vt 0.204 ->
+0.052 V, SS 82, DIBL 160, Ion 1792 uA/um, Ioff 1.17e-6; rectilinear Vt
+0.200 -> 0.044, SS 81, DIBL 165, Ion 1775. Tests: 114 + 6 octree pass.
+
+**Next.** The serial stages are now ~half the run (equilibrium 13 s,
+drain ramps 22 s). The user's direction: solve Poisson first, before any
+continuity / coupled Newton.
