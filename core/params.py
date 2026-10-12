@@ -59,6 +59,22 @@ class Material:
     mu_p_min: float = 44.9          # hole mu_min, cm^2/V/s
     N_ref_p: float = 2.23e17        # hole reference doping, cm^-3
     alpha_p: float = 0.719          # hole doping-dependence exponent
+    # Which doping dependence the 2D/3D solver uses: "masetti" (default) or
+    # "caughey_thomas" (the parameters above). Masetti, Severi and Solmi,
+    # "Modeling of carrier mobility against carrier concentration in
+    # arsenic-, phosphorus-, and boron-doped silicon," IEEE TED 30, 764
+    # (1983) - Sentaurus Device's default DopingDependence for silicon:
+    #   mu(N) = mu_min1*exp(-Pc/N) + (mu_max - mu_min2)/(1 + (N/Cr)^alpha)
+    #           - mu1/(1 + (Cs/N)^beta)
+    # Below ~1e18 it is Caughey-Thomas within a few %; the extra terms fit
+    # the measured mobility in heavily doped (source/drain, 1e19-1e21)
+    # silicon, where Caughey-Thomas runs high (electrons: 6% at 1e19, 28% at
+    # 1e20; DEVELOPMENT_LOG 55).
+    # Coefficients: arsenic (electrons) and boron (holes), Masetti's Table I.
+    doping_mobility: str = "masetti"
+    masetti_n: tuple = (52.2, 52.2, 43.4, 0.0, 9.68e16, 3.43e20, 0.680, 2.0, 1417.0)
+    masetti_p: tuple = (44.9, 0.0, 29.0, 9.23e16, 2.23e17, 6.10e20, 0.719, 2.0, 470.5)
+    #                  (mu_min1, mu_min2, mu1, Pc, Cr, Cs, alpha, beta, mu_max)
     tau_n: float = 1.0e-9           # SRH electron lifetime, s
     tau_p: float = 1.0e-9           # SRH hole lifetime, s
     chi_eV: float = 4.05            # Si electron affinity, eV (band diagrams only)

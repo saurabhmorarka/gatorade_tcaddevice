@@ -324,6 +324,7 @@ fn tcad_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(levelset::ls_project, m)?)?;
     m.add_function(wrap_pyfunction!(levelset::ls_refine, m)?)?;
     m.add_function(wrap_pyfunction!(voronoi::voronoi_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(voronoi::ball_query, m)?)?;
     m.add_function(wrap_pyfunction!(boxtree::boxtree_refine, m)?)?;
     Ok(())
 }

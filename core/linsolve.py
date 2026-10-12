@@ -19,7 +19,12 @@ s, and an ILU(1)-preconditioned GMRES ~0.3 s. So the dominant cost is
   * The solver refactors only when that stops paying off: when GMRES fails,
     or when the time spent in Krylov iterations since the last
     factorization exceeds the time that factorization took (a self-tuning
-    rule - no per-device threshold to hand-pick).
+    rule - no per-device threshold to hand-pick). A reused
+    preconditioner gets an iteration budget of a few times what the fresh
+    one needed; past it, refactoring is cheaper than grinding on.
+  * PETSc refactorizations keep the KSP and redo only the numeric phase
+    (the ordering and symbolic fill pattern belong to the sparsity
+    pattern, which a sweep never changes).
 
 Each system is solved to a caller-chosen relative residual (`rtol`; default
 1e-9 - below that, double precision stalls on these Jacobians: measured
@@ -72,6 +77,8 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 AUTO_ITERATIVE_MIN = 60000   # unknowns; 2D-sized systems stay on direct LU
+REUSE_ITS_FACTOR = 3         # a reused preconditioner may take this x the fresh one's iterations
+REUSE_ITS_MIN = 20           # ... but never fewer than this (see LinearSolver._krylov)
 
 # PETSc (conda-forge) is built on MPICH, whose default libfabric provider
 # busy-polls from a progress thread as soon as MPI initializes: measured, an
@@ -178,8 +185,18 @@ class _Pattern:
             B = sp.bsr_matrix(Pm, blocksize=(bs, bs))
             B.sort_indices()
             vmap = B.data.reshape(-1).astype(np.int64) - 1
-            self._blk = (bs, perm, B.indptr.copy(), B.indices.copy(), vmap)
+            I = PETSc.IntType if HAVE_PETSC else np.int64
+            self._blk = (bs, perm, B.indptr.astype(I), B.indices.astype(I),
+                         (len(vmap), np.flatnonzero(vmap >= 0), vmap[vmap >= 0]))
         return self._blk[1:]
+
+    def block_values(self, data, bs):
+        """This pattern's CSR values as the flattened BAIJ block values of
+        block_map(bs) (structural zeros inside a block = 0)."""
+        _, _, _, (size, pos, src) = self.block_map(bs)
+        out = np.zeros(size)
+        out[pos] = data[src]
+        return out
 
     def matches(self, A):
         return (A.shape[0] == self.n and A.nnz == len(self.indices)
@@ -239,6 +256,8 @@ class LinearSolver:
         self.ilu_fill = ilu_fill
         self._pat = None
         self._prec = None          # backend-specific preconditioner handle
+        self._ksp_kept = None      # PETSc KSP + preconditioner matrix kept for this pattern
+        self._fresh_its = 0        # Krylov iterations of the solve right after the last factorization
         self._scale = None         # (row_scale, col_scale) frozen at factor time
         self._t_factor = 0.0
         self._krylov_time_since_factor = 0.0
@@ -249,15 +268,19 @@ class LinearSolver:
     def max_rtol(self, n):
         """Loosest relative residual an inexact-Newton caller should ask
         this backend for. With an (lagged) exact LU preconditioner a loose
-        residual still gives a good Newton direction; with ILU it does not:
-        these Jacobians are so ill-conditioned (quasi-Fermi levels of a
-        carrier with ~zero density are nearly undetermined) that an
-        ILU-GMRES solution at rtol=1e-4 carried large errors in exactly
-        those components - measured on the extruded 3D MOSFET, an
-        already-converged equilibrium was thrown to |F|=3e5 and needed 8
-        iterations to recover; at 1e-8 it stays put in 1 iteration."""
+        residual still gives a good Newton direction. With ILU it is capped
+        tighter: these Jacobians are ill-conditioned (quasi-Fermi levels of
+        a carrier with ~zero density are nearly undetermined), and an
+        ILU-GMRES solution at rtol=1e-4 once threw an already-converged
+        equilibrium to |F|=3e5 (extruded 3D MOSFET, before the quasi-Fermi
+        box of DEVELOPMENT_LOG 55). Measured since, on the full planar 3D
+        I-V (equilibrium, drain ramp, Id-Vg walk; DEVELOPMENT_LOG 56):
+        1e-8 / 1e-6 / 1e-4 take 58 / 62 / 68 drain-ramp and 92 / 92 / 95
+        walk Newton iterations, same currents, and 1e-6 already gets most
+        of the Krylov saving - kept as the cap, with margin for harder
+        devices."""
         be = self.backend or resolve_backend(self.backend_req, n)
-        return 1e-8 if be in ("petsc_ilu", "scipy_ilu") else 1e-4
+        return 1e-6 if be in ("petsc_ilu", "scipy_ilu") else 1e-4
 
     def solve(self, J, b, rtol=None):
         """x with ||J x - b|| <= rtol*||b|| (relative residual of the
@@ -273,7 +296,7 @@ class LinearSolver:
             self.backend = resolve_backend(self.backend_req, A.shape[0])
         if self._pat is None or not self._pat.matches(A):
             self._pat = _Pattern(A)
-            self._drop_prec()
+            self._forget_pattern()
         self.stats["systems"] += 1
         t0 = time.perf_counter()
         if self._prec is None:
@@ -298,10 +321,17 @@ class LinearSolver:
 
     # -- internals ------------------------------------------------------
     def _drop_prec(self):
-        if self._prec is not None and self.backend.startswith("petsc"):
-            self._prec["ksp"].destroy()
+        """Mark the preconditioner stale: the next system refactors (PETSc
+        keeps its KSP for a numeric-only refactorization; _forget_pattern
+        releases it)."""
         self._prec = None
         self._krylov_time_since_factor = 0.0
+
+    def _forget_pattern(self):
+        self._drop_prec()
+        if self._ksp_kept is not None:
+            self._ksp_kept["ksp"].destroy()
+            self._ksp_kept = None
 
     def _scaled(self, A, b, scale):
         r, c = scale
@@ -331,18 +361,27 @@ class LinearSolver:
             y, its, ok = self._petsc_solve(As, bs, rtol, reuse=False)
             if not ok:
                 raise RuntimeError(f"PETSc {self.backend} failed on a freshly built preconditioner")
+        self._fresh_its = its if self.backend in ("scipy_ilu", "petsc_ilu") else 0
         self._t_factor = time.perf_counter() - t0
         self.stats["factorizations"] += 1
         self.stats["t_factor"] += self._t_factor
         return self._scale[1] * y
 
     def _krylov(self, A, b, rtol):
+        """Solve with the reused (stale) preconditioner; an ILU one on an
+        iteration budget of REUSE_ITS_FACTOR x what the fresh one needed (at least
+        REUSE_ITS_MIN): past that a refactorization is cheaper than grinding
+        on - measured on the full planar 3D device, a reused ILU that ran
+        into the 300-iteration limit cost ~1.5 s before the fallback
+        refactored anyway, against 0.08 s for the refactorization."""
         As, bs = self._scaled(A, b, self._scale)
         maxit = self.max_krylov if self.backend in ("superlu", "umfpack", "petsc_lu") else self.max_krylov_ilu
+        if self.backend in ("scipy_ilu", "petsc_ilu"):   # (measured there; direct-LU reuse untouched)
+            maxit = min(maxit, max(REUSE_ITS_MIN, REUSE_ITS_FACTOR * self._fresh_its))
         if self.backend in ("superlu", "umfpack", "scipy_ilu"):
             y, ok, its = gmres_right(As, bs, self._prec["lu"].solve, rtol, maxit)
         else:
-            y, its, ok = self._petsc_solve(As, bs, rtol, reuse=True)
+            y, its, ok = self._petsc_solve(As, bs, rtol, reuse=True, maxit=maxit)
         return self._scale[1] * y, its, ok
 
     def _superlu(self, As):
@@ -381,18 +420,35 @@ class LinearSolver:
         bs = self.block_size
         return bool(bs) and bs > 1 and self.backend == "petsc_ilu" and self._pat.n % bs == 0
 
-    def _petsc_mat(self, As):
-        I = PETSc.IntType
+    def _petsc_csr(self, As):
         if self._use_blocks():
-            _, bip, bix, vmap = self._pat.block_map(self.block_size)
-            vals = np.where(vmap >= 0, As.data[np.maximum(vmap, 0)], 0.0)
-            return PETSc.Mat().createBAIJ(size=As.shape, bsize=self.block_size,
-                                          csr=(bip.astype(I), bix.astype(I), vals), comm=PETSc.COMM_SELF)
-        return PETSc.Mat().createAIJ(size=As.shape, csr=(self._pat.indptr.astype(I),
-                                                          self._pat.indices.astype(I), As.data),
-                                     comm=PETSc.COMM_SELF)
+            _, bip, bix, _ = self._pat.block_map(self.block_size)
+            return bip, bix, self._pat.block_values(As.data, self.block_size)
+        I = PETSc.IntType
+        if getattr(self._pat, "_csr_I", None) is None:
+            self._pat._csr_I = (self._pat.indptr.astype(I), self._pat.indices.astype(I))
+        return (*self._pat._csr_I, As.data)
+
+    def _petsc_mat(self, As):
+        csr = self._petsc_csr(As)
+        if self._use_blocks():
+            return PETSc.Mat().createBAIJ(size=As.shape, bsize=self.block_size, csr=csr, comm=PETSc.COMM_SELF)
+        return PETSc.Mat().createAIJ(size=As.shape, csr=csr, comm=PETSc.COMM_SELF)
 
     def _petsc_setup(self, As):
+        """The KSP with a preconditioner built from As. While the sparsity
+        pattern is unchanged the KSP and its preconditioner matrix are kept
+        and only refilled: PETSc then redoes just the NUMERIC factorization,
+        reusing the ordering and symbolic (fill-pattern) phase - measured on
+        the full planar 3D Jacobian, block ILU(2) 81 ms instead of 176 ms."""
+        kept = self._ksp_kept
+        if kept is not None:
+            kept["P"].setValuesBlockedCSR(*self._petsc_csr(As)) if self._use_blocks() \
+                else kept["P"].setValuesCSR(*self._petsc_csr(As))
+            kept["P"].assemble()
+            kept["ksp"].setOperators(kept["P"], kept["P"])
+            kept["ksp"].setUp()
+            return kept
         M = self._petsc_mat(As)
         ksp = PETSc.KSP().create(comm=PETSc.COMM_SELF)
         ksp.setOperators(M, M)
@@ -411,11 +467,14 @@ class LinearSolver:
             pc.setFactorLevels(self.ilu_levels)
             pc.setFactorOrdering("rcm")
         ksp.setUp()
-        return dict(ksp=ksp, P=M)
+        self._ksp_kept = dict(ksp=ksp, P=M)
+        return self._ksp_kept
 
-    def _petsc_solve(self, As, bs, rtol, reuse):
+    def _petsc_solve(self, As, bs, rtol, reuse, maxit=None):
         ksp = self._prec["ksp"]
-        ksp.setTolerances(rtol=rtol)
+        if maxit is None:
+            maxit = self.max_krylov if self.backend == "petsc_lu" else self.max_krylov_ilu
+        ksp.setTolerances(rtol=rtol, max_it=maxit)
         if reuse:
             A_new = self._petsc_mat(As)
             ksp.setOperators(A_new, self._prec["P"])   # operator = new J, preconditioner = old

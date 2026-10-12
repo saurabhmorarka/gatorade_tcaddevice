@@ -5186,3 +5186,219 @@ origin.
 Handoff: the COLD START at the top of `plans/3d_handoff.md` was rewritten
 for a context clear. The user wants to be asked before the next phase
 starts.
+
+## 55. Phase A speed pass, part 1: Newton robustness, a faster mesher, Masetti mobility
+
+Branch `3d-speed`. The user chose the speed pass (option A of the handoff)
+and deferred the octree defaults study (B) to a FinFET. They added two
+requests:
+- the Masetti mobility model for the heavily doped S/D;
+- speed that survives richer mobility and stress models, so prefer
+  model-agnostic gains.
+
+**Profile first** (`fab/profile_iv.py`: the real `fab simulate` path in one
+process, with assembly, line-search residuals, linear solves and per-step
+Newton iterations timed). Full planar device, PETSc ILU, one thread:
+
+| stage | wall | where it goes |
+|---|---|---|
+| mesh build | 16 s | `_dual` 10.5 s (twice), 4.4 s of each in `cKDTree.query_ball_point` |
+| equilibrium | 20 s | ILU-GMRES 19 s (about 180 Krylov iterations per system) |
+| drain ramp 0 -> 1 V | 162 s | ONE failed step: 111 s |
+| Vgs walk at 1 V, 6 points | 100 s | two failed steps: 62 s |
+
+Converged points cost 4-7 iterations (2-3 s). **The time goes into steps
+that fail and are then retried**, not into normal work.
+
+**Why steps fail.** Traced on the tiny device: the first gate step of the
+walk (Vgs 0 -> 0.1 at Vds = 1 V) converges LINEARLY.
+- The psi update falls to 1e-11 V while |F| drops only about 5% per
+  iteration. Exact LU behaves the same, so the linear solve is not the
+  cause.
+- One node runs away: node 7915 sits at the Si-surface / STI corner, in
+  the drain extension, with only 26% of its cell in silicon. Its phin goes
+  5 -> 53 -> 98 V and n underflows to 0 (doping 3.2e18).
+- The mechanism is positive feedback in the hybrid force:
+  1. the gate depletes this n+ corner to about 6e15, right at c_ref
+     = 1e16;
+  2. raising phin lowers n, so the weight turns to the edge field;
+  3. the edges saturate and the node's outflow no longer depends on phin;
+  4. Newton chases a false solution at phin -> infinity.
+- The converged solution has n = 5e16 there (phin = 0.233 V).
+
+**Kept 1: quasi-Fermi box (maximum principle).** Without generation, the
+drift-diffusion solution's phin and phip lie between the lowest and
+highest Fermi level of the semiconductor contacts (Markowich 1986). This
+holds for any mobility model, and was checked: exactly [0, 1] V at every
+node of the converged 3D states.
+- Newton iterates are projected onto that box at the free semiconductor
+  nodes (`newton_solve_2d(qf_box=True)`).
+- *Not* at contacts or the pinned oxide rows. The first version also
+  clipped the gate's Dirichlet phin = Vgs, and broke every point with
+  Vgs > Vds.
+- *Not* in equilibrium (a zero-width box). It would set phin = phip = 0
+  exactly, the flat degenerate state the cold start breaks on purpose. The
+  BTBT turn-on ramp then failed from it.
+- *Off* when a generation term is given (tunneling and impact pairs).
+- Full device: drain ramp 173 -> 58 Newton iterations, no failed step.
+  Currents identical to all printed digits.
+
+**Kept 2: `vsat_fallback=False` in `fab simulate`.** The continuation
+halves its bias step instead of running the efield warm-up fallback.
+- The walk's first step went from 50 iterations (64 s, loaded machine) to
+  15 + 5 at the halved step. Walk at Vds = 1 V: 127 -> 92 iterations.
+- The 2D drivers keep the fallback (default True). The BTBT turn-on ramp
+  needs it.
+
+**Tried and rejected** (measured, then removed):
+- *Fixed row-scale merit* (computed at the first iterate): the drain ramp
+  diverged until the factorization failed.
+- *Deuflhard natural monotonicity test (NLEQ-ERR).*
+  - Exact LU on the tiny device: it converged both failing steps (7-8
+    iterations against 40+ before), once the reference norm was the
+    UNCLIPPED Newton correction with density-weighted quasi-Fermi
+    components.
+  - Full device with ILU: the extra solve per trial made the ramp slower
+    (110 iterations, 369 s), and combined with the box it crashed (ILU
+    breakdown on a fresh preconditioner). It needs accurate solves.
+- *Fail fast after two line-search steps <= 1/16*: no gain over plain
+  halving.
+- *Box margins 0.01-0.1 V*: the same as or worse than 0. At 0.1 the trap
+  node settles on the box edge.
+
+**Kept 3: neighbour search in Rust** (`native.ball_query`, a bucket grid,
+threaded). It replaces `cKDTree.query_ball_point` and the Python lists in
+`_dual`. The mesh is bit-identical (edges, volumes, facets, points).
+Build 20.5 -> 10.7 s (both on a loaded machine).
+
+**Kept 4: Masetti doping mobility, now the default** (`Material.doping_mobility`
+= "masetti" | "caughey_thomas"; YAML `material: doping_mobility:`).
+- Masetti, Severi, Solmi, IEEE TED 30, 764 (1983); arsenic and boron
+  coefficients; Sentaurus' default for Si.
+- Agrees with Caughey-Thomas within about 5% up to 1e18.
+- Electrons: 108 vs 115 at 1e19, 61 vs 78 at 1e20, 16 vs 70 at 1e21.
+- New `testsuite/test_mobility.py`: limits, the light-doping agreement,
+  hand-worked heavy-doping values, the model switch.
+
+**Verification.**
+- With Caughey-Thomas, every golden (1D, 2D, 3D) passes unchanged with the
+  Newton changes.
+- With Masetti, four goldens move, each consistent with the mobility
+  ratio in its doping range:
+  - `btbt_2d` +2.2% (channel near 1e18, where Masetti is 2.3% higher);
+  - `diode_2d` -0.2 to -0.7% (growing with forward bias);
+  - `mosfet_2d` up to -1.3% at high Vgs (S/D series resistance);
+  - the 3D tiny device.
+  These were re-captured.
+- `test_octree`: octree/rectilinear went 1.018 -> 1.023. This is the known
+  resolution gap; the S/D weigh more with Masetti. Tolerance 2% -> 2.5%,
+  with a comment; the defaults study is deferred to a FinFET.
+- Suite: 114 tests OK (1 skip), plus `test_octree` under conda (6 OK).
+
+**End to end** (`fab simulate configs/fab_planar.yaml --mesher octree`,
+PETSc ILU, 6 performance cores, 2 x 13 points):
+
+| | before (log 52) | now |
+|---|---|---|
+| mesh + equilibrium | 33-38 s | 31 s |
+| drain ramps | 43-47 s | 29 s |
+| slowest segment (Vds = 1 V) | 165-174 s | 110 s |
+| total | 243-261 s | 172 s |
+
+- Results: Vt 0.204 -> 0.052 V, SS 82, DIBL 160 (unchanged).
+- Ion 1811 -> 1792 uA/um (Masetti, -1%); Ioff 1.17e-6.
+
+**Next** (still about 3x from the 1-minute target):
+- The linear solve is 60-70% of the Newton time. ILU-GMRES needs about 70
+  Krylov iterations per system and refactors often; its inexact-Newton
+  tolerance is pinned at 1e-8.
+- Each Vds = 1 V segment repeats the walk from Vgs = 0.
+- The equilibrium is 20 s of ILU work.
+
+## 56. Phase A speed pass, part 2: the linear solver
+
+Branch `3d-speed`. The user asked to start the remaining speed work with
+the linear solve (60-70% of the Newton time after part 1).
+
+**Method.** `fab/profile_iv.py --dump DIR` saves the walk's Newton systems.
+60 consecutive real systems (full planar octree device, 196,956 unknowns,
+1.6M nonzeros) were then replayed offline through `LinearSolver` with each
+candidate, one thread. Baseline: block ILU(2)-GMRES, rtol 1e-8, 21.0 s,
+2333 Krylov iterations, 21 factorizations.
+
+**Rejected (measured on those 60 systems):**
+
+| candidate | time | why not |
+|---|---|---|
+| MUMPS LU, reused as GMRES preconditioner, rtol 1e-8 / 1e-4 | 154 / 109 s | ~5 s per factorization in 3D (fill); METIS and BLR settings did not change it |
+| hypre BoomerAMG (plain / nodal) | 150 / 264 s | half the Krylov iterations, but setup ~2.3 s vs ILU's 0.16 s |
+| hypre Euclid | failed | fresh preconditioner did not converge |
+| ILU orderings nd / qmd / natural (vs rcm) | 33.5 / 35.4 / 22.6 s | rcm stays |
+| ILU(1) / ILU(3) / ILU(4) | 23.2 / 19.3 / slower | ILU(3) -8% at 1e-8, worse at loose tolerances |
+| BiCGStab, GMRES restart 60, modified Gram-Schmidt | 18.6 / 19.2 / 23.5 s | -10% at 1e-8 only; worse at loose tolerances |
+
+The cost of one ILU(2)-GMRES iteration: preconditioner apply 2.7 ms,
+matvec 0.6 ms. No available preconditioner beats block ILU(2) here; the
+gains are in how it is used.
+
+**Kept 1: numeric-only refactorization.** A refactorization used to build
+a new KSP: ordering, symbolic ILU and numeric ILU, 176 ms. The pattern of
+a sweep never changes, so `core/linsolve.py` now keeps the KSP and its
+preconditioner matrix and only refills the values: 81 ms, bit-identical
+preconditioner (same iteration counts on fresh vs refilled). The BAIJ
+value gather uses precomputed indices (10.5 -> 2 ms).
+
+**Kept 2: an iteration budget for a reused ILU.** The refactor rule is
+self-tuning (refactor once the Krylov time since the last factorization
+exceeds the factorization's own cost). Its weak spot: a stale ILU that has
+stopped working grinds to the 300-iteration limit (~1.5 s) before the
+fallback refactors anyway. A reused ILU now gets 3x the iterations the
+fresh one needed (at least 20); past that it refactors (0.08 s). Equilibrium,
+where 5 of 9 systems hit the limit, went 21.9 -> 6.6 s of linear solve at
+the same tolerance. Direct-LU reuse (2D) is untouched.
+
+**Kept 3: ILU inexact-Newton cap 1e-8 -> 1e-6.** The cap dates from before
+the quasi-Fermi box (log 55). Full planar I-V (equilibrium + ramp + walk),
+with 1 and 2 above, three caps run side by side:
+
+| cap | eq + ramp + walk | Newton its ramp / walk | Id |
+|---|---|---|---|
+| 1e-8 | 85.9 s | 58 / 92 | identical |
+| 1e-6 | 76.4 s | 62 / 92 | identical |
+| 1e-4 | 72.4 s | 68 / 95 | identical |
+
+1e-4 is ~5% faster than 1e-6 but adds Newton iterations; 1e-6 keeps margin
+for harder devices (FinFET) and richer mobility models.
+
+**Kept 4: `fab simulate` no longer forces MUMPS.** It set
+`TCAD_LINSOLVE=petsc_lu` because ILU-GMRES never converged equilibrium on
+the rectilinear mesh. With the box and the budget it does. Rectilinear
+device, one Id-Vg walk (eq + ramp to 1 V + 6 points), one thread:
+MUMPS 263 s, ILU 40 s, Id identical to 7 digits at every point. The
+default is now `core/linsolve`'s "auto" (PETSc block ILU at these sizes).
+
+**End to end** (6 performance cores, 2 x 13 points):
+
+| | part 1 (log 55) | now |
+|---|---|---|
+| octree: mesh + equilibrium | 31 s | 14 s |
+| octree: drain ramps | 29 s | 21 s |
+| octree: slowest segment | 110 s | 70 s |
+| octree: total (`TCAD_LINSOLVE=petsc_ilu`) | 172 s | 106 s |
+| rectilinear: total, default settings | 343 s (MUMPS) | 70 s (ILU) |
+
+- Octree metrics unchanged: Vt 0.204 -> 0.052 V, SS 82, DIBL 160,
+  Ion 1792 uA/um, Ioff 1.17e-6.
+- Rectilinear: Vt 0.200 -> 0.044 V, SS 81, DIBL 165, Ion 1775 uA/um
+  (the known ~1% mesh difference to octree). Full curves ILU vs MUMPS:
+  all 26 points agree to 1.4e-8 relative, same metrics. (The MUMPS run
+  also took 702 s to EXIT, against its own 343 s total: something in
+  shutdown with MUMPS workers; not chased, MUMPS is no longer the default.)
+- Suite 114 OK (1 skip); `test_octree` 6 OK and `test_3d_examples` OK
+  under conda with PETSc ILU.
+
+**Next:**
+- Per Newton iteration the linear solve is now ~50%; assembly (86 ms) and
+  line-search residuals (~46 ms each) are the other half.
+- Each Vds = 1 V segment repeats the walk from Vgs = 0 (the slowest
+  segment is 70 s, the serial part 35 s).

@@ -91,6 +91,8 @@ def _resolve_material_block(block: dict) -> Material:
         mat.eps_r = float(block["eps_r"])
     if block.get("ni_cm3") is not None:
         mat.ni = float(block["ni_cm3"])
+    if block.get("doping_mobility") is not None:          # masetti (default) | caughey_thomas
+        mat.doping_mobility = str(block["doping_mobility"])
     return mat
 
 

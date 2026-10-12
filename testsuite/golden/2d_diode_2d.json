@@ -1,67 +1,67 @@
 {
  "iv_sweep.csv": {
   "Va_V=-0.1000": {
-   "J_anode_A_cm2": -5.152497e-06
+   "J_anode_A_cm2": -5.152591e-06
   },
   "Va_V=-0.2000": {
-   "J_anode_A_cm2": -9.804156e-06
+   "J_anode_A_cm2": -9.804129e-06
   },
   "Va_V=-0.3000": {
-   "J_anode_A_cm2": -1.466194e-05
+   "J_anode_A_cm2": -1.466191e-05
   },
   "Va_V=-0.4000": {
-   "J_anode_A_cm2": -1.911249e-05
+   "J_anode_A_cm2": -1.911245e-05
   },
   "Va_V=-0.5000": {
-   "J_anode_A_cm2": -2.225296e-05
+   "J_anode_A_cm2": -2.225291e-05
   },
   "Va_V=-0.6000": {
-   "J_anode_A_cm2": -2.521392e-05
+   "J_anode_A_cm2": -2.521386e-05
   },
   "Va_V=-0.7000": {
-   "J_anode_A_cm2": -2.788652e-05
+   "J_anode_A_cm2": -2.788646e-05
   },
   "Va_V=-0.8000": {
-   "J_anode_A_cm2": -2.998741e-05
+   "J_anode_A_cm2": -2.998734e-05
   },
   "Va_V=-0.9000": {
-   "J_anode_A_cm2": -3.223166e-05
+   "J_anode_A_cm2": -3.223159e-05
   },
   "Va_V=-1.0000": {
-   "J_anode_A_cm2": -3.434188e-05
+   "J_anode_A_cm2": -3.43418e-05
   },
   "Va_V=0.0000": {
-   "J_anode_A_cm2": 5.50645e-13
+   "J_anode_A_cm2": -9.545824e-14
   },
   "Va_V=0.1000": {
-   "J_anode_A_cm2": 1.295683e-05
+   "J_anode_A_cm2": 1.295668e-05
   },
   "Va_V=0.2000": {
-   "J_anode_A_cm2": 8.682043e-05
+   "J_anode_A_cm2": 8.681445e-05
   },
   "Va_V=0.3000": {
-   "J_anode_A_cm2": 0.0006646683
+   "J_anode_A_cm2": 0.0006644027
   },
   "Va_V=0.4000": {
-   "J_anode_A_cm2": 0.007790906
+   "J_anode_A_cm2": 0.007778787
   },
   "Va_V=0.5000": {
-   "J_anode_A_cm2": 0.1895873
+   "J_anode_A_cm2": 0.1890364
   },
   "Va_V=0.6000": {
-   "J_anode_A_cm2": 6.727687
+   "J_anode_A_cm2": 6.703492
   },
   "Va_V=0.7000": {
-   "J_anode_A_cm2": 120.2207
+   "J_anode_A_cm2": 119.6598
   },
   "Va_V=0.8000": {
-   "J_anode_A_cm2": 507.1035
+   "J_anode_A_cm2": 504.2135
   },
   "Va_V=0.9000": {
-   "J_anode_A_cm2": 1129.453
+   "J_anode_A_cm2": 1122.07
   },
   "Va_V=1.0000": {
-   "J_anode_A_cm2": 1953.28
+   "J_anode_A_cm2": 1939.127
   }
  }
 }

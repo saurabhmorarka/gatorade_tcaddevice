@@ -421,6 +421,119 @@ pub fn voronoi_cells<'py>(
     Ok(pyo3::types::PyTuple::new(py, items)?)
 }
 
+/// All points of `p` (N,3) within `rad[r]` of point `nodes[r]` (the point
+/// itself included), as CSR (ptr, idx) - what scipy's
+/// cKDTree.query_ball_point gave the Voronoi clipper, without the Python
+/// lists (4.4 s of a 7.5 s dual on the full planar device). A uniform
+/// bucket grid with cell size `cell`; queries split across threads.
+/// voronoi_cells sorts the candidates itself, so their order is free.
+#[pyfunction]
+pub fn ball_query<'py>(
+    py: Python<'py>,
+    p: PyReadonlyArray2<'py, f64>,
+    nodes: PyReadonlyArray1<'py, i64>,
+    rad: PyReadonlyArray1<'py, f64>,
+    cell: f64,
+) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+    c_order(&p, "p")?;
+    let pts = p.as_slice()?;
+    let nodes = nodes.as_slice()?;
+    let rad = rad.as_slice()?;
+    if !(cell > 0.0) {
+        return Err(PyValueError::new_err("cell must be > 0"));
+    }
+    let n = pts.len() / 3;
+    let m = nodes.len();
+    let (ptr, idx) = py.detach(|| {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for i in 0..n {
+            for a in 0..3 {
+                lo[a] = lo[a].min(pts[3 * i + a]);
+                hi[a] = hi[a].max(pts[3 * i + a]);
+            }
+        }
+        let dim: Vec<usize> = (0..3).map(|a| (((hi[a] - lo[a]) / cell).floor() as usize) + 1).collect();
+        let key = |q: &[f64]| -> [usize; 3] {
+            let mut k = [0usize; 3];
+            for a in 0..3 {
+                k[a] = (((q[a] - lo[a]) / cell).floor().max(0.0) as usize).min(dim[a] - 1);
+            }
+            k
+        };
+        let flat = |k: [usize; 3]| (k[0] * dim[1] + k[1]) * dim[2] + k[2];
+        let nb = dim[0] * dim[1] * dim[2];
+        let mut start = vec![0usize; nb + 1];
+        for i in 0..n {
+            start[flat(key(&pts[3 * i..3 * i + 3])) + 1] += 1;
+        }
+        for b in 0..nb {
+            start[b + 1] += start[b];
+        }
+        let mut fill = start.clone();
+        let mut members = vec![0usize; n];
+        for i in 0..n {
+            let b = flat(key(&pts[3 * i..3 * i + 3]));
+            members[fill[b]] = i;
+            fill[b] += 1;
+        }
+        let query = |r: usize| -> Vec<i64> {
+            let i = nodes[r] as usize;
+            let q = &pts[3 * i..3 * i + 3];
+            let rr = rad[r];
+            let r2 = rr * rr;
+            let a = key(&[q[0] - rr, q[1] - rr, q[2] - rr]);
+            let b = key(&[q[0] + rr, q[1] + rr, q[2] + rr]);
+            let mut out = Vec::new();
+            for x in a[0]..=b[0] {
+                for y in a[1]..=b[1] {
+                    for z in a[2]..=b[2] {
+                        let c = flat([x, y, z]);
+                        for &j in &members[start[c]..start[c + 1]] {
+                            let d0 = pts[3 * j] - q[0];
+                            let d1 = pts[3 * j + 1] - q[1];
+                            let d2 = pts[3 * j + 2] - q[2];
+                            if d0 * d0 + d1 * d1 + d2 * d2 <= r2 {
+                                out.push(j as i64);
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 12);
+        let chunk = m.div_ceil(nt).max(1);
+        let mut parts: Vec<Vec<Vec<i64>>> = Vec::new();
+        std::thread::scope(|s| {
+            let hs: Vec<_> = (0..m)
+                .step_by(chunk)
+                .map(|a| {
+                    let b = (a + chunk).min(m);
+                    let query = &query;
+                    s.spawn(move || (a..b).map(query).collect::<Vec<Vec<i64>>>())
+                })
+                .collect();
+            for h in hs {
+                parts.push(h.join().unwrap());
+            }
+        });
+        let mut ptr = Vec::with_capacity(m + 1);
+        ptr.push(0i64);
+        let mut idx = Vec::new();
+        for v in parts.into_iter().flatten() {
+            idx.extend_from_slice(&v);
+            ptr.push(idx.len() as i64);
+        }
+        (ptr, idx)
+    });
+    let items: Vec<Py<PyAny>> = vec![
+        ptr.into_pyarray(py).into_any().unbind(),
+        idx.into_pyarray(py).into_any().unbind(),
+    ];
+    Ok(pyo3::types::PyTuple::new(py, items)?)
+}
+
 // silence unused-import warnings for types used only in signatures
 #[allow(dead_code)]
 fn _unused(_: &PyArray1<f64>) {}

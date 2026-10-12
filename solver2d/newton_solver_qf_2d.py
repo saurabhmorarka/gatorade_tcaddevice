@@ -137,6 +137,18 @@ def mobility_doping(N_abs, mu_max, mu_min, N_ref, alpha):
     return mu_min + (mu_max - mu_min) / (1.0 + (N_abs / N_ref) ** alpha)
 
 
+def mobility_masetti(N_abs, coef):
+    """Masetti DOPING-dependence low-field mobility (see core/params.py's
+    Material.doping_mobility for the formula and source); coef =
+    (mu_min1, mu_min2, mu1, Pc, Cr, Cs, alpha, beta, mu_max). Like
+    mobility_doping, a fixed function of the mesh doping: no Jacobian
+    term. N is floored at 1 cm^-3 (undoped: exp(-Pc/N) -> 0, mu -> mu_max)."""
+    mu_min1, mu_min2, mu1, Pc, Cr, Cs, alpha, beta, mu_max = coef
+    N = np.maximum(N_abs, 1.0)
+    return (mu_min1 * np.exp(-Pc / N) + (mu_max - mu_min2) / (1.0 + (N / Cr) ** alpha)
+            - mu1 / (1.0 + (Cs / N) ** beta))
+
+
 def mobility_field(E, mu0, vsat, beta):
     """Caughey-Thomas velocity-saturation mobility and its derivative
     w.r.t. the (signed) driving field E:
@@ -207,6 +219,11 @@ def _mesh_mobility_nodal(mesh, mat):
     homogeneous mesh or not, so - unlike ni_arr - this needs no
     homogeneous-mesh fallback branch)."""
     N_abs = np.abs(mesh.Cdop)
+    model = getattr(mat, "doping_mobility", "caughey_thomas")
+    if model == "masetti":
+        return mobility_masetti(N_abs, mat.masetti_n), mobility_masetti(N_abs, mat.masetti_p)
+    if model != "caughey_thomas":
+        raise ValueError(f"doping_mobility must be 'masetti' or 'caughey_thomas', not {model!r}")
     mu_n_node = mobility_doping(N_abs, mat.mu_n_max, mat.mu_n_min, mat.N_ref_n, mat.alpha_n)
     mu_p_node = mobility_doping(N_abs, mat.mu_p_max, mat.mu_p_min, mat.N_ref_p, mat.alpha_p)
     return mu_n_node, mu_p_node
@@ -769,7 +786,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                      psi_init=None, phin_init=None, phip_init=None,
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
                      damping="line_search", cold_retry=True, velocity_saturation=False,
-                     generation=None, linear_solver="auto", vsat_warmup=True):
+                     generation=None, linear_solver="auto", vsat_warmup=True, qf_box=True,
+                     vsat_fallback=True):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -861,7 +879,16 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     point that does not converge within VSAT_DIRECT_MAXITER iterations is
     redone: converged with "efield" from the same start, then with the
     requested force from there. "iters" counts everything, "iters_warmup"
-    the iterations before the final stage (0 if the direct solve worked)."""
+    the iterations before the final stage (0 if the direct solve worked).
+    vsat_fallback=False skips the fallback and returns the failed direct
+    attempt, for a continuation driver that halves its bias step instead
+    (fab/simulate.py). The 2D drivers keep it: the BTBT turn-on ramp
+    needs it.
+
+    qf_box: project the Newton iterates' quasi-Fermi levels onto the range
+    of the semiconductor contacts' Fermi levels (the maximum principle; see
+    the comment where it is set up). Off when generation is given (tunneling
+    or impact-ionization pairs can carry them outside)."""
     if vsat_warmup and vsat_force(velocity_saturation) in ("hybrid", "gradqf"):
         # A quasi-Fermi force can derail Newton from a poor start: a new
         # contact bias enters as a jump of phin/phip across the first edge
@@ -877,7 +904,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         # differs so much that continuation sweeps failed (2D NMOS).
         kw = dict(f_tol=f_tol, verbose=verbose, psi_bc_override=psi_bc_override,
                   phin_bc_override=phin_bc_override, phip_bc_override=phip_bc_override, damping=damping,
-                  generation=generation, linear_solver=linear_solver)
+                  generation=generation, linear_solver=linear_solver, qf_box=qf_box)
         try:
             r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
                                 phip_init=phip_init, maxiter=min(maxiter, VSAT_DIRECT_MAXITER), cold_retry=False,
@@ -886,6 +913,13 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             r = {"converged": False, "iters": min(maxiter, VSAT_DIRECT_MAXITER)}
         if r["converged"]:
             r["iters_warmup"] = 0
+            return r
+        if not vsat_fallback:
+            # The caller (a continuation driver) halves its bias step
+            # instead, which can be far cheaper: the walk's first gate step
+            # at Vds = 1 V on the full planar device cost 50 iterations
+            # through the fallback, 15 + 5 by halving (DEVELOPMENT_LOG 55).
+            r["iters_warmup"] = r["iters"]
             return r
         it_direct = r["iters"]
         w = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
@@ -1003,6 +1037,40 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         lin = linear_solver
 
     state = {}
+    # Quasi-Fermi box (maximum principle). Without generation, the solution's
+    # phin and phip lie between the lowest and highest Fermi level of the
+    # semiconductor contacts (Markowich, "The Stationary Semiconductor
+    # Device Equations", 1986; recombination only pulls them together), at
+    # every node, for any mobility model - measured exactly so on the 3D
+    # planar device. Newton iterates are projected onto that box at the free
+    # semiconductor nodes (contacts and the pinned oxide rows keep their
+    # values). Without it Newton can chase a false solution at infinity:
+    # where a gate depletes an n+ corner below the hybrid c_ref, raising
+    # phin lowers n, the drive turns to the edge field, the edges
+    # saturate, and phin ran to +98 V with n = 0 (DEVELOPMENT_LOG 55). Full
+    # planar device, drain ramp to 1 V: 173 -> 58 Newton iterations, no
+    # failed step; converged results unchanged.
+    semi_bc = ~is_insulator[contact_point_idx]
+    box_free = ~is_insulator & ~is_contact_full
+    # Not in equilibrium (a box of zero width): it would set phin = phip = 0
+    # EXACTLY at every node, the flat degenerate state _cold_start breaks on
+    # purpose - harmless for that solve, but the next one (the BTBT turn-on
+    # ramp) then started from it and failed.
+    qf_lo = qf_hi = None
+    if qf_box and generation is None and semi_bc.any():
+        lo = min(phin_bc[semi_bc].min(), phip_bc[semi_bc].min())
+        hi = max(phin_bc[semi_bc].max(), phip_bc[semi_bc].max())
+        if hi > lo:
+            qf_lo, qf_hi = lo, hi
+
+    def _project(U_):
+        if qf_lo is None:
+            return U_
+        U_ = U_.copy()
+        for b in (1, 2):
+            v = U_[b * N:(b + 1) * N]
+            v[box_free] = np.clip(v[box_free], qf_lo, qf_hi)
+        return U_
 
     def _run_newton(psi0, phin0, phip0):
         psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
@@ -1010,6 +1078,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         phin0[contact_point_idx] = phin_bc
         phip0[contact_point_idx] = phip_bc
         U = np.concatenate([psi0, phin0, phip0])
+        U = _project(U)
 
         if damping == "bank_rose":
             if generation is not None:
@@ -1096,7 +1165,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             step = 1.0
             accepted = False
             for _ in range(20):
-                U_try = U + step * delta
+                U_try = _project(U + step * delta)
                 F_try = _residual(U_try, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
                                    poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
                 merit_try = np.linalg.norm(row_scale * F_try)

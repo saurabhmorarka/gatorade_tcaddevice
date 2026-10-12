@@ -6,6 +6,61 @@ Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
+### UPDATE 2026-10-11 (later): Phase A speed pass in progress on `3d-speed`
+- The user chose A (speed). B (octree defaults study) is DEFERRED to a
+  FinFET, at the user's request; `test_octree` stays at 2.5% until then.
+- Done (DEVELOPMENT_LOG 55):
+  - quasi-Fermi box (maximum principle) in `newton_solve_2d`;
+  - `vsat_fallback=False` in `fab simulate` (halve the bias step instead);
+  - Rust `ball_query` in the mesher;
+  - Masetti doping mobility, now the default (the user asked for it in
+    the S/D); goldens re-captured after verification.
+- Full I-V: 243-261 s -> 172 s.
+- Done (DEVELOPMENT_LOG 56), the linear solver:
+  - numeric-only ILU refactorization (KSP kept per sparsity pattern);
+  - an iteration budget for a reused ILU (3x the fresh one's, min 20);
+  - ILU inexact-Newton cap 1e-8 -> 1e-6;
+  - `fab simulate` no longer forces MUMPS (ILU now converges on the
+    rectilinear mesh too, 6.6x faster, same currents).
+  - MUMPS, hypre (BoomerAMG, Euclid), other ILU orderings/levels and
+    Krylov types were measured and rejected (table in the log).
+- Full I-V: octree 172 s -> 106 s; rectilinear (default settings) 70 s.
+- Next in A:
+  - assembly + line-search residuals (now ~half of each Newton iteration);
+  - the repeated Vgs = 0 walks of the segments.
+- Profiling tool: `fab/profile_iv.py` (`--dump DIR` saves the walk's
+  linear systems for offline solver comparisons).
+- RESUME HERE (written 2026-10-11 night, before a likely context clear):
+  - State: `3d-speed` has two LOCAL commits (ec985e5 part 1, 6970877
+    part 2). Nothing pushed or merged: ask the user before either.
+  - Reference numbers (6 performance cores, full planar device):
+    `TCAD_LINSOLVE=petsc_ilu ~/miniconda3/envs/tcad/bin/python -W ignore -m fab simulate configs/fab_planar.yaml --mesher octree --out out/x`
+    -> total 106 s (mesh+eq 14, ramps 21, slowest segment 70). Without
+    `--mesher` (rectilinear, default settings) -> 70 s.
+    Metrics to check after any change (octree): Vt 0.204 -> 0.052 V,
+    SS 82, DIBL 160, Ion 1792 uA/um, Ioff 1.17e-6.
+  - One-process profile (where the time goes):
+    `TCAD_LINSOLVE=petsc_ilu OMP_NUM_THREADS=1 ~/miniconda3/envs/tcad/bin/python -W ignore -m fab.profile_iv configs/fab_planar.yaml --vds 1.0 --vgs 0.1,0.2,0.3,0.4,0.5,0.6`
+  - Suggested next step (not started; show the user the plan first):
+    the repeated Vgs = 0 walks. Each Vds = 1 V segment walks from Vgs = 0
+    to its first point before doing its own points (fab/simulate.py,
+    `run_curve`, split in `simulate()`). Ideas: hand segments a nearer
+    start state (e.g. a coarse predictor pass, or chain segments so later
+    ones start from an earlier segment's end), or rebalance the split.
+    Then the per-iteration cost: assembly 86 ms + ~46 ms per line-search
+    residual (`_residual_and_jacobian`, `edge_currents`, `edge_mobility`,
+    `mobility_field`, `_edge_force`, `bernoulli` in the cProfile). Keep any
+    speedup model-agnostic (user's concern); Rust only for >= 5-10x.
+  - Possible serial-stage win (not tried): equilibrium has phin = phip = 0
+    exactly, so a Poisson-only solve could replace the coupled cold start
+    (now 14 s mesh+eq). Caveat: a perfectly flat QF state was singular
+    for the next step before (`_cold_start` comment) - keep the tiny
+    perturbation or do one coupled iteration after.
+  - Tolerance cap tried: 1e-4 is ~5% faster than the chosen 1e-6 but adds
+    Newton iterations; revisit only with FinFET evidence.
+- The user's standing concern: speed must survive richer mobility and
+  stress models, so prefer model-agnostic speedups.
+
 ### 0. Where things stand (one paragraph)
 `main` now holds Phases 0-3 and the octree mesher, merged and pushed
 (DEVELOPMENT_LOG 54).
@@ -57,8 +112,8 @@ tell the full story with numbers.
 ### 2. Environments
 - *venv:* `.venv/bin/python`, no PETSc (SciPy SuperLU). Viewer, tests.
 - *conda:* `~/miniconda3/envs/tcad/bin/python`, with PETSc. Use it for 3D
-  solves: `TCAD_LINSOLVE=petsc_ilu` (fast) or `petsc_lu`.
-  `fab simulate` defaults to petsc_lu unless the variable is set.
+  solves. `fab simulate` uses PETSc block ILU by default ("auto");
+  `TCAD_LINSOLVE=petsc_lu` forces MUMPS (much slower in 3D).
 - *Rust kernels* (`native/`): rebuild BOTH environments after any change,
   from `native/`:
   - `env -u CONDA_PREFIX VIRTUAL_ENV=$PWD/../.venv ../.venv/bin/maturin develop --release`
