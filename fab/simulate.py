@@ -268,7 +268,7 @@ def _solver_at(d, Vgs, Vds):
     mesh, mat, dev, Cs = d["mesh"], d["mat"], d["dev"], d["Cs"]
     return lambda pp, gss: solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
                                         psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
-                                        cold_retry=False, velocity_saturation=True)
+                                        cold_retry=False, velocity_saturation=True, vsat_fallback=False)
 
 
 def _write_states(task, d, states):

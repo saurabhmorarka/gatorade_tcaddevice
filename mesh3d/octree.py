@@ -634,10 +634,14 @@ def _dual(tree, ids, LO, HI, leaf_label, label, h, log):
         R = 2.0 * half[todo].reshape(len(todo), -1).max(axis=1) + 4.0 * h.max()
         while len(todo):
             if native is not None and hasattr(native, "voronoi_cells"):
-                lists = kd.query_ball_point(P[todo], R)
-                ptr = np.zeros(len(todo) + 1, dtype=np.int64)
-                ptr[1:] = np.cumsum([len(x) for x in lists])
-                idx = np.fromiter(itertools.chain.from_iterable(lists), dtype=np.int64, count=int(ptr[-1]))
+                if hasattr(native, "ball_query"):         # 4.4 s -> ~0.1 s on the full planar device
+                    ptr, idx = native.ball_query(np.ascontiguousarray(P), todo.astype(np.int64), R.astype(float),
+                                                 float(np.median(R)))
+                else:
+                    lists = kd.query_ball_point(P[todo], R)
+                    ptr = np.zeros(len(todo) + 1, dtype=np.int64)
+                    ptr[1:] = np.cumsum([len(x) for x in lists])
+                    idx = np.fromiter(itertools.chain.from_iterable(lists), dtype=np.int64, count=int(ptr[-1]))
                 comp, vp, vl, vv, fp, fn, fl, fa = native.voronoi_cells(
                     np.ascontiguousarray(P), todo.astype(np.int64), ptr, idx, R.astype(float), dom_hi.astype(float),
                     h.astype(float), np.ascontiguousarray(tree.owner, dtype=np.int32),

@@ -6,6 +6,25 @@ Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
+### UPDATE 2026-10-11 (later): Phase A speed pass in progress on `3d-speed`
+- The user chose A (speed). B (octree defaults study) is DEFERRED to a
+  FinFET, at the user's request; `test_octree` stays at 2.5% until then.
+- Done (DEVELOPMENT_LOG 55):
+  - quasi-Fermi box (maximum principle) in `newton_solve_2d`;
+  - `vsat_fallback=False` in `fab simulate` (halve the bias step instead);
+  - Rust `ball_query` in the mesher;
+  - Masetti doping mobility, now the default (the user asked for it in
+    the S/D); goldens re-captured after verification.
+- Full I-V: 243-261 s -> 172 s.
+- Next in A:
+  - the linear solver (60-70% of Newton time; ILU about 70 Krylov
+    iterations per system, rtol pinned at 1e-8);
+  - the repeated Vgs = 0 walks of the segments;
+  - equilibrium ILU work (20 s).
+- Profiling tool: `fab/profile_iv.py`.
+- The user's standing concern: speed must survive richer mobility and
+  stress models, so prefer model-agnostic speedups.
+
 ### 0. Where things stand (one paragraph)
 `main` now holds Phases 0-3 and the octree mesher, merged and pushed
 (DEVELOPMENT_LOG 54).
