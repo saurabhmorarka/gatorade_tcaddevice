@@ -70,7 +70,13 @@ why tunneling happens.
 ## 3D virtual fab (`fab/`, `configs/fab_planar.yaml`)
 
 Builds a 3D device the way a fab does, one process step at a time, and
-writes a snapshot after every step so you can scrub through the build:
+writes a snapshot after every step so you can scrub through the build.
+
+`python3` in these commands means the project's environment. Run them from
+`tcad1d/` after `source .venv/bin/activate`, or write `.venv/bin/python`
+instead. A system `python3` (e.g. Homebrew's) has no PyVista/Qt and reports
+"No module named tcadview". 3D solves (`fab simulate`) run faster in the
+conda env with PETSc: `~/miniconda3/envs/tcad/bin/python`.
 
 ```bash
 python3 -m fab build configs/fab_planar.yaml      # ~1.5 s build + ~2.5 s snapshots
