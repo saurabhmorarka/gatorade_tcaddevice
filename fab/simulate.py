@@ -434,9 +434,12 @@ def write_state_octree(path, d, state, bias, label):
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
              vtk="all", workers=None, log=print, mesher="cartesian"):
     from solver2d.mosfet_metrics import mosfet_metrics
-    # direct LU (MUMPS) for these meshes: ILU-GMRES gave Newton bad directions
-    # (long thin cells, large insulator regions) and equilibrium never converged
-    os.environ.setdefault("TCAD_LINSOLVE", "petsc_lu")
+    # The linear solver is core/linsolve's "auto" (PETSc block ILU at these
+    # sizes) unless TCAD_LINSOLVE says otherwise. This used to force direct
+    # LU (MUMPS): ILU-GMRES gave Newton bad directions on the rectilinear
+    # mesh and equilibrium never converged. With the quasi-Fermi box
+    # (DEVELOPMENT_LOG 55) and the reuse budget (56) ILU converges there to
+    # the same currents, 6.6x faster (40 s vs 263 s, one Id-Vg walk).
     t0 = time.perf_counter()
     from core.parallel import performance_cores
     from main2d_mosfet_sweep import continuation

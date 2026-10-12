@@ -5314,3 +5314,91 @@ PETSc ILU, 6 performance cores, 2 x 13 points):
   tolerance is pinned at 1e-8.
 - Each Vds = 1 V segment repeats the walk from Vgs = 0.
 - The equilibrium is 20 s of ILU work.
+
+## 56. Phase A speed pass, part 2: the linear solver
+
+Branch `3d-speed`. The user asked to start the remaining speed work with
+the linear solve (60-70% of the Newton time after part 1).
+
+**Method.** `fab/profile_iv.py --dump DIR` saves the walk's Newton systems.
+60 consecutive real systems (full planar octree device, 196,956 unknowns,
+1.6M nonzeros) were then replayed offline through `LinearSolver` with each
+candidate, one thread. Baseline: block ILU(2)-GMRES, rtol 1e-8, 21.0 s,
+2333 Krylov iterations, 21 factorizations.
+
+**Rejected (measured on those 60 systems):**
+
+| candidate | time | why not |
+|---|---|---|
+| MUMPS LU, reused as GMRES preconditioner, rtol 1e-8 / 1e-4 | 154 / 109 s | ~5 s per factorization in 3D (fill); METIS and BLR settings did not change it |
+| hypre BoomerAMG (plain / nodal) | 150 / 264 s | half the Krylov iterations, but setup ~2.3 s vs ILU's 0.16 s |
+| hypre Euclid | failed | fresh preconditioner did not converge |
+| ILU orderings nd / qmd / natural (vs rcm) | 33.5 / 35.4 / 22.6 s | rcm stays |
+| ILU(1) / ILU(3) / ILU(4) | 23.2 / 19.3 / slower | ILU(3) -8% at 1e-8, worse at loose tolerances |
+| BiCGStab, GMRES restart 60, modified Gram-Schmidt | 18.6 / 19.2 / 23.5 s | -10% at 1e-8 only; worse at loose tolerances |
+
+The cost of one ILU(2)-GMRES iteration: preconditioner apply 2.7 ms,
+matvec 0.6 ms. No available preconditioner beats block ILU(2) here; the
+gains are in how it is used.
+
+**Kept 1: numeric-only refactorization.** A refactorization used to build
+a new KSP: ordering, symbolic ILU and numeric ILU, 176 ms. The pattern of
+a sweep never changes, so `core/linsolve.py` now keeps the KSP and its
+preconditioner matrix and only refills the values: 81 ms, bit-identical
+preconditioner (same iteration counts on fresh vs refilled). The BAIJ
+value gather uses precomputed indices (10.5 -> 2 ms).
+
+**Kept 2: an iteration budget for a reused ILU.** The refactor rule is
+self-tuning (refactor once the Krylov time since the last factorization
+exceeds the factorization's own cost). Its weak spot: a stale ILU that has
+stopped working grinds to the 300-iteration limit (~1.5 s) before the
+fallback refactors anyway. A reused ILU now gets 3x the iterations the
+fresh one needed (at least 20); past that it refactors (0.08 s). Equilibrium,
+where 5 of 9 systems hit the limit, went 21.9 -> 6.6 s of linear solve at
+the same tolerance. Direct-LU reuse (2D) is untouched.
+
+**Kept 3: ILU inexact-Newton cap 1e-8 -> 1e-6.** The cap dates from before
+the quasi-Fermi box (log 55). Full planar I-V (equilibrium + ramp + walk),
+with 1 and 2 above, three caps run side by side:
+
+| cap | eq + ramp + walk | Newton its ramp / walk | Id |
+|---|---|---|---|
+| 1e-8 | 85.9 s | 58 / 92 | identical |
+| 1e-6 | 76.4 s | 62 / 92 | identical |
+| 1e-4 | 72.4 s | 68 / 95 | identical |
+
+1e-4 is ~5% faster than 1e-6 but adds Newton iterations; 1e-6 keeps margin
+for harder devices (FinFET) and richer mobility models.
+
+**Kept 4: `fab simulate` no longer forces MUMPS.** It set
+`TCAD_LINSOLVE=petsc_lu` because ILU-GMRES never converged equilibrium on
+the rectilinear mesh. With the box and the budget it does. Rectilinear
+device, one Id-Vg walk (eq + ramp to 1 V + 6 points), one thread:
+MUMPS 263 s, ILU 40 s, Id identical to 7 digits at every point. The
+default is now `core/linsolve`'s "auto" (PETSc block ILU at these sizes).
+
+**End to end** (6 performance cores, 2 x 13 points):
+
+| | part 1 (log 55) | now |
+|---|---|---|
+| octree: mesh + equilibrium | 31 s | 14 s |
+| octree: drain ramps | 29 s | 21 s |
+| octree: slowest segment | 110 s | 70 s |
+| octree: total (`TCAD_LINSOLVE=petsc_ilu`) | 172 s | 106 s |
+| rectilinear: total, default settings | 343 s (MUMPS) | 70 s (ILU) |
+
+- Octree metrics unchanged: Vt 0.204 -> 0.052 V, SS 82, DIBL 160,
+  Ion 1792 uA/um, Ioff 1.17e-6.
+- Rectilinear: Vt 0.200 -> 0.044 V, SS 81, DIBL 165, Ion 1775 uA/um
+  (the known ~1% mesh difference to octree). Full curves ILU vs MUMPS:
+  all 26 points agree to 1.4e-8 relative, same metrics. (The MUMPS run
+  also took 702 s to EXIT, against its own 343 s total: something in
+  shutdown with MUMPS workers; not chased, MUMPS is no longer the default.)
+- Suite 114 OK (1 skip); `test_octree` 6 OK and `test_3d_examples` OK
+  under conda with PETSc ILU.
+
+**Next:**
+- Per Newton iteration the linear solve is now ~50%; assembly (86 ms) and
+  line-search residuals (~46 ms each) are the other half.
+- Each Vds = 1 V segment repeats the walk from Vgs = 0 (the slowest
+  segment is 70 s, the serial part 35 s).

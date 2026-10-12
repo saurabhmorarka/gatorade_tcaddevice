@@ -16,12 +16,20 @@ tell the full story with numbers.
   - Masetti doping mobility, now the default (the user asked for it in
     the S/D); goldens re-captured after verification.
 - Full I-V: 243-261 s -> 172 s.
+- Done (DEVELOPMENT_LOG 56), the linear solver:
+  - numeric-only ILU refactorization (KSP kept per sparsity pattern);
+  - an iteration budget for a reused ILU (3x the fresh one's, min 20);
+  - ILU inexact-Newton cap 1e-8 -> 1e-6;
+  - `fab simulate` no longer forces MUMPS (ILU now converges on the
+    rectilinear mesh too, 6.6x faster, same currents).
+  - MUMPS, hypre (BoomerAMG, Euclid), other ILU orderings/levels and
+    Krylov types were measured and rejected (table in the log).
+- Full I-V: octree 172 s -> 106 s; rectilinear (default settings) 70 s.
 - Next in A:
-  - the linear solver (60-70% of Newton time; ILU about 70 Krylov
-    iterations per system, rtol pinned at 1e-8);
-  - the repeated Vgs = 0 walks of the segments;
-  - equilibrium ILU work (20 s).
-- Profiling tool: `fab/profile_iv.py`.
+  - assembly + line-search residuals (now ~half of each Newton iteration);
+  - the repeated Vgs = 0 walks of the segments.
+- Profiling tool: `fab/profile_iv.py` (`--dump DIR` saves the walk's
+  linear systems for offline solver comparisons).
 - The user's standing concern: speed must survive richer mobility and
   stress models, so prefer model-agnostic speedups.
 
@@ -76,8 +84,8 @@ tell the full story with numbers.
 ### 2. Environments
 - *venv:* `.venv/bin/python`, no PETSc (SciPy SuperLU). Viewer, tests.
 - *conda:* `~/miniconda3/envs/tcad/bin/python`, with PETSc. Use it for 3D
-  solves: `TCAD_LINSOLVE=petsc_ilu` (fast) or `petsc_lu`.
-  `fab simulate` defaults to petsc_lu unless the variable is set.
+  solves. `fab simulate` uses PETSc block ILU by default ("auto");
+  `TCAD_LINSOLVE=petsc_lu` forces MUMPS (much slower in 3D).
 - *Rust kernels* (`native/`): rebuild BOTH environments after any change,
   from `native/`:
   - `env -u CONDA_PREFIX VIRTUAL_ENV=$PWD/../.venv ../.venv/bin/maturin develop --release`

@@ -38,7 +38,26 @@ def _timed(name, fn):
     return wrap
 
 
-def instrument():
+def instrument(dump=None, dump_from=0, dump_max=0):
+    if dump:
+        os.makedirs(dump, exist_ok=True)
+        solve = linsolve.LinearSolver.solve
+        seen = [0]
+
+        def dumped(self, J, b, rtol=None):
+            # Save the system sequence (values only after the first: one
+            # pattern) for offline linear-solver comparisons.
+            k = seen[0] - dump_from
+            seen[0] += 1
+            if 0 <= k < dump_max:
+                A = J.tocsr()
+                A.sort_indices()
+                extra = dict(indptr=A.indptr, indices=A.indices) if k == 0 else {}
+                np.savez(os.path.join(dump, f"sys{k:03d}.npz"), data=A.data, b=b,
+                         rtol=-1.0 if rtol is None else rtol, **extra)
+            return solve(self, J, b, rtol)
+        linsolve.LinearSolver.solve = dumped     # wraps the timed solve: dumping is not timed
+        return
     nsq._residual_and_jacobian = _timed("assemble F+J", nsq._residual_and_jacobian)
     nsq._residual = _timed("residual (line search)", nsq._residual)
     linsolve.LinearSolver.solve = _timed("linear solve", linsolve.LinearSolver.solve)
@@ -86,6 +105,9 @@ def main():
     ap.add_argument("--vgs", default="0.1,0.2,0.3,0.4,0.5,0.6")
     ap.add_argument("--vsat", default="true", help="true | false | efield | hybrid | gradqf")
     ap.add_argument("--cprofile", action="store_true")
+    ap.add_argument("--dump", help="directory: save the linear systems of the Id-Vg walk")
+    ap.add_argument("--dump-from", type=int, default=0, help="first walk system to save")
+    ap.add_argument("--dump-max", type=int, default=40)
     a = ap.parse_args()
     from main2d_mosfet_sweep import continuation, solve_mosfet
     from mos.mos_params import MOSDevice
@@ -120,6 +142,8 @@ def main():
     t = time.perf_counter()
     if pr:
         pr.enable()
+    if a.dump:
+        instrument(a.dump, a.dump_from, a.dump_max)
     states, _, _ = continuation(stepper(fs._solver_at(d, None, a.vds), steps), 0.0, ramp[a.vds], vgs)
     if pr:
         pr.disable()
