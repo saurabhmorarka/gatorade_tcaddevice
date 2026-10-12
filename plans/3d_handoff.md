@@ -31,7 +31,7 @@ tell the full story with numbers.
 - Profiling tool: `fab/profile_iv.py` (`--dump DIR` saves the walk's
   linear systems for offline solver comparisons).
 - RESUME HERE, NEWEST (2026-10-12): parts 1-2 merged to `main` and pushed
-  (fb6fa9e). On `3d-speed` since, LOCAL (ask before push/merge):
+  (fb6fa9e); parts 3-4 merged to `main` and pushed too (01974b3):
   part 3 (DEVELOPMENT_LOG 57: psi-only gate-walk predictor, one worker
   per curve, cached octree VTU geometry) and part 4 (58: Poisson-first
   equilibrium cold start). Octree full I-V 105 -> 73 s, rectilinear
