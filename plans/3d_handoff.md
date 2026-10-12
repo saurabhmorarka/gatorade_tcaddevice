@@ -55,7 +55,12 @@ tell the full story with numbers.
      modified local density as cheaper options; charge peak away from
      the interface).
   3. Mobility stack: surface orientation, surface roughness, Coulomb,
-     phonon, interface charge.
+     phonon, interface charge. The user ADDED (2026-10-12), must be
+     included:
+     - channel-doping degradation of the inversion-layer mobility
+       (Coulomb scattering by the channel doping);
+     - ballistic mobility integrated into drift-diffusion (short-channel
+       limit, e.g. 1/mu_eff = 1/mu_DD + 1/mu_ballistic).
   4. Stress and its effect on mobility.
   5. FinFET, nanosheet - and then option B (octree defaults study, on a
      FinFET) and the deferred `test_octree` tolerance (2.5% -> 1%).
