@@ -487,6 +487,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scale_combo.setCurrentText(model.default_scale(default))
         self.scale_combo.blockSignals(False)
         self.slice_box.setVisible(st.dim == 3)
+        self._sync_vectors()
+        b = st.grid.bounds
+        extent_nm = 1e3 * max(b[1] - b[0], b[3] - b[2], b[5] - b[4])
+        self.vec_pitch.blockSignals(True)
+        self.vec_pitch.setValue(max(0.1, round(extent_nm / 40.0, 1)))      # ~40 arrows across the device
+        self.vec_pitch.blockSignals(False)
         self.section_combo.blockSignals(True)
         self.section_combo.setCurrentText("off")
         self.section_combo.blockSignals(False)
