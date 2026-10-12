@@ -16,6 +16,10 @@ Bias points, deliberately few so the test runs as fast as the 2D ones
 Equilibrium is solved first; each point is reached by continuation from the
 previous one.
 
+It also checks the exported current-density vectors: their integral over
+planes across the channel must match the solver's exact plane current
+(sum of crossing edge currents) within 2% (measured: within 0.7%).
+
 Tolerance: rtol 2e-3, the drift between linear-solver backends (SuperLU in
 the venv, PETSc ILU/LU in conda) on converged states; currents below `FLOOR`
 are only checked against it.
@@ -36,6 +40,7 @@ GOLDEN = os.path.join(ROOT, "testsuite", "golden", "3d_planar_tiny.json")
 CONFIG = os.path.join(ROOT, "configs", "fab_planar_tiny.yaml")
 RTOL = 2e-3
 FLOOR = 1e-13          # A
+VECTOR_RTOL = 0.02     # exported J vectors vs the exact plane current (measured <= 0.7%)
 
 
 def run():
@@ -61,11 +66,50 @@ def run():
     for name, states, key in (("Id_off_A", off, 0.05), ("Id_lin_A", lin, 0.6), ("Id_sat_A", sat, 0.6)):
         if key in states:
             out[name] = drain_current(d, states[key])
+    if 0.6 in lin:
+        out["_vector_flux_check"] = vector_flux_check(d, lin[0.6])
     return out, time.perf_counter() - t0
+
+
+def vector_flux_check(d, r):
+    """Worst relative difference, over planes across the channel, between
+    the solver's exact current through the plane (sum of the edge currents
+    crossing it) and the integral of the exported TotalCurrentDensity
+    vectors sampled on a fine grid in the plane - through the octree VTK
+    writer (half-width mirroring included). Checks that the arrows the
+    viewer draws carry the solver's conserved current."""
+    import tempfile
+    import numpy as np
+    import pyvista as pv
+    from fab.simulate import write_state_octree
+    from solver2d.newton_solver_qf_2d import edge_currents
+    m = d["mesh"]
+    In, Ip = edge_currents(m, d["mat"], r["psi"], r["n"], r["p"], r["phin"], r["phip"], r["velocity_saturation"])
+    with tempfile.TemporaryDirectory() as tmp:
+        f = os.path.join(tmp, "s.vtu")
+        write_state_octree(f, d, r, {}, "")
+        g = pv.read(f)
+    b = g.bounds
+    P = m.points * 1e4                                                  # um
+    xi, xj = P[m.edges[:, 0], 0], P[m.edges[:, 1], 0]
+    worst = 0.0
+    for fx in (0.41, 0.47, 0.53, 0.59):                                  # between node planes
+        xp = b[0] + fx * (b[1] - b[0])
+        I_edge = 2.0 * ((In + Ip)[(xi < xp) & (xj > xp)].sum() - (In + Ip)[(xj < xp) & (xi > xp)].sum())
+        ys, zs = np.linspace(b[2], b[3], 1201), np.linspace(b[4], b[5], 201)
+        Y, Z = np.meshgrid(ys, zs, indexing="ij")
+        s = pv.PolyData(np.column_stack([np.full(Y.size, xp), Y.ravel(), Z.ravel()])).sample(g)
+        Jx = np.nan_to_num(s.point_data["TotalCurrentDensity"][:, 0].reshape(Y.shape))
+        I_vec = np.trapezoid(np.trapezoid(Jx, zs, axis=1), ys) * 1e-8    # um^2 -> cm^2
+        worst = max(worst, abs(I_vec / I_edge - 1.0))
+    return worst
 
 
 def compare(golden, new):
     bad = []
+    if new.get("_vector_flux_check", 0.0) > VECTOR_RTOL:
+        bad.append(f"current-density vectors integrate to the plane current only within "
+                   f"{new['_vector_flux_check']:.2%} (> {VECTOR_RTOL:.0%})")
     for k, g in golden.items():
         if k not in new:
             bad.append(f"{k}: missing (point did not converge?)")
@@ -97,6 +141,7 @@ class Test3DExamples(unittest.TestCase):
 if __name__ == "__main__":
     if "--capture" in sys.argv:
         new, wall = run()
+        new = {k: v for k, v in new.items() if not k.startswith("_")}
         with open(GOLDEN, "w") as f:
             json.dump(new, f, indent=1, sort_keys=True)
         print(f"captured {GOLDEN} ({wall:.1f}s): {new}")

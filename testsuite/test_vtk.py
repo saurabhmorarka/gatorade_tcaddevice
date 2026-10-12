@@ -162,7 +162,8 @@ class TestParaViewReads(unittest.TestCase):
         self.assertIsNotNone(line, out.stdout + out.stderr)
         n_pts, n_cells, n_pd, n_cd = map(int, line.split()[1:])
         self.assertEqual((n_pts, n_cells), (len(mesh.points), len(mesh.triangles)))
-        self.assertEqual((n_pd, n_cd), (12, 4))
+        # 12 scalar point fields + 4 nodal vectors (E, e/h/total current density)
+        self.assertEqual((n_pd, n_cd), (16, 4))
 
 
 if __name__ == "__main__":

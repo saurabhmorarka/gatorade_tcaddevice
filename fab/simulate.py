@@ -327,13 +327,18 @@ def write_state(path, d, state, bias, label):
     pd_mesh = state_point_data(mesh, d["mat"], state)
     grid = {}
     for k, v in pd_mesh.items():
-        a = np.full(shape, np.nan)
+        v = np.asarray(v)
+        a = np.full(shape + v.shape[1:], np.nan)
         a[tuple(mesh.grid_index.T)] = v
         grid[k] = a
     cell = d["cell_region"]
     ax = [a.copy() for a in axes_nm]
     if d["half_z"]:
+        nz = shape[2]
         grid = {k: _mirror(v, 2) for k, v in grid.items()}
+        for v in grid.values():
+            if v.ndim == 4:                       # a vector: its z component flips in the mirror image
+                v[:, :, nz:, 2] *= -1.0
         cell = np.concatenate([cell, cell[:, :, ::-1]], axis=2)
         ax[2] = np.concatenate([ax[2], 2 * ax[2][-1] - ax[2][-2::-1]])
     shape = tuple(len(a) for a in ax)
@@ -404,7 +409,15 @@ def write_state_octree(path, d, state, bias, label):
     if d["half_z"]:
         src[:, 2] = np.where(src[:, 2] > lab.shape[2], 2 * lab.shape[2] - src[:, 2], src[:, 2])
     dev = gid[tuple(src.T)]
-    pdat = {k: np.where(dev >= 0, np.asarray(v)[np.maximum(dev, 0)], np.nan) for k, v in pd_mesh.items()}
+    mirrored = uniq[:, 2] > lab.shape[2] if d["half_z"] else np.zeros(len(uniq), bool)
+    pdat = {}
+    for k, v in pd_mesh.items():
+        v = np.asarray(v)
+        ok = (dev >= 0).reshape((-1,) + (1,) * (v.ndim - 1))
+        a = np.where(ok, v[np.maximum(dev, 0)], np.nan)
+        if v.ndim == 2:                           # a vector: its z component flips in the mirror image
+            a[mirrored, 2] *= -1.0
+        pdat[k] = a
     pts = (origin + uniq * h) * 1e-3                                    # um
     region_names, materials, region_mat = _region_info(d)
     cnames = [c.name for c in mesh.domain.contacts]
