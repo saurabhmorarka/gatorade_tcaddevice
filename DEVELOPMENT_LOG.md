@@ -5534,3 +5534,95 @@ also compete less for memory bandwidth.
 **Merge (2026-10-12).** Parts 3-5 merged to `main` and pushed; Phase A
 (speed) closed at 57 s for the octree full I-V. Next per the handoff:
 the physics roadmap, starting with Schottky S/D contacts (1D first).
+
+## 60. Schottky S/D contacts in 1D: thermionic emission + nonlocal tunneling, and Study A (Ti/TiN on NMOS and PMOS)
+
+Branch `schottky-contacts` (from `main` at cdbcd1e). Roadmap item 1. Plan:
+`plans/schottky_plan.md`. No shared solver code changed: the new 1D solver
+wraps `core/newton_solver_qf.py`'s residual and Jacobian.
+
+**Model (the standard Sentaurus/Atlas split), `contacts/schottky.py`:**
+- Thermionic-emission boundary condition (Crowell-Sze recombination
+  velocity): psi pinned by the barrier, flux v (n_s - n_B) into the metal,
+  v = A** T^2 / (q N_band) (Si A** 112 / 32). phin, phip at the interface
+  become free unknowns (Robin rows). The majority carrier's barrier sets
+  psi and its boundary density; the minority one is ni^2 / that, so
+  equilibrium is exactly current-free.
+- Barrier: `barrier_n_eV` / `barrier_p_eV` given directly, or from the
+  metal work function: Schottky-Mott (Phi_m - chi, default) or pinned
+  (Cowley-Sze form, S and the neutral level as parameters).
+- Nonlocal tunneling (field and thermionic-field emission): Tsu-Esaki
+  current through the solved band profile, WKB along the path normal to
+  the interface, booked as a carrier sink at the turning points. The WKB
+  integral is exact for U linear between nodes, with analytic derivatives
+  (finite at the turning point), so there is no sub-sampling and the
+  full Jacobian (incl. the turning point's motion) is analytic. Energies
+  above the barrier top are TE only (no double counting).
+- Image-force lowering: optional, relative to equilibrium (Sentaurus
+  BarrierLowering), depletion only. **Off by default**: at S/D doping the
+  interface field is ~1e7 V/cm and the lowering reaches the whole barrier
+  (the image-force peak sits < 1 A from the metal; outside the model's
+  validity). Use it up to ~1e19.
+
+**Validation (1D, `contacts/newton_schottky_1d.py`):**
+- TE limit, n-Si 1e16, Phi_B = 0.6: = Richardson diode to 0.01% with a
+  very high mobility; 1-13% lower at the real mobility = Crowell-Sze
+  thermionic-emission-diffusion (finite diffusion velocity), as expected.
+  The reverse excess (<= 2%) is SRH generation in the depletion region.
+- rho_c(N), Phi_B 0.4 / 0.6 eV (Ohm cm^2): 1e18 1.8e-3 / 2.1; 1e19
+  2.2e-5 / 2.9e-3; 1e20 4.9e-8 / 3.0e-7; 7e20 3.1e-9 / 6.1e-9; 2e21
+  1.4e-9 / 2.1e-9. Against the independent depletion-model (Yu)
+  calculation: 1.1x at 2e21 up to 1.7x at 1e19 (the self-consistent
+  barrier's free-carrier tail; same slopes and TE/TFE/FE crossover).
+- Mesh: 0.05 -> 0.2 nm at the contact changes rho_c <= 3%.
+- Robustness matrix (n and p, 1e17-2e21, Phi_B 0.3/0.5/0.8, 3 meshes,
+  sweeps to +/-1 V): 546 points, 0 failures, |J_metal - J_far| / |J|
+  <= 8.6e-6. A branch stops at |J| = 1e8 A/cm^2 (`sweep(J_cap=...)`):
+  deep forward accumulation at a degenerate contact (1e8-1e10 A/cm^2,
+  no device meaning) only gets stiffer.
+- Bugs found and fixed on the way: the turning point's motion was
+  missing from the Jacobian; a warm start put the whole bias step across
+  the first 0.05 nm edge (fixed by a linear psi + quasi-Fermi ramp
+  predictor); the image force used |E| in accumulation; whole energy bins
+  switched on/off at the emitter band edge near flat band (now a partial
+  bin, continuous lower limit); a 30 nm path reached the far contact and
+  booked a sink on its Dirichlet row (paths now exclude other contacts -
+  the rule for 2D/3D too).
+- Speed: a rho_c extraction (6 solves) ~0.1 s; the 81-sweep matrix 214 s.
+
+**Study A (user request): one Ti/TiN contact metal on NMOS Si:P 7e20 and
+PMOS strained Si0.5Ge0.5:B 5e20** (`contacts/study_ti_barriers.py`,
+`out/schottky/study_ti_barriers.png`). Strained Si0.5Ge0.5 on Si: Eg 0.75,
+chi 4.05 (Delta Ev ~0.37 eV).
+
+| metal | model         | Phi_Bn Si | rho_c NMOS | Phi_Bp SiGe | rho_c PMOS |
+|-------|---------------|-----------|------------|-------------|------------|
+| Ti    | Schottky-Mott | 0.28      | 2.1e-9     | 0.47        | 2.7e-8     |
+| Ti    | pinned (C-S)  | 0.67      | 8.0e-9     | 0.08        | 3.7e-9     |
+| TiN   | Schottky-Mott | 0.55      | 5.2e-9     | 0.20        | 6.6e-9     |
+| TiN   | pinned (C-S)  | 0.75      | 1.0e-8     | 0.00        | 2.5e-9     |
+
+- Literature: TiN/n-Si 0.49 eV (Wittmer & Melchior; other reports
+  0.35-0.58), TiSix/n-Si ~0.69 (0.61 under TiN); p-SiGe barriers fall
+  with Ge by ~Delta Ev (pinning fixed to Ec); rho_c 1.5e-9 on Ti-silicided
+  Si:P 2e21 (imec), ~1-5e-9 on SiGe:B with TiSi (patent / thesis).
+- The measured NMOS rho_c (at 2e21) needs Phi_Bn ~0.44 eV in this model
+  - inside the measured TiN range, below TiSix. Schottky-Mott for Ti
+  (0.28) is too low; the Cowley-Sze pinned values (0.67-0.75, c2 = 0.27,
+  phi0 = 0.30 eV - to be checked against Sze's table) are too high.
+- PMOS: the measured 1-5e-9 needs Phi_Bp <= ~0.14 eV; Schottky-Mott
+  (0.2-0.47) is too high, pinned (0-0.08) fits. Sensitive to the hole
+  A** (32) and tunneling mass (0.39), both uncertain in strained SiGe.
+- Conclusion so far: neither plain model fits both; a Si-calibrated
+  pinning with the neutral level tied to Ec gives the right PMOS trend.
+
+**Known limits:** Boltzmann statistics (degenerate S/D); image force off
+at S/D doping; tunneling path = mesh line (1D). Test case:
+`testsuite/test_schottky.py` (12 tests, 7 s): kernel, TE limit, rho_c vs
+the depletion model, mesh independence, conservation for the NMOS/PMOS
+reference contacts, golden rho_c. Full suite 126 tests pass.
+
+**User requirements for the port (2026-10-12):** Schottky on by default
+at every transistor S/D contact (ohmic only on request), runtime impact
+measured on the 3D planar I-V; 2D/3D Schottky test cases.
+**Next:** user review of the 1D results, then the 2D port.
