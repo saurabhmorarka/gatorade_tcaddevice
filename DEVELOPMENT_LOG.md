@@ -5530,3 +5530,7 @@ curve 28). Rectilinear 54 -> 38 s. Metrics unchanged (octree Vt 0.204 ->
 0.044, Ion 1775). Tests: 114 + 6 octree pass, 3D octree test 14 -> 13 s.
 The I-V gained more than the per-call numbers suggest: the two workers
 also compete less for memory bandwidth.
+
+**Merge (2026-10-12).** Parts 3-5 merged to `main` and pushed; Phase A
+(speed) closed at 57 s for the octree full I-V. Next per the handoff:
+the physics roadmap, starting with Schottky S/D contacts (1D first).
