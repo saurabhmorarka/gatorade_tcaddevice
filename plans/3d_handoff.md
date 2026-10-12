@@ -104,6 +104,11 @@ unchanged since 70cf3a7. Measured on the real I-V path: hybrid costs
 1.7-3.4x efield in 3D (worst at high Vds). That is intrinsic stiffness,
 not a start-up artifact.
 
+2026-10-11 late: the user chose option (a); `fab simulate` now runs
+parallel segments (347 -> 243 s on the full device), and
+`testsuite/test_3d_examples.py` exists (42 s). DEVELOPMENT_LOG 52.
+Next lever: about 40 Newton iterations per point at Vds = 1 V with hybrid.
+
 Waiting on the user (who asked to wait before the next phase):
 - How to handle the hybrid cost; options (a)-(d) in log 51.
 - Speed pass toward the 1-minute full 3D I-V. Today: mesh 15 s and about
