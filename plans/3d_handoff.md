@@ -1,12 +1,25 @@
 # 3D program: handoff
 
-## COLD START: read this first (newest block: "LATEST 2026-10-12")
+## COLD START: read this first (newest block: "LATEST 2026-10-12 (later)")
 
 Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-12: Phase A (speed) DONE and merged - START HERE
+### LATEST 2026-10-12 (later): Schottky S/D contacts, 1D DONE - START HERE
+- Branch `schottky-contacts` (local, not pushed; commit 951efc9). Plan:
+  `plans/schottky_plan.md`; results: DEVELOPMENT_LOG 60.
+- Done in 1D: TE boundary + nonlocal Tsu-Esaki tunneling (+ optional image
+  force, off by default), validated; Study A (Ti/TiN on NMOS Si:P 7e20 and
+  PMOS strained Si0.5Ge0.5:B 5e20); test case `testsuite/test_schottky.py`.
+- WAITING for the user's review of the 1D results before the 2D/3D port.
+- User requirements for the port: Schottky ON BY DEFAULT at every
+  transistor S/D contact (ohmic only on request); measure the runtime
+  impact on the 3D planar I-V (57 s reference); add 2D and 3D Schottky
+  test cases. Tunneling paths must never include another contact's
+  (Dirichlet) node.
+
+### 2026-10-12: Phase A (speed) DONE and merged
 - *State:* everything is merged into `main` and pushed (parts 1-5 of the
   speed pass, DEVELOPMENT_LOG 55-59). `3d-speed` equals `main` and can
   be deleted. New work: a new feature branch from `main`.
