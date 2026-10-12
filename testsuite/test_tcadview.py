@@ -159,6 +159,42 @@ class TestSection(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
+    def test_outline_is_material_boundaries_only(self):
+        """Every outline segment separates two different regions (or a
+        region and the outside): sample just either side of its midpoint.
+        VTK feature edges also returned internal mesh seams."""
+        st = self.st
+        for ax, pos in (("z", 0.5 * (st.grid.bounds[4] + st.grid.bounds[5])), ("x", 0.37 * st.grid.bounds[1])):
+            o = st.outline(ax, pos)
+            self.assertGreater(o.n_cells, 0)
+            seg = o.points.reshape(-1, 2, 3)
+            mid = seg.mean(axis=1)
+            d = seg[:, 1] - seg[:, 0]
+            nrm = np.zeros_like(d)
+            n = "xyz".index(ax)
+            # in-plane normal: rotate the segment direction by 90 degrees within the plane
+            u, v = [i for i in range(3) if i != n]
+            nrm[:, u], nrm[:, v] = -d[:, v], d[:, u]
+            nrm /= np.linalg.norm(nrm, axis=1)[:, None]
+            eps = 1e-5
+            def label(pts):
+                import pyvista as pv
+                sm = pv.PolyData(pts).sample(st.grid, tolerance=1e-9)
+                lab = np.asarray(sm.point_data["region_id"], dtype=int)
+                return np.where(np.asarray(sm.point_data["vtkValidPointMask"], dtype=bool), lab, -1)
+            a, b = label(mid + eps * nrm), label(mid - eps * nrm)
+            self.assertTrue((a != b).all(), f"{int((a == b).sum())} of {len(a)} outline segments inside one region")
+
+    def test_vector_samples(self):
+        st = self.st
+        self.assertEqual(set(st.vector_fields()),
+                         {"ElectricField", "eCurrentDensity", "hCurrentDensity", "TotalCurrentDensity"})
+        zmid = 0.5 * (st.grid.bounds[4] + st.grid.bounds[5])
+        pts, vec = st.vector_samples("ElectricField", "z", zmid, 0.02)
+        self.assertGreater(len(pts), 10)
+        np.testing.assert_allclose(pts[:, 2], zmid)
+        self.assertTrue(np.isfinite(vec).all())
+
     def test_mapping(self):
         from tcadview.model import Section
         for ax, (u, v) in (("x", (2, 1)), ("y", (0, 2)), ("z", (0, 1))):

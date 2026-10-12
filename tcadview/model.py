@@ -261,6 +261,110 @@ class State:
             out[n] = a
         return out
 
+    def outline(self, axis, pos, regions=None, res=None):
+        """Material boundaries on the plane `axis` = pos (3D; a 2D state
+        uses axis "z", pos 0) as line segments, a pv.PolyData in 3D
+        coordinates; only boundaries with a region of `regions` (all if
+        None) on one side, the outside included.
+
+        Traced from the region id sampled at pixel centres on a fine grid
+        anchored at the device bounds, with boundaries on the pixel edges:
+        exact for a voxel-built device when `res` divides the voxel size
+        (default: the smaller of 0.25 nm and 1/2000 of the extent). Not
+        VTK feature edges, which on an octree mesh also report every
+        hanging-node seam inside a region (thousands of spurious lines)."""
+        key = ("outline", axis, round(float(pos), 12), None if regions is None else tuple(sorted(regions)), res)
+        if key in self._cache:
+            return self._cache[key]
+        n = AXIS_NAMES.index(axis)
+        u, v = SECTION_AXES[axis]
+        b = self.grid.bounds
+        lo = np.array([b[0], b[2], b[4]])
+        hi = np.array([b[1], b[3], b[5]])
+        if res is None:
+            res = min(2.5e-4, max(hi[u] - lo[u], hi[v] - lo[v]) / 2000.0)
+        nu = max(1, int(round((hi[u] - lo[u]) / res)))
+        nv = max(1, int(round((hi[v] - lo[v]) / res)))
+        uc = lo[u] + (np.arange(nu) + 0.5) * (hi[u] - lo[u]) / nu
+        vc = lo[v] + (np.arange(nv) + 0.5) * (hi[v] - lo[v]) / nv
+        ue = lo[u] + np.arange(nu + 1) * (hi[u] - lo[u]) / nu
+        ve = lo[v] + np.arange(nv + 1) * (hi[v] - lo[v]) / nv
+        U, V = np.meshgrid(uc, vc, indexing="ij")
+        pts = np.zeros((U.size, 3))
+        pts[:, n] = pos
+        pts[:, u], pts[:, v] = U.ravel(), V.ravel()
+        s = pv.PolyData(pts).sample(self.grid, tolerance=1e-9)
+        lab = np.asarray(s.point_data["region_id"], dtype=int)
+        mask = np.asarray(s.point_data.get("vtkValidPointMask", np.ones(len(lab))), dtype=bool)
+        lab = np.where(mask, lab, -1).reshape(nu, nv)
+        lab = np.pad(lab, 1, constant_values=-1)                     # the outside as a label
+        keep = np.ones(len(self.region_names) + 1, bool) if regions is None else np.isin(
+            np.arange(-1, len(self.region_names)), list(regions))
+        ue = np.concatenate([[ue[0]], ue, [ue[-1]]])
+        ve = np.concatenate([[ve[0]], ve, [ve[-1]]])
+        segs = []
+        for ax in (0, 1):
+            a, c = (lab[:-1, :], lab[1:, :]) if ax == 0 else (lab[:, :-1], lab[:, 1:])
+            diff = (a != c) & (keep[a + 1] | keep[c + 1])
+            if ax == 1:
+                diff = diff.T                                        # rows: the constant coordinate
+            # runs of consecutive boundary pixels -> one segment each
+            for k in np.flatnonzero(diff.any(axis=1)):
+                d = np.diff(np.concatenate([[0], diff[k].astype(np.int8), [0]]))
+                starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+                for s0, s1 in zip(starts, ends):
+                    if ax == 0:                                      # edge at u = ue[k+1], v from ve[s0+?]
+                        segs.append(((ue[k + 1], ve[s0]), (ue[k + 1], ve[s1])))
+                    else:
+                        segs.append(((ue[s0], ve[k + 1]), (ue[s1], ve[k + 1])))
+        if not segs:
+            out = pv.PolyData()
+        else:
+            sg = np.array(segs)                                      # (M, 2, 2) in (u, v)
+            p3 = np.zeros((len(sg) * 2, 3))
+            p3[:, n] = pos
+            p3[:, u], p3[:, v] = sg[:, :, 0].ravel(), sg[:, :, 1].ravel()
+            lines = np.column_stack([np.full(len(sg), 2), np.arange(0, 2 * len(sg), 2),
+                                     np.arange(1, 2 * len(sg), 2)]).ravel()
+            out = pv.PolyData(p3, lines=lines)
+        self._cache[key] = out
+        return out
+
+    def vector_fields(self):
+        """Names of the 3-component point fields (E, current densities)."""
+        pd = self.grid.point_data
+        return [n for n in pd.keys() if n not in HIDDEN_FIELDS and np.ndim(pd[n]) == 2 and pd[n].shape[1] == 3]
+
+    def vector_samples(self, name, axis, pos, spacing, regions=None):
+        """A vector field on a regular grid of points (pitch `spacing`, um)
+        in the plane `axis` = pos, inside the regions `regions` (all if
+        None): (points (M, 3), vectors (M, 3)), finite non-zero ones only."""
+        key = ("vec", name, axis, round(float(pos), 12), float(spacing),
+               None if regions is None else tuple(sorted(regions)))
+        if key in self._cache:
+            return self._cache[key]
+        n = AXIS_NAMES.index(axis)
+        u, v = SECTION_AXES[axis]
+        b = self.grid.bounds
+        lo = np.array([b[0], b[2], b[4]])
+        hi = np.array([b[1], b[3], b[5]])
+        uc = np.arange(lo[u] + spacing / 2, hi[u], spacing)
+        vc = np.arange(lo[v] + spacing / 2, hi[v], spacing)
+        U, V = np.meshgrid(uc, vc, indexing="ij")
+        pts = np.zeros((U.size, 3))
+        pts[:, n] = pos
+        pts[:, u], pts[:, v] = U.ravel(), V.ravel()
+        s = pv.PolyData(pts).sample(self.grid, tolerance=1e-9)
+        vec = np.asarray(s.point_data[name], dtype=float).reshape(-1, 3)
+        ok = np.isfinite(vec).all(axis=1) & (np.linalg.norm(vec, axis=1) > 0)
+        if "vtkValidPointMask" in s.point_data.keys():
+            ok &= np.asarray(s.point_data["vtkValidPointMask"], dtype=bool)
+        if regions is not None:
+            ok &= np.isin(np.asarray(s.point_data["region_id"], dtype=int), list(regions))
+        out = (pts[ok], vec[ok])
+        self._cache[key] = out
+        return out
+
     def probe(self, xyz):
         """All fields interpolated at point xyz (um). Returns
         {"region": name or None, "fields": {name: value}}; None outside the

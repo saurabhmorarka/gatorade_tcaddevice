@@ -17,6 +17,7 @@ import pyvista as pv                                                 # noqa: E40
 from PySide6 import QtCore, QtGui, QtWidgets                         # noqa: E402
 from pyvistaqt import QtInteractor                                   # noqa: E402
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg      # noqa: E402
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT   # noqa: E402
 from matplotlib.figure import Figure                                 # noqa: E402
 
 from tcadview import model                                           # noqa: E402
@@ -24,6 +25,8 @@ from tcadview import model                                           # noqa: E40
 CMAPS = ("turbo", "viridis", "coolwarm", "plasma", "jet", "gray")
 SLIDER_STEPS = 1000
 NAN_COLOR = "lightgray"
+OUTLINE_COLOR = "#303030"
+VECTOR_SHORT = {"ElectricField": "E", "eCurrentDensity": "Jn", "hCurrentDensity": "Jp", "TotalCurrentDensity": "J"}
 
 
 def _fmt(v):
@@ -53,7 +56,19 @@ class CutPlot(FigureCanvasQTAgg):
         self.ax = self.fig.add_subplot(111)
         self.held = []                    # [(x, v, label)]
         self.current = None
+        self.xscale = "linear"            # "linear" | "log"
+        self.yscale = "field"             # "field" (follow the field's scale) | one of model.SCALES
+        self._last = None                 # (name, unit, scale, xlabel) of the last plot, for re-drawing
         self.clear()
+
+    def set_axes(self, xscale=None, yscale=None):
+        """Change the axis scales and re-draw the curves on the plot."""
+        if xscale is not None:
+            self.xscale = xscale
+        if yscale is not None:
+            self.yscale = yscale
+        if self.current is not None and self._last is not None:
+            self._draw(*self._last)
 
     def clear(self, msg="Cut line: set two points, Pick them with right-clicks, or use an H/V cut "
                         "through the last probe"):
@@ -70,6 +85,12 @@ class CutPlot(FigureCanvasQTAgg):
         elif not hold:
             self.held = []
         self.current = (x, v, label)
+        self._last = (name, unit, scale, xlabel)
+        self._draw(name, unit, scale, xlabel)
+
+    def _draw(self, name, unit, scale, xlabel):
+        if self.yscale != "field":
+            scale = self.yscale
         self.ax.clear()
         curves = self.held + [self.current]
         for cx, cv, cl in curves:
@@ -81,13 +102,17 @@ class CutPlot(FigureCanvasQTAgg):
             fin = fin[np.isfinite(fin) & (fin > 0)]
             # linear band 8 decades below the peak: readable decades for doping-sized values
             self.ax.set_yscale("symlog", linthresh=max(1.0, 1e-8 * float(fin.max())) if len(fin) else 1.0)
+        if self.xscale == "log":
+            self.ax.set_xscale("log")              # the cut's start (distance 0) is masked
         self.ax.set_xlabel(xlabel)
         self.ax.set_ylabel(f"{name}" + (f" ({unit})" if unit else ""))
         if len(curves) > 1:
             self.ax.legend(fontsize=7, loc="best")
         else:
-            self.ax.set_title(label, fontsize=9)
+            self.ax.set_title(self.current[2], fontsize=9)
         self.ax.grid(True, alpha=0.3)
+        if getattr(self, "toolbar", None) is not None:
+            self.toolbar.update()                  # new data: "home" is its full view
         self.draw_idle()
 
 
@@ -216,6 +241,11 @@ class MainWindow(QtWidgets.QMainWindow):
         rr.addWidget(self.rmax)
         self.edges = QtWidgets.QCheckBox("mesh edges")
         self.edges.toggled.connect(lambda _: self.render())
+        self.outlines = QtWidgets.QCheckBox("material outlines")
+        self.outlines.setChecked(True)
+        self.outlines.setToolTip("Boundaries between materials on the slices, the section and 2D results "
+                                 "(exact, traced from the region map)")
+        self.outlines.toggled.connect(lambda _: self.render())
         # process builds: the voxel cells the device is built from (exact,
         # sharp, shared faces identical) or the smooth level-set contours
         # (prettier, but every sharp edge is bevelled by up to a voxel and
@@ -229,6 +259,7 @@ class MainWindow(QtWidgets.QMainWindow):
         fl.addRow("Range", self.auto_range)
         fl.addRow("", rr)
         fl.addRow("", self.edges)
+        fl.addRow("", self.outlines)
         fl.addRow("", self.smooth)
         lay.addWidget(fbox)
 
@@ -253,6 +284,34 @@ class MainWindow(QtWidgets.QMainWindow):
         orow.addWidget(self.opacity)
         rl.addLayout(orow)
         lay.addWidget(rbox)
+
+        # vectors: E and current densities as arrows on the slices / section
+        self.vec_box = QtWidgets.QGroupBox("Vectors")
+        vl = QtWidgets.QFormLayout(self.vec_box)
+        self.vec_combo = QtWidgets.QComboBox()
+        self.vec_combo.setToolTip("Arrows on the active slices (3D, full vector) and in the section view "
+                                  "(in-plane part); 2D results: the whole device")
+        self.vec_combo.currentTextChanged.connect(lambda _: self.render())
+        self.vec_len = QtWidgets.QComboBox()
+        self.vec_len.addItems(["log", "linear"])
+        self.vec_len.setToolTip("Arrow length from |v|: log spans 6 decades below the largest arrow "
+                                "(current density varies over many decades); linear is proportional")
+        self.vec_len.currentTextChanged.connect(lambda _: self.render())
+        self.vec_color = QtWidgets.QComboBox()
+        self.vec_color.addItems(["black", "white", "by magnitude (log)"])
+        self.vec_color.currentTextChanged.connect(lambda _: self.render())
+        self.vec_pitch = QtWidgets.QDoubleSpinBox()
+        self.vec_pitch.setRange(0.1, 1000.0)
+        self.vec_pitch.setDecimals(1)
+        self.vec_pitch.setValue(2.0)
+        self.vec_pitch.setSuffix(" nm")
+        self.vec_pitch.setToolTip("Spacing of the arrow grid in the plane")
+        self.vec_pitch.editingFinished.connect(self.render)
+        vl.addRow("Field", self.vec_combo)
+        vl.addRow("Length", self.vec_len)
+        vl.addRow("Colour", self.vec_color)
+        vl.addRow("Spacing", self.vec_pitch)
+        lay.addWidget(self.vec_box)
 
         # slices (3D)
         self.slice_box = QtWidgets.QGroupBox("Slices")
@@ -325,17 +384,44 @@ class MainWindow(QtWidgets.QMainWindow):
         grid = QtWidgets.QGridLayout()
         for i, b in enumerate((self.hcut_btn, self.vcut_btn, self.pick_btn, plot_btn, clear_btn)):
             grid.addWidget(b, i // 2, i % 2)
+        self.cut_x = QtWidgets.QComboBox()
+        self.cut_x.addItems(["linear", "log"])
+        self.cut_x.currentTextChanged.connect(lambda t: self.cutplot.set_axes(xscale=t))
+        self.cut_y = QtWidgets.QComboBox()
+        self.cut_y.addItems(["field scale"] + list(model.SCALES))
+        self.cut_y.setToolTip("'field scale' follows the Scale chosen for the field in Controls")
+        self.cut_y.currentTextChanged.connect(
+            lambda t: self.cutplot.set_axes(yscale="field" if t == "field scale" else t))
+        axes_row = QtWidgets.QHBoxLayout()
+        axes_row.addWidget(QtWidgets.QLabel("X"))
+        axes_row.addWidget(self.cut_x)
+        axes_row.addWidget(QtWidgets.QLabel("Y"))
+        axes_row.addWidget(self.cut_y)
         cl.addRow("From", self.cut_p0)
         cl.addRow("To", self.cut_p1)
         cl.addRow(grid)
         cl.addRow(self.overlay)
+        cl.addRow("Axes", axes_row)
         left = QtWidgets.QWidget()
         left.setLayout(cl)
         left.setFixedWidth(300)
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        # zoom (box), pan, back/forward and home (reset) for the 1D plot
+        self.cut_toolbar = NavigationToolbar2QT(self.cutplot, right, coordinates=False)
+        self.cut_toolbar.setIconSize(QtCore.QSize(16, 16))
+        self.cut_toolbar.setFixedHeight(24)
+        for act in self.cut_toolbar.actions():          # keep home, back/forward, pan, zoom, save
+            if act.text() in ("Subplots", "Customize"):
+                self.cut_toolbar.removeAction(act)
+        rv.setSpacing(0)
+        rv.addWidget(self.cut_toolbar)
+        rv.addWidget(self.cutplot, 1)
         h = QtWidgets.QHBoxLayout(box)
         h.setContentsMargins(4, 4, 4, 4)
         h.addWidget(left)
-        h.addWidget(self.cutplot, 1)
+        h.addWidget(right, 1)
         return box
 
     def _build_bottom(self):
@@ -484,6 +570,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.idx = int(np.clip(i, 0, len(self.session) - 1))
         self._sync_regions()
         self._sync_fields()
+        self._sync_vectors()
         self._update_bias_label()
         self._rebuild_section()
         self.render()
@@ -585,6 +672,77 @@ class MainWindow(QtWidgets.QMainWindow):
         plotter.add_mesh(pv.PolyData(np.asarray(p, dtype=float)[None, :]), color="black", point_size=10,
                          render_points_as_spheres=True, name="probe", reset_camera=False)
 
+    def _vector_planes(self):
+        """(axis, pos) of the planes that carry arrows in the 3D view."""
+        st = self.state
+        if st.dim == 2:
+            return [("z", 0.0)]
+        return [(a, self._slice_origin(a)) for a in "xyz" if self.slice_on[a].isChecked()]
+
+    def _arrows(self, pts, vec, spacing, vmax):
+        """Arrow glyphs for vectors `vec` at `pts`: direction of v, length
+        from |v| (log over 6 decades below vmax, or proportional), at most
+        0.9 x the grid spacing. Returns (glyphs, log10|v| per glyph point)."""
+        mag = np.linalg.norm(vec, axis=1)
+        if self.vec_len.currentText() == "log":
+            frac = np.clip((np.log10(mag / vmax) + 6.0) / 6.0, 0.0, 1.0)
+        else:
+            frac = mag / vmax
+        keep = frac > 0.02
+        p = pv.PolyData(pts[keep])
+        p.point_data["dir"] = vec[keep] / mag[keep, None]
+        p.point_data["len"] = 0.9 * spacing * frac[keep]
+        p.point_data["log10|v|"] = np.log10(mag[keep])
+        if not p.n_points:
+            return None
+        return p.glyph(orient="dir", scale="len", factor=1.0,
+                       geom=pv.Arrow(tip_length=0.35, tip_radius=0.12, shaft_radius=0.04))
+
+    def _add_arrows(self, plotter, planes, to_plane=None):
+        """Draw the selected vector field on `planes`; to_plane maps 3D
+        points/vectors into a section's flat (u, v, 0) frame."""
+        name = self.vec_combo.currentText()
+        if not name or name == "none":
+            return
+        st = self.state
+        spacing = self.vec_pitch.value() * 1e-3                    # nm -> um
+        samples = [st.vector_samples(name, a, pos, spacing, regions=self.visible_regions()) for a, pos in planes]
+        samples = [(p, v) for p, v in samples if len(p)]
+        if not samples:
+            return
+        if to_plane is not None:
+            samples = [to_plane(p, v) for p, v in samples]
+        vmax = max(float(np.linalg.norm(v, axis=1).max()) for _, v in samples)
+        unit = st.units.get(name, "")
+        for p, v in samples:
+            g = self._arrows(p, v, spacing, vmax)
+            if g is None:
+                continue
+            c = self.vec_color.currentText()
+            if c.startswith("by magnitude"):
+                short = VECTOR_SHORT.get(name, name)
+                plotter.add_mesh(g, scalars="log10|v|", cmap="magma", reset_camera=False,
+                                 scalar_bar_args=dict(title=f"log10 |{short}|\n{unit}", vertical=True,
+                                                      position_x=0.86, position_y=0.25, width=0.05,
+                                                      height=0.5, color="black", fmt="%.1f",
+                                                      title_font_size=14, label_font_size=12))
+            else:
+                plotter.add_mesh(g, color=c, reset_camera=False)
+
+    def _sync_vectors(self):
+        st = self.state
+        names = st.vector_fields() if st is not None else []
+        cur = self.vec_combo.currentText()
+        self.vec_combo.blockSignals(True)
+        self.vec_combo.clear()
+        self.vec_combo.addItems(["none"] + names)
+        if cur in names:
+            self.vec_combo.setCurrentText(cur)
+        self.vec_combo.blockSignals(False)
+        self.vec_box.setEnabled(bool(names))
+        self.vec_box.setToolTip("" if names else "This result has no vector fields (re-export it with the "
+                                                 "current fab simulate / sweep drivers)")
+
     def render(self):
         if self.session is None:
             return
@@ -606,9 +764,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 if surf is not None:                       # faint context around the slices
                     self.plotter.add_mesh(surf, color=model.material_color(st.region_material(k)), opacity=0.08,
                                           reset_camera=False)
-            elif sliced:
-                self.plotter.add_mesh(st.region(k).extract_feature_edges(), color="gray", opacity=0.4,
-                                      reset_camera=False)
+        if self.outlines.isChecked() and not st.is_process:
+            planes = ([(a, self._slice_origin(a)) for a in "xyz" if self.slice_on[a].isChecked()]
+                      if st.dim == 3 else [("z", 0.0)])
+            for a, pos in planes:
+                o = st.outline(a, pos, regions=self.visible_regions())
+                if o.n_cells:
+                    self.plotter.add_mesh(o, color=OUTLINE_COLOR, line_width=1.5, reset_camera=False)
+        if not st.is_process:
+            self._add_arrows(self.plotter, self._vector_planes())
         if self.section is not None:
             self.plotter.add_mesh(pv.lines_from_points(self.section.outline3d()), color="black",
                                   line_width=2, reset_camera=False)
@@ -643,9 +807,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if g is not None:
                 self._add_field(pl, g, k, lo, hi, title, bar)
                 bar = bar or self.field != model.MATERIAL_FIELD
-                pl.add_mesh(g.extract_feature_edges(boundary_edges=True, feature_edges=False,
-                                                    manifold_edges=False, non_manifold_edges=False),
-                            color="gray", line_width=1, reset_camera=False)
+        if self.outlines.isChecked():
+            o = self.state.outline(sec.axis, sec.pos, regions=self.visible_regions())
+            if o.n_cells:
+                o = o.copy()
+                o.points = np.column_stack([sec.to2d(o.points), np.zeros(o.n_points)])
+                pl.add_mesh(o, color=OUTLINE_COLOR, line_width=1.5, reset_camera=False)
+        if not self.state.is_process:
+            def to_plane(p, v):
+                return (np.column_stack([sec.to2d(p), np.zeros(len(p))]),
+                        np.column_stack([sec.to2d(v), np.zeros(len(v))]))     # in-plane part
+            self._add_arrows(pl, [(sec.axis, sec.pos)], to_plane=to_plane)
         flat = lambda p: np.append(sec.to2d(p), 0.0)                 # noqa: E731
         if self.cut is not None and sec.contains(self.cut[0]) and sec.contains(self.cut[1]):
             pl.add_mesh(pv.Line(flat(self.cut[0]), flat(self.cut[1])), color="magenta", line_width=3,

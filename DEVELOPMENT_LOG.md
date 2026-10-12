@@ -5114,3 +5114,49 @@ quick as the 1D/2D ones):
   metal nodes;
 - wall time 42 s in the venv (SuperLU), 52 s with PETSc LU, 26 s with
   PETSc ILU; it passes in all three.
+
+## 53. Viewer: exact material outlines, zoomable cut plot, E and current vectors
+
+The user asked for three things.
+
+**1. Material outlines.** Sliced 3D results and the section view drew region
+boundaries with VTK feature/boundary edges.
+- On the octree mesh, every hanging-node seam (a large cell next to two
+  small ones) is also a "boundary" to VTK: 12,666 segments for silicon in
+  3D, and 800 on one slice where the true outline is a few lines.
+- Now `State.outline(axis, pos, regions)` traces the boundaries from the
+  region id sampled on a 0.25 nm pixel grid anchored at the device bounds,
+  with the boundaries on pixel edges. This is exact for the voxel-built
+  devices (the pixel divides the voxel), and runs of pixels merge into
+  single segments: 35 segments on the mid-width slice, about 1 s, cached.
+- A "material outlines" checkbox (default on) covers the 3D slices, the
+  section view and 2D results.
+- *Test:* each segment has different regions on its two sides.
+
+**2. Cut-line plot.**
+- A compact matplotlib navigation toolbar: home, back/forward, pan, box
+  zoom, save; 16 px icons, no coordinate row (the first version was too
+  big, per the user).
+- X axis linear/log; Y axis "field scale" (the field's Scale) / linear /
+  log / signed log. Changing either redraws the curves on the plot.
+
+**3. Vectors.**
+- *Export* (`solver2d/vtk_export.nodal_vectors`, every writer): the point
+  data gain ElectricField, eCurrentDensity, hCurrentDensity and
+  TotalCurrentDensity (3-vectors, V/cm and A/cm^2). Each is a per-node
+  weighted least-squares fit over the node's edges: dpsi/L for E, and the
+  solver's own edge currents / semiconductor facet area for J. For a box
+  cell this is exactly the axis components.
+- The 3D writers flip the z component in the mirrored half.
+- *Verified* on the tiny device (converged states, Vd 0.05 / 0.3 / 0.6 V):
+  the sampled J vectors integrated over 6 planes across the channel match
+  the exact plane current (sum of crossing edge currents) within 0.7%.
+  `test_3d_examples` now checks this (limit 2%; a 5% error is caught).
+- *Viewer:* a "Vectors" group with
+  - field: none / E / Jn / Jp / J;
+  - length: log over 6 decades (default) or linear;
+  - colour: black / white / by log magnitude;
+  - arrow spacing in nm.
+  Arrows sit on the active slices (full 3D vectors), in the section view
+  (in-plane part), and over the whole device for 2D results.
+- `test_vtk`'s ParaView array count goes 12 -> 16.
