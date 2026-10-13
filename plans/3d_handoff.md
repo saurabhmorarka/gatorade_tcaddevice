@@ -1,12 +1,41 @@
 # 3D program: handoff
 
-## COLD START: read this first (newest block: "LATEST 2026-10-12 (night)")
+## COLD START: read this first (newest block: "LATEST 2026-10-13")
 
 Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-12 (night): Schottky S/D contacts DONE in 1D/2D/3D - START HERE
+### LATEST 2026-10-13: Schottky merged; branch `schottky-speed` (2 commits, NOT pushed, NOT merged) - START HERE
+- `main` has Schottky contacts merged + pushed (6372dd5, incl. Study A
+  with NiSi, DEVELOPMENT_LOG 64). Remote branch `schottky-contacts` still
+  exists: the user approved deleting it but the tool permission blocked
+  `git push origin --delete schottky-contacts` - user to run it.
+  (Merge commit carries a Co-Authored-By line by mistake; user said leave it.)
+- `schottky-speed` (from main), DEVELOPMENT_LOG 65-66:
+  - 022f5df Schottky runtime: cause found - the contact's S/D island is a
+    near-null direction (majority QF level tied to the metal only through
+    the contact conductance) that ILU cannot see. Fix:
+    `LinearSolver.set_coarse` two-level preconditioner, coarse space
+    `SubgridContacts.coarse_space()`; ETA_MAX_SCHOTTKY 1e-9 -> 1e-7 (relaxes
+    after a full step). Planar 3D ramp+walk: ohmic 32.6 s, Schottky 54.0 ->
+    39.8 s, same currents. All tests pass (venv 132, conda Schottky/octree/3D).
+    Not yet measured: full `fab simulate` time (was 87 s Schottky / 62 ohmic)
+    -> measure, update README 3D table + this file.
+  - 9eef409 Testsuite (user: "too long, trim it; no full I-V; parallelize"):
+    `python3 testsuite/run.py` parallel runner, 216 s -> 80 s wall (venv,
+    all pass). Quick 2D sweeps (TCAD_FULL_TESTS=1 = full). NEXT:
+    (a) `run.py --record` to write timings.json (better splitting);
+    (b) BTBT test is the floor (~40 s even quick): each curve has a
+        10-28 s fixed cost independent of point count (4 models x 2
+        curves) - find it (model setup? profile one curve) or test fewer
+        models in quick tier; (c) planar_tiny 3D 20 s in venv (5 s conda);
+    (d) then README testsuite section + run conda tier too.
+- Then: ask user to push/merge `schottky-speed`. Roadmap next: item 2
+  Schrodinger-Poisson (plan first). Open: PMOS SiGe S/D template; verify
+  Cowley-Sze numbers vs Sze.
+
+### 2026-10-12 (night): Schottky S/D contacts DONE in 1D/2D/3D
 - Branch `schottky-contacts`, pushed (ee35cb6), NOT merged: ask the user
   before merging to main. Plan `plans/schottky_plan.md`; DEVELOPMENT_LOG 60-63;
   README section "Schottky S/D contacts" (model, figures, Study A table, sources).
