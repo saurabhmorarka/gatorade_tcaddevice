@@ -9,14 +9,9 @@ tell the full story with numbers.
 ### LATEST 2026-10-13: `schottky-speed` MERGED into main and pushed (ab72e6b) - START HERE
 - Before the merge: conda quick tier 132/132 pass (76 s), conda
   TCAD_FULL_TESTS=1 132/132 pass (80 s), venv 132 pass (71 s).
-- Branch cleanup still to do BY THE USER (tool permission blocks it):
-  `git push origin --delete schottky-contacts` and
-  `git branch -d schottky-speed schottky-contacts`.
+- Old branches `schottky-contacts` / `schottky-speed` deleted (local + remote).
 - New work: a new feature branch from `main`.
 - `main` has Schottky contacts merged + pushed (6372dd5, DEVELOPMENT_LOG 64).
-  Remote branch `schottky-contacts` still exists: the user approved
-  deleting it but the tool permission blocked
-  `git push origin --delete schottky-contacts` - user to run it.
 - `schottky-speed` (from main), DEVELOPMENT_LOG 65-66, DONE:
   - Schottky runtime (log 65): two-level ILU preconditioner, the contact
     S/D islands as coarse space (`LinearSolver.set_coarse`,
