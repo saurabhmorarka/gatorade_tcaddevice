@@ -238,6 +238,12 @@ class TestSchottkySubgrid(unittest.TestCase):
         mat = Material(masetti_n=(0.0, 0.0, 0.0, 0.0, 1e40, 1e40, 1.0, 1.0, 1350.0),
                        masetti_p=(0.0, 0.0, 0.0, 0.0, 1e40, 1e40, 1.0, 1.0, 480.0))
         Vs = [0.05, 0.1]
+        # tables built from scratch (an empty cache), once per contact, not per mesh
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(setattr, sg, "CACHE_DIR", sg.CACHE_DIR)
+        sg.CACHE_DIR = tmp.name
         for N, c in ((7e20, sk.SchottkyContact(barrier_n_eV=0.55)), (-5e20, sk.SchottkyContact(barrier_p_eV=0.2))):
             x1 = ns.contact_grid(30e-7)
             Vs_dir = [v * np.sign(N) for v in Vs]
@@ -249,7 +255,7 @@ class TestSchottkySubgrid(unittest.TestCase):
                 area = sg.voxel_interface_areas(lab, ["semi", "conductor"], [None, "source"], [xs, ys], mesh,
                                                 ["source"])
                 self.assertAlmostEqual(area.sum() / (xs[-1] - xs[0]), 1.0, places=9)
-                sub = sg.SubgridContacts.setup(mesh, mat, {"source": c}, area, cache=False)
+                sub = sg.SubgridContacts.setup(mesh, mat, {"source": c}, area)
                 r, row = None, []
                 for V, Jr in zip(Vs_dir, ref):
                     kw = {} if r is None else dict(psi_init=r["psi"], phin_init=r["phin"], phip_init=r["phip"])

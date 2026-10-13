@@ -1,12 +1,36 @@
 # 3D program: handoff
 
-## COLD START: read this first (newest block: "LATEST 2026-10-12 (night)")
+## COLD START: read this first (newest block: "LATEST 2026-10-13")
 
 Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-12 (night): Schottky S/D contacts DONE in 1D/2D/3D - START HERE
+### LATEST 2026-10-13: Schottky merged; branch `schottky-speed` (3 commits, NOT pushed, NOT merged) - START HERE
+- `main` has Schottky contacts merged + pushed (6372dd5, DEVELOPMENT_LOG 64).
+  Remote branch `schottky-contacts` still exists: the user approved
+  deleting it but the tool permission blocked
+  `git push origin --delete schottky-contacts` - user to run it.
+- `schottky-speed` (from main), DEVELOPMENT_LOG 65-66, DONE:
+  - Schottky runtime (log 65): two-level ILU preconditioner, the contact
+    S/D islands as coarse space (`LinearSolver.set_coarse`,
+    `SubgridContacts.coarse_space()`); ETA_MAX_SCHOTTKY 1e-7. Full
+    `fab simulate` (octree): **87 -> 72 s** (ohmic 62 s), metrics
+    unchanged (Ion 1729, Vt 0.204 -> 0.051, SS 82, DIBL 161). Remaining
+    gap is the serial drain ramp: 36 s Schottky vs 17 s ohmic (a lever
+    if speed matters again).
+  - Testsuite (log 66): `python3 testsuite/run.py` parallel runner, venv
+    216 -> 71 s wall, 132 tests pass; timings.json recorded; classes with
+    a setUpClass stay one process. BTBT quick tier = leakage side only
+    (0 to -2 V). The BTBT "fixed cost" is the 0.1 V walk (5-6 its/step;
+    bigger steps measured slower). README has the testsuite commands.
+  - Not run this session: the conda tier (`~/miniconda3/envs/tcad/bin/python
+    testsuite/run.py`) and TCAD_FULL_TESTS=1 - run both before merging.
+- NEXT: ask the user to push/merge `schottky-speed`. Roadmap item 2:
+  Schrodinger-Poisson / quantum correction (plan first). Open: PMOS SiGe
+  S/D template; verify Cowley-Sze numbers vs Sze.
+
+### 2026-10-12 (night): Schottky S/D contacts DONE in 1D/2D/3D
 - Branch `schottky-contacts`, pushed (ee35cb6), NOT merged: ask the user
   before merging to main. Plan `plans/schottky_plan.md`; DEVELOPMENT_LOG 60-63;
   README section "Schottky S/D contacts" (model, figures, Study A table, sources).
