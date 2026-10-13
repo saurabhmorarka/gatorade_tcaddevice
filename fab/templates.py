@@ -27,6 +27,14 @@ PLANAR_DEFAULTS = {
     # Ti(Si)/TiN on Si:P implies in this model (README, Study A). A p+
     # contact gets Eg - Phi_Bn of its own semiconductor (pinned to Ec).
     "contact_barrier_n_eV": 0.45,
+    # Low-resistance contact engineering (real flows; plans/schottky_plan.md 9):
+    # the contact trench is etched this far into the S/D silicon so the metal
+    # also contacts the recess sidewalls (nm; 0 = a top contact only) ...
+    "contact_recess": 5,
+    # ... and a shallow high-dose contact implant through the opening keeps
+    # the silicon degenerate where the metal touches (the S/D implant alone
+    # leaves ~4e19 at the surface: rho_c ~7e-7 Ohm cm^2). peak 0 = off.
+    "ct_peak": 7e20, "ct_rp": 2, "ct_sigma": 3, "ct_lateral": 2,
     "Lg": 30,               # gate length
     "tox": 1.5,             # gate oxide
     "gate_height": 40,
@@ -123,6 +131,19 @@ def planar(params):
         # contact trenches through the ILD only (down to the silicon; spacer, STI untouched)
         {"step": "etch", "label": "source contact etch", "mode": "anisotropic", "regions": ["ild"], "mask": "source_ct"},
         {"step": "etch", "label": "drain contact etch", "mode": "anisotropic", "regions": ["ild"], "mask": "drain_ct"},
+    ]
+    for side in ("source", "drain"):
+        if p["contact_recess"]:
+            process.append({"step": "etch", "label": f"{side} contact recess (into the S/D)", "mode": "anisotropic",
+                            "materials": ["Si"], "mask": f"{side}_ct", "depth": "contact_recess"})
+        if p["ct_peak"]:
+            # blocked by the ILD only: just outside the opening the profile
+            # is measured from the silicon top, so the lateral straggle dopes
+            # the upper recess sidewalls too
+            process.append({"step": "implant", "label": f"{side} contact implant", "species": sd_sp,
+                            "peak": "ct_peak", "rp": "ct_rp", "sigma": "ct_sigma", "lateral_sigma": "ct_lateral",
+                            "blocked_by": [ild], "mask": f"{side}_ct"})
+    process += [
         {"step": "deposit", "label": "source contact fill", "mode": "fill", "material": cmat, "name": "source_contact",
          "to_height": "ild_top", "mask": "source_ct"},
         {"step": "deposit", "label": "drain contact fill", "mode": "fill", "material": cmat, "name": "drain_contact",

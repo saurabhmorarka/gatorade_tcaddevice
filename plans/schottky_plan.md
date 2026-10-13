@@ -15,7 +15,8 @@ material DB (Schottky-Mott); `barrier_eV` on the contact overrides it
   (1D now; add 2D and 3D cases when the model is ported).
 
 **STATUS 2026-10-12: 1D done (LOG 60-61); 2D/3D sub-grid port done, Schottky
-the fab default (LOG 62). Next: section 9 (contact implant, recessed contact).**
+the fab default (LOG 62); recessed + contact-implanted contacts in the planar
+template (LOG 63). Open: the ~40% per-iteration linear-solve overhead.**
 
 ## 1. Why, and what goes wrong today
 

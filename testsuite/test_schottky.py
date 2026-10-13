@@ -250,8 +250,9 @@ class TestSchottkySubgrid(unittest.TestCase):
 
 class TestSchottky3D(unittest.TestCase):
     # Golden drain currents (A, full device) with Schottky contacts - captured
-    # 2026-10-12 after checking them against the ohmic device (DEVELOPMENT_LOG 62).
-    GOLDEN = {"lin": 7.021e-08, "sat": 5.602e-06}
+    # 2026-10-12 with the recessed, implanted contacts, after checking them
+    # against the ohmic device (lin 0.43x, sat 0.75x: DEVELOPMENT_LOG 63).
+    GOLDEN = {"lin": 6.055e-06, "sat": 2.656e-05}
     RTOL = 5e-3             # linear-solver backend drift (venv SuperLU vs conda PETSc)
 
     @classmethod
@@ -324,11 +325,12 @@ class TestSchottky3D(unittest.TestCase):
             self.assertAlmostEqual(Is / self.GOLDEN[pt], 1.0, delta=self.RTOL)
 
     def test_linear_regime_resistance(self):
-        """Vds = 0.05 V: the tiny device's contacts (~60 nm^2 each, on
-        ~4e19 Si) are ~6e5 Ohm each at zero bias, far above the channel.
-        The total resistance must lie between the ohmic device's plus the
-        contacts' zero-bias resistance (an upper bound: J(u) is superlinear
-        past ~Vt) and the ohmic one plus a third of it."""
+        """Vds = 0.05 V: each contact of the tiny device (~140 nm^2 per half,
+        recessed, ~3e20 after the contact implant) is ~5e3 Ohm at zero bias,
+        comparable to the channel. The total resistance must lie between the
+        ohmic device's plus the contacts' zero-bias resistance (an upper
+        bound: J(u) is superlinear past ~Vt) and the ohmic one plus a third
+        of it."""
         from fab.simulate import drain_current
         d, sk_ = self.d, self.d["schottky"]
         R_c = 0.0

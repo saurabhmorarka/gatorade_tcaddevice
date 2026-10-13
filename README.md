@@ -237,20 +237,24 @@ currents on the tiny planar device.
 
 **Planar NMOS (3D, octree, full Id-Vg; `python -m fab simulate`):**
 
-| S/D doping where the metal touches | contacts | Ion (uA/um) | Newton its (Vds = 1 V) | I-V time |
-|---|---|---|---|---|
-| ~4e19 (template S/D implant, peak 1e20 at 12 nm) | ohmic    | 1792 | 69  | 57 s  |
-| ~4e19                                            | Schottky | 683  | 131 | 156 s |
-| ~6e20 (`sd_peak: 7e20, sd_rp: 4`)                | ohmic    | 1952 | 75  | 50 s  |
-| ~6e20                                            | Schottky | 1865 | 77  | 69 s  |
+| S/D contact | contacts | Ion (uA/um) | Vt lin -> sat | Newton its (Vds = 1 V) | I-V time |
+|---|---|---|---|---|---|
+| top contact on the S/D implant (~4e19 at the surface) | ohmic    | 1792 | 0.204 -> 0.052 | 69  | 57 s  |
+| same                                                   | Schottky | 683  | 0.227 -> 0.066 | 131 | 156 s |
+| **template default: 5 nm recess + contact implant (~5e20 at the metal, +34% area)** | ohmic | 1820 | 0.204 -> 0.051 | 68 | 62 s |
+| **same (default)**                                      | **Schottky** | **1729 (-5.0%)** | 0.204 -> 0.051 | 68 | 87 s |
 
-On degenerate S/D (the real Si:P 7e20 stack) the contact costs ~4.5% of
-Ion and the solve ~40% more time per iteration (same Newton iterations;
-the ILU-preconditioned linear solves take ~40% more Krylov iterations -
-not yet understood). The template's own S/D implant leaves only ~4e19 at
-the contact surface, where rho_c ~7e-7 Ohm cm^2 makes the contacts the
-dominant resistance: the ohmic contact hid this. Next: a high-dose contact
-implant and a contact recessed into the S/D (plan section 9).
+Real contacts are engineered for a low rho_c, and the template now does it
+too: the contact trench is etched `contact_recess` (5 nm) into the S/D, so
+the TiN also contacts the recess sidewalls, and a shallow high-dose
+contact implant (`ct_peak` 7e20, Rp 2 nm) keeps the silicon degenerate
+where the metal touches. Effective rho_c 7.2e-7 -> 5.8e-9 Ohm cm^2. Without
+them the plain S/D implant leaves ~4e19 at the surface and the contacts
+dominate the device; the ohmic contact hid this.
+
+Cost: same Newton iterations as ohmic; the ILU-preconditioned linear
+solves take ~40% longer with the Schottky source terms (more Krylov
+iterations and slower factorizations - cause not found yet).
 
 ### Study A: one Ti/TiN metal on NMOS and PMOS
 
