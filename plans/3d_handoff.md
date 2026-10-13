@@ -1,12 +1,32 @@
 # 3D program: handoff
 
-## COLD START: read this first (newest block: "LATEST 2026-10-12")
+## COLD START: read this first (newest block: "LATEST 2026-10-12 (night)")
 
 Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-12: Phase A (speed) DONE and merged - START HERE
+### LATEST 2026-10-12 (night): Schottky S/D contacts DONE in 1D/2D/3D - START HERE
+- Branch `schottky-contacts`, pushed (ee35cb6), NOT merged: ask the user
+  before merging to main. Plan `plans/schottky_plan.md`; DEVELOPMENT_LOG 60-63;
+  README section "Schottky S/D contacts" (model, figures, Study A table, sources).
+- 1D: resolved model (TE + nonlocal Tsu-Esaki tunneling), validated.
+  2D/3D: sub-grid boundary condition (`contacts/subgrid.py`, J(N, u) table
+  from the 1D model; `newton_solve_2d(schottky=...)`), validated on slabs
+  at 0.5-2 nm within 1%. fab planar template: Schottky S/D by default
+  (TiN, Phi_Bn 0.45 eV), 5 nm contact recess, 7e20 contact implant.
+- Reference (octree, full I-V): Schottky Ion 1729 uA/um (ohmic 1820),
+  Vt 0.204 -> 0.051 V, SS 82, DIBL 161, 87 s (ohmic 62 s). Same Newton
+  iterations; ~40% slower ILU linear solves with the Schottky terms -
+  cause NOT found (not the Krylov cap, not the minority rows). Next
+  candidate if speed matters: profile the PETSc ILU on the dumped systems
+  (`fab/profile_iv.py --dump`).
+- test_octree octree/rectilinear tolerance 2.5% -> 3% (recess; known gap,
+  back to 1% with the octree defaults study on a FinFET).
+- Open questions for the user: merge to main?; Study A: no single pinned
+  model fits NMOS and PMOS data (README); the PMOS (SiGe) S/D template.
+
+### 2026-10-12: Phase A (speed) DONE and merged
 - *State:* everything is merged into `main` and pushed (parts 1-5 of the
   speed pass, DEVELOPMENT_LOG 55-59). `3d-speed` equals `main` and can
   be deleted. New work: a new feature branch from `main`.

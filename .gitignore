@@ -9,3 +9,6 @@ out/**/*_viewer.html
 
 # virtual-fab builds (python3 -m fab build): binary VTK snapshots, regenerable
 out/fab_*/
+
+# Schottky contact tables (contacts/subgrid.py): regenerable disk cache
+out/.cache/

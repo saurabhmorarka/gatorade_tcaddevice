@@ -279,6 +279,12 @@ class Structure:
         rest = [r for r in self.regions if r not in blockers]
         top = levelset.column_top(self.phi_union(rest), g.axes[1])
         depth = g.y - self._column(np.where(np.isfinite(top), top, 1e9))
+        # A node ON the surface takes the surface value: the top from the
+        # level set can sit a round-off above it, and a recessed contact's
+        # floor nodes - the metal/silicon interface the contact model reads -
+        # then missed a contact implant entirely (1e20 instead of 6e20).
+        on_top = (depth < 0) & (depth >= -0.25 * g.h[1])
+        depth = np.where(on_top, 0.0, depth)
         prof = np.where(depth >= 0, peak * np.exp(-0.5 * ((depth - rp) / sigma) ** 2), 0.0)
         s = self.mask2d(mask) if mask is not None else np.full(top.shape, -levelset.BIG)
         if blockers:

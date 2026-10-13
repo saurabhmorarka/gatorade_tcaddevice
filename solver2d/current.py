@@ -23,6 +23,13 @@ def contact_current(mesh, mat, result, contact_name):
     possibly-inconsistent post-processing formula."""
     import numpy as np
 
+    sk = result.get("schottky")
+    if sk is not None and contact_name in sk.specs:
+        # Sub-grid Schottky contact: the current crosses the barrier at the
+        # released semiconductor nodes (contacts/subgrid.py); the metal's
+        # remaining (insulator-side) nodes carry none.
+        return sk.terminal_current(result, contact_name, result["bias"])
+
     boundary_bc_type = np.array(mesh.boundary_bc_type)
     is_contact_boundary = boundary_bc_type == f"contact:{contact_name}"
     contact_point_idx = mesh.boundary_point_index[is_contact_boundary]
