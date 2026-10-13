@@ -14,6 +14,9 @@ with 3D under way:
 - **3D (in progress):** a virtual fab that builds devices from a process
   flow (level sets on a voxel grid), starting with a planar MOSFET with STI,
   and the `tcadview` desktop viewer. The 3D solve is next.
+- **Contacts:** Schottky S/D contacts (thermionic emission + nonlocal
+  tunneling through the barrier), validated in 1D; see
+  [Schottky S/D contacts](#schottky-sd-contacts-contacts).
 
 <p align="center">
   <img src="out/diode/03_iv_curve.png" alt="Diode I-V curve" width="49%">
@@ -153,6 +156,137 @@ the implant peaks and ranges, the voxel size, ...).
   thin film between two different materials is never touched.
 - A round trip through the layer-2 YAML.
 - The snapshots in the viewer.
+
+## Schottky S/D contacts (`contacts/`)
+
+In every modern transistor the source/drain contact is a metal (Ti/TiN,
+often with a thin TiSix at the interface) on degenerately doped epitaxy.
+That interface is a Schottky barrier, and at S/D doping almost all of the
+current tunnels through it. `contacts/` models it, so far in 1D: the 2D and
+3D port is next, and Schottky contacts will then be the default at every
+transistor S/D contact. Plan: `plans/schottky_plan.md`; numbers and
+validation: DEVELOPMENT_LOG 60.
+
+**The model** (the split Sentaurus and Atlas use):
+
+1. *Thermionic emission over the barrier* (boundary condition,
+   Crowell-Sze). The band at the interface sits Phi_B above the metal Fermi
+   level at any bias. The flux of each carrier into the metal is
+   v (n_s - n_B), with v = A** T^2 / (q N_band) (Si A** = 112 / 32 A cm^-2
+   K^-2 for electrons / holes) and n_B = N_c exp(-Phi_B / kT).
+2. *Tunneling through the barrier* (field and thermionic-field emission):
+   for every energy below the barrier top, the WKB transmission through the
+   *solved* band profile, normal to the interface, times the Tsu-Esaki
+   supply function (the difference of the metal's and the semiconductor's
+   Fermi occupations). The carriers enter or leave at the classical turning
+   point. Nothing is a fit to a regime (TE, TFE, FE): the doping and bias
+   dependence come out of the band profile.
+3. *Barrier height*: given directly (`barrier_n_eV` / `barrier_p_eV`), or
+   from the metal work function, either Schottky-Mott (Phi_m - chi) or
+   pinned (Cowley-Sze form: S (Phi_m - chi) + (1 - S)(neutral level - chi)).
+4. *Image-force lowering*: optional, off by default (at S/D doping the
+   interface field is ~1e7 V/cm and the formula leaves its range).
+
+The figure shows the two reference contacts at a small bias, in the linear
+regime that sets the contact resistivity: the band diagram with every
+tunneling path drawn from the metal to its turning point (the barrier
+thickness at that energy; darker = more current), the current per energy
+split into tunneling and over-the-barrier emission, and how both change
+with the S/D doping. At S/D doping more than 99.9% of the current tunnels,
+through a barrier only 0.5-0.9 nm thick near the Fermi level. Below ~1e19
+the current climbs toward the barrier top (thermionic-field emission),
+which is why the NMOS tunneling distance peaks near 1e19 and then drops.
+(`python3 -m contacts.plot_schottky_current`)
+
+<p align="center">
+  <img src="out/schottky/schottky_barrier_current.png" alt="Schottky contact: band diagram with tunneling paths, energy-resolved current (tunneling vs over the barrier), tunneling share and barrier thickness vs doping, NMOS and PMOS" width="98%">
+</p>
+
+**Validation** (1D, `testsuite/test_schottky.py`): the thermionic limit
+equals the Richardson diode to 0.01%; the contact resistivity rho_c(N)
+agrees with the independent depletion-model (Yu) calculation within
+1.1-1.7x (the self-consistent barrier is slightly thicker); rho_c changes
+<= 3% from a 0.05 to a 0.2 nm contact mesh; 546-point robustness matrix
+(n and p, 1e17-2e21, three meshes, +/-1 V) with no failures and current
+conserved to 1e-5.
+
+### Study A: one Ti/TiN metal on NMOS and PMOS
+
+Today the same contact metal sits on the NMOS S/D (Si:P 7e20) and the PMOS
+S/D (strained Si0.5Ge0.5:B 5e20). How far is the plain work-function
+barrier from the measured one, and how far does Fermi-level pinning move
+it? (`python3 -m contacts.study_ti_barriers`)
+
+| metal | barrier model | Phi_Bn on Si (eV) | rho_c NMOS (Ohm cm^2) | Phi_Bp on Si0.5Ge0.5 (eV) | rho_c PMOS (Ohm cm^2) |
+|-------|---------------|------|--------|------|--------|
+| Ti    | Schottky-Mott (Phi_m - chi) | 0.28 | 2.1e-9 | 0.47 | 2.7e-8 |
+| Ti    | pinned (Cowley-Sze)         | 0.67 | 8.0e-9 | 0.08 | 3.7e-9 |
+| TiN   | Schottky-Mott (Phi_m - chi) | 0.55 | 5.2e-9 | 0.20 | 6.6e-9 |
+| TiN   | pinned (Cowley-Sze)         | 0.75 | 1.0e-8 | 0.00 | 2.5e-9 |
+
+Work functions: Ti 4.33 eV, TiN 4.6 eV (TiN varies 4.2-4.9 with process).
+Strained Si0.5Ge0.5 on Si: Eg 0.75 eV, chi 4.05 eV (the gap shrinks almost
+entirely in the valence band, Delta Ev ~0.37 eV). Pinning: c2 = S = 0.27,
+neutral level 0.30 eV above Ev (Cowley-Sze fit for Si, as quoted in Sze &
+Ng; to be re-checked against the book's table).
+
+Against the literature:
+
+- *Measured barriers on n-Si:* TiN 0.49 eV (Wittmer & Melchior), with
+  other reports from 0.35 to 0.58 eV; TiSix ~0.69 eV, ~0.61 eV under a TiN
+  cap. Silicide formation moves the Ti barrier by less than 0.1 eV, and
+  the Fermi level pins near mid-gap (Aboelfotoh et al.).
+- *Measured contact resistivity:* 1.5e-9 Ohm cm^2 on Ti-silicided Si:P at
+  2e21 (imec). In this model that needs Phi_Bn ~0.44 eV: inside the
+  measured TiN range. The Schottky-Mott barrier of Ti (0.28 eV) is too
+  low, the Cowley-Sze pinned values (0.67-0.75 eV) too high.
+- *PMOS:* barriers on p-SiGe fall with the Ge content by about the
+  valence-band offset, for every metal (the Fermi level stays pinned
+  relative to Ec). Reported rho_c with TiSi on high-Ge SiGe:B: ~1-1.5e-9
+  (patent) and 5e-9 Ohm cm^2 (thesis), which in this model needs
+  Phi_Bp <= ~0.14 eV: the pinned model fits, Schottky-Mott does not.
+  Sensitive to the hole A** and tunneling mass in strained SiGe.
+- So neither plain model fits both: a pinning calibrated on Si, with the
+  neutral level tied to Ec, gives the right NMOS/PMOS trend.
+
+<p align="center">
+  <img src="out/schottky/study_ti_barriers.png" alt="Study A: contact resistivity vs barrier for NMOS Si:P and PMOS SiGe:B, with Schottky-Mott and pinned barriers for Ti and TiN" width="98%">
+</p>
+
+**Sources**
+
+- M. O. Aboelfotoh et al., Schottky-barrier heights of Ti and TiSi2 on
+  n-type and p-type Si(100), Phys. Rev. B (1986):
+  <https://research.ibm.com/publications/schottky-barrier-heights-of-ti-and-tisi2-on-n-type-and-p-type-si100>
+- M. Wittmer, H. Melchior, Applications of TiN thin films in silicon device
+  technology (TiN/n-Si 0.49 eV), MRS Proceedings:
+  <https://www.cambridge.org/core/journals/mrs-online-proceedings-library-archive/article/applications-of-tin-thin-films-in-silicon-device-technology/514348EC74B4D2E8C4C9E970D3728BF6>
+- CMOS-compatible TiN for on-chip plasmonic Schottky photodetectors (TiN
+  barriers on n- and p-Si): <https://arxiv.org/pdf/1905.00927>
+- Metal-semiconductor junctions on p-type strained Si1-xGex layers (barrier
+  vs Ge fraction):
+  <https://avesis.metu.edu.tr/yayin/a7d3b2e6-b02a-466d-b8ec-166b824434bd/metal-semiconductor-junctions-on-p-type-strained-si1-xgex-layers>
+- Low Schottky-barrier junctions on strained p-Si1-xGex:
+  <https://avesis.metu.edu.tr/yayin/4f9cb4b6-de5b-4adc-9d2c-2bc3475d7edf/low-schottky-barrier-junctions-on-strained-p-si1-xgex-for-infrared-detection>
+- H. Yu et al. (imec), record-low rho_c on Si:P epi with Ti silicidation:
+  <https://scite.ai/authors/hao-yu-5QEy2>
+- imec, Source/drain contact resistance: a bottleneck for advanced Si CMOS:
+  <https://www.imec-int.com/en/imec-magazine/imec-magazine-april-2019/solving-the-contact-resistance-challenge-for-7nm-and-beyond-cmos>
+- Patent, high-Ge high-B SiGe:B with titanium silicide (PMOS rho_c
+  ~1-1.5e-9; applicant filing, not peer reviewed):
+  <https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/12598777>
+- Thesis, multi-ring CTLM on SiGe:B (5e-9 Ohm cm^2):
+  <https://etd.lib.nthu.edu.tw/thesis/detail/60213f013c2765e0422c717ababd1a8a>
+- N. Stavitski et al., NiSi and PtSi specific contact resistance vs doping,
+  IEEE EDL (2008): <https://ris.utwente.nl/ws/files/6873332/stavitski_edl.pdf>
+- Schwarz et al., Schottky barrier lowering in Sentaurus (SB-MOSFETs):
+  <https://yadda.icm.edu.pl/baztech/element/bwmeta1.element.baztech-d6289604-3281-4f73-b5dc-21dbee280809>
+- Silicide/Si tunneling contacts with nanoscale barrier width:
+  <https://hal.archives-ouvertes.fr/hal-00579075>
+- Textbook background: S. M. Sze and K. K. Ng, Physics of Semiconductor
+  Devices, 3rd ed., ch. 3 (Schottky barriers, Cowley-Sze pinning, contact
+  resistivity); F. A. Padovani and R. Stratton (1966) and C. Y. Yu (1970)
+  for thermionic-field and field emission.
 
 ## Setup
 
@@ -476,6 +610,10 @@ python3 -m mos.mos_main
 | `core/plot.py` | Structure/band-diagram/charge-density plot library, driven from a loaded structure file. Also runnable standalone against just a `*_structure.json`: `python3 core/plot.py out/diode/diode_structure.json --interactive` opens one window with every plot and field already loaded, click a checkbox to toggle a curve; `--which`/`--band-fields`/`--charge-fields` narrow down what gets drawn (in either interactive or plain PNG mode) |
 | `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `configs/input_diode.yaml`, generates plots and CSVs in `out/diode/` |
 | `mos/mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/mos/` (or `out/mos_poly/` for a poly-gate input) |
+| `contacts/schottky.py` | Schottky contact physics kernel: barrier models (direct, Schottky-Mott, pinned), thermionic-emission boundary quantities, image-force lowering, exact piecewise-linear WKB integral with analytic derivatives, Tsu-Esaki supply, depletion-model rho_c reference |
+| `contacts/newton_schottky_1d.py` | 1D quasi-Fermi Newton solve with Schottky ends (TE Robin rows + tunneling sink at the turning points), bias sweep, contact-resistivity extraction, energy-resolved current (`spectrum`) |
+| `contacts/study_ti_barriers.py` | Study A: Ti/TiN barriers (Schottky-Mott vs pinned vs measured) and rho_c on NMOS Si:P and PMOS Si0.5Ge0.5:B |
+| `contacts/plot_schottky_current.py` | Barrier, tunneling paths and tunneling vs over-the-barrier current, NMOS and PMOS, vs doping |
 
 Requires `numpy`, `scipy`, `matplotlib`, `pyyaml`. Output plots and CSVs are
 written to `out/<example>/` (a separate subfolder per example; filenames don't collide).

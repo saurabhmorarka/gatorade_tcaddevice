@@ -5626,3 +5626,33 @@ reference contacts, golden rho_c. Full suite 126 tests pass.
 at every transistor S/D contact (ohmic only on request), runtime impact
 measured on the 3D planar I-V; 2D/3D Schottky test cases.
 **Next:** user review of the 1D results, then the 2D port.
+
+## 61. Schottky contacts: where the current goes (figure), README documentation
+
+Branch `schottky-contacts`. The user asked to see the barrier thickness and
+how much current tunnels vs goes over the barrier, and to document the
+Study A table and every source.
+
+- `newton_schottky_1d.spectrum(res)`: energy-resolved current at a
+  Schottky end, from the solver's own tunneling bins (shared helpers
+  `_carrier_band`, `_energy_bins`, now also used by `_tunneling`), with
+  the turning point (= barrier thickness) per energy; the over-barrier
+  part is the Tsu-Esaki supply above the barrier top, scaled to the
+  solver's TE current. Tunneling + over = the terminal current exactly
+  (checked on both reference contacts).
+- `contacts/plot_schottky_current.py` -> `out/schottky/schottky_barrier_current.png`:
+  NMOS (TiN on Si:P 7e20, Phi_Bn 0.55) and PMOS (TiN on Si0.5Ge0.5:B
+  5e20, Phi_Bp 0.20) at +/-0.02 V (linear regime): band diagram with every
+  tunneling path, the energy-resolved current (log) split into tunneling
+  and over-the-barrier, and vs doping 1e18-2e21 the tunneling share and
+  the current-weighted tunneling distance.
+- Results: NMOS 100% tunneling (over the barrier 2e-7 %), peak 22 meV
+  below the metal Fermi level through 0.86 nm; PMOS 99.95% tunneling,
+  peak path 0.56 nm. At 1e18 the tunneling share is 92% (NMOS) / 62%
+  (PMOS). The NMOS tunneling distance peaks near 1e19 (3.7 nm): below
+  that the current climbs toward the thin top of the barrier
+  (thermionic-field emission); above it the barrier thins with doping
+  (0.5 nm at 2e21).
+- README: new section "Schottky S/D contacts" - the model, both figures,
+  the Study A table and the full source list; `contacts/` files in the
+  Files table.

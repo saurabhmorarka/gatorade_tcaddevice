@@ -152,6 +152,9 @@ Stop for the user's review after step 3 (1D validated) before porting.
 
 ## 7. Study A (user request 2026-10-12): Ti / TiN / TiSix barrier on n+ epi
 
+RESULTS, the table and ALL literature sources: README section
+"Schottky S/D contacts" (and DEVELOPMENT_LOG 60).
+
 Today's S/D contact is Ti or TiN, about 5-7 nm, on highly doped Si epi
 (in-situ Si:P up to ~2e21), often with a TiSix layer formed at the
 interface. Question: how far off is the plain work-function

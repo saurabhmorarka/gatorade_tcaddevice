@@ -107,6 +107,36 @@ def _lowering_of_field(end, psi):
     return d, dd * dEpos_dE * dE_dnb
 
 
+def _carrier_band(end, psi, phin, phip, carrier):
+    """Along the end's path: the carrier's band energy U (eV; Ec for
+    electrons, -Ev for holes), its quasi-Fermi level EF, the metal's EF_m,
+    tunneling mass, Richardson constant, dU/dpsi and dEF/d(quasi-Fermi)."""
+    P = end.path
+    if carrier == "n":
+        return (-psi[P] - end.dEi_path + end.lnNc, -phin[P], -end.V,
+                end.c.m_tunnel_n, end.c.richardson_n, -1.0, -1.0)
+    return (psi[P] + end.dEi_path + end.lnNv, phip[P], end.V,
+            end.c.m_tunnel_p, end.c.richardson_p, 1.0, 1.0)
+
+
+def _energy_bins(U, dE):
+    """Tunneling energy bins below the barrier top U[0]: (im, E, wgt,
+    partial). Only energies above the band minimum beyond the interface
+    (node im, the emitter band edge) have a turning point. The bin that
+    contains it is weighted by its fraction above the edge and evaluated in
+    the middle of that part, so the integral's lower limit is continuous:
+    with whole bins, near flat band (Gamma ~ 1) each bin switched on/off as
+    the edge crossed its midpoint and Newton stalled (DEVELOPMENT_LOG 60)."""
+    M = len(U)
+    im = 1 + int(np.argmin(U[1:])) if M > 1 else 0
+    U_min = U[im]
+    E = sk.energy_grid(U[0], U_min, dE)
+    wgt = np.clip((E + dE / 2 - U_min) / dE, 0.0, 1.0)
+    partial = (E - dE / 2) < U_min
+    E = np.where(partial, 0.5 * (U_min + E + dE / 2), E)
+    return im, E, wgt, partial
+
+
 def _tunneling(end, psi, phin, phip, Vt, T, carrier):
     """Tunneling at one end for one carrier. Returns (J_tun, rows, w_sink,
     d_psi, d_qf): J_tun (A/cm^2, > 0 into the metal); the sink is
@@ -115,35 +145,12 @@ def _tunneling(end, psi, phin, phip, Vt, T, carrier):
     each node's sink w.r.t. psi and the carrier's quasi-Fermi potential at
     the path nodes."""
     P = end.path
-    if carrier == "n":
-        U = -psi[P] - end.dEi_path + end.lnNc
-        EF = -phin[P]
-        EF_m = -end.V
-        m_rel, A = end.c.m_tunnel_n, end.c.richardson_n
-        dU_dpsi, dEF_dqf = -1.0, -1.0
-    else:
-        U = psi[P] + end.dEi_path + end.lnNv
-        EF = phip[P]
-        EF_m = end.V
-        m_rel, A = end.c.m_tunnel_p, end.c.richardson_p
-        dU_dpsi, dEF_dqf = 1.0, 1.0
-    dE = DE_PER_VT * Vt
     M = len(P)
-    # Only energies above the band minimum beyond the interface have a
-    # turning point (the emitter band edge). The bin that contains it is
-    # weighted by its fraction above the edge and evaluated in the middle of
-    # that part, so the integral's lower limit is continuous: with whole
-    # bins, near flat band (Gamma ~ 1) each bin switched on/off as the edge
-    # crossed its midpoint and Newton stalled (DEVELOPMENT_LOG).
-    im = 1 + int(np.argmin(U[1:])) if M > 1 else 0
-    U_min = U[im]
-    E = sk.energy_grid(U[0], U_min, dE)
+    U, EF, EF_m, m_rel, A, dU_dpsi, dEF_dqf = _carrier_band(end, psi, phin, phip, carrier)
+    dE = DE_PER_VT * Vt
+    im, E, wgt, partial = _energy_bins(U, dE)
     if len(E) == 0 or M < 2:
         return 0.0, P, np.zeros(M), np.zeros((M, M)), np.zeros((M, M))
-    lo_edge = E - dE / 2
-    wgt = np.clip((E + dE / 2 - U_min) / dE, 0.0, 1.0)
-    partial = lo_edge < U_min
-    E = np.where(partial, 0.5 * (U_min + E + dE / 2), E)
     r = sk.path_tunneling(end.s, U, EF, EF_m, E, m_rel, A, T, Vt)
     r["j"] = r["j"] * wgt
     r["dj_dU"] = r["dj_dU"] * wgt[:, None]
@@ -495,3 +502,43 @@ def contact_resistivity(mat, doping, contact, L=30e-7, h0=0.05e-7, dV=1e-3):
         return 2 * dV / (rp["J_right"] - rm["J_right"])
 
     return r({"left": contact, "right": None}) - r({"left": None, "right": None})
+
+
+def spectrum(res, side="left", carrier=None, dE_over=None, E_span=0.4):
+    """Energy-resolved current at a Schottky end of a converged solve()
+    result, for plots: what the solver computes, split into tunneling
+    (below the barrier top, the solver's own energy bins) and emission over
+    the barrier (Gamma = 1 above it; its spectrum shape is the Tsu-Esaki
+    supply with the interface quasi-Fermi level, scaled so it integrates to
+    the solver's TE boundary current).
+
+    carrier: "n" / "p" (default: the contact's majority carrier). Energies
+    are in the carrier's own convention (U = Ec for electrons, -Ev for
+    holes), referenced to the metal Fermi level (U - EF_m).
+    Returns dict: s (cm) and U along the path, EF along it, E_tun, j_tun
+    (A cm^-2 eV^-1), s_turn (cm, the barrier thickness at each E_tun),
+    E_over, j_over, J_tun, J_over, barrier (U[0]), dE."""
+    pb = res["problem"]
+    end = next(e for e in pb.ends if e.side == side)
+    carrier = carrier or end.majority
+    psi, phin, phip = res["psi"], res["phin"], res["phip"]
+    Vt, T = pb.mf.Vt, pb.mat.T
+    U, EF, EF_m, m_rel, A, _, _ = _carrier_band(end, psi, phin, phip, carrier)
+    dE = DE_PER_VT * Vt
+    im, E, wgt, _ = _energy_bins(U, dE)
+    r = sk.path_tunneling(end.s, U, EF, EF_m, E, m_rel, A, T, Vt)
+    j_tun = r["j"] * wgt
+    jt1 = np.minimum(r["jt"] + 1, len(U) - 1)
+    s_turn = np.where(r["ok"], end.s[r["jt"]] + r["t"] * (end.s[jt1] - end.s[r["jt"]]), np.nan)
+    info = res["info"][side]
+    J_te = info["Jn_te"] if carrier == "n" else -info["Jp_te"]
+    J_te = J_te * end.sigma          # into the metal, the same sign as the tunneling current
+    dEo = dE_over or dE / 4
+    E_over = U[0] + (np.arange(int(E_span / dEo)) + 0.5) * dEo
+    N, _ = sk.supply(E_over, EF[0], EF_m, Vt)
+    shape = A * T ** 2 / Vt * N
+    total = shape.sum() * dEo
+    j_over = shape * (J_te / total if total != 0 else 0.0)
+    return dict(s=end.s, U=U - EF_m, EF=EF - EF_m, E_tun=E - EF_m, j_tun=j_tun, s_turn=s_turn,
+                E_over=E_over - EF_m, j_over=j_over, J_tun=float((j_tun * dE).sum()), J_over=float(J_te),
+                barrier=float(U[0] - EF_m), dE=dE, carrier=carrier, sigma=end.sigma)
