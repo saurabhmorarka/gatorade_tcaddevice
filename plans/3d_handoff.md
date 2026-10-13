@@ -6,7 +6,13 @@ Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-13: Schottky merged; branch `schottky-speed` (3 commits, NOT pushed, NOT merged) - START HERE
+### LATEST 2026-10-13: `schottky-speed` MERGED into main and pushed (ab72e6b) - START HERE
+- Before the merge: conda quick tier 132/132 pass (76 s), conda
+  TCAD_FULL_TESTS=1 132/132 pass (80 s), venv 132 pass (71 s).
+- Branch cleanup still to do BY THE USER (tool permission blocks it):
+  `git push origin --delete schottky-contacts` and
+  `git branch -d schottky-speed schottky-contacts`.
+- New work: a new feature branch from `main`.
 - `main` has Schottky contacts merged + pushed (6372dd5, DEVELOPMENT_LOG 64).
   Remote branch `schottky-contacts` still exists: the user approved
   deleting it but the tool permission blocked
@@ -24,9 +30,7 @@ tell the full story with numbers.
     a setUpClass stay one process. BTBT quick tier = leakage side only
     (0 to -2 V). The BTBT "fixed cost" is the 0.1 V walk (5-6 its/step;
     bigger steps measured slower). README has the testsuite commands.
-  - Not run this session: the conda tier (`~/miniconda3/envs/tcad/bin/python
-    testsuite/run.py`) and TCAD_FULL_TESTS=1 - run both before merging.
-- NEXT: ask the user to push/merge `schottky-speed`. Roadmap item 2:
+- NEXT: roadmap item 2:
   Schrodinger-Poisson / quantum correction (plan first). Open: PMOS SiGe
   S/D template; verify Cowley-Sze numbers vs Sze.
 

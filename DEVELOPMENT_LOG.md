@@ -5858,3 +5858,5 @@ Ioff 1.19e-6. Ohmic is 62 s; the gap is now mostly the serial drain ramp
   one process; a finer rule (split unless min/max test time > 0.6) gave
   87 s. Result: venv suite 80 -> 71 s wall (132 tests, all pass). Critical
   path: TestWindow, TestSchottky3D, BTBT (~60-70 s each under load).
+- Before the merge to main: conda quick 132/132 (76 s), conda full
+  (TCAD_FULL_TESTS=1) 132/132 (80 s), venv 132 pass (71 s).
