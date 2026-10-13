@@ -13,7 +13,8 @@ for the PETSc / octree tests: those skip themselves elsewhere).
 
 Scheduling uses testsuite/timings.json (seconds per test id, from the last
 --record run): a class whose tests add up to more than SPLIT_S runs one
-process per test, and the longest jobs start first. A missing or stale
+process per test (unless it has a setUpClass, which that would repeat),
+and the longest jobs start first. A missing or stale
 file only makes the schedule worse, never the result.
 """
 import argparse
@@ -36,18 +37,25 @@ SINGLE_THREAD = dict(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", VECLIB_MAXIM
 
 
 def test_ids():
+    """(test ids, the classes that share a setUpClass between their tests)."""
     def walk(suite):
         for t in suite:
             if isinstance(t, unittest.TestSuite):
                 yield from walk(t)
             else:
-                yield t.id()
+                yield t
     sys.path.insert(0, ROOT)
-    return ["testsuite." + i for i in walk(unittest.TestLoader().discover(HERE, top_level_dir=HERE))]
+    tests = list(walk(unittest.TestLoader().discover(HERE, top_level_dir=HERE)))
+    shared = {"testsuite." + t.id().rsplit(".", 1)[0] for t in tests
+              if "setUpClass" in vars(type(t))}
+    return ["testsuite." + t.id() for t in tests], shared
 
 
-def jobs(ids, timings):
-    """[(estimated seconds, [test ids])], longest first."""
+def jobs(ids, timings, shared=()):
+    """[(estimated seconds, [test ids])], longest first. A class in
+    `shared` stays one process: splitting it repeats its setUpClass (a 3D
+    device or fab build) per test - measured slower: 72 s wall kept
+    together, 108 s splitting all, 87 s splitting TestWindow + TestPlanar."""
     by_class = {}
     for i in ids:
         if "_FailedTest" in i or "ModuleImportFailure" in i:
@@ -57,7 +65,7 @@ def jobs(ids, timings):
     out = []
     for cls, tests in by_class.items():
         est = [timings.get(t, DEFAULT_S) for t in tests]
-        if sum(est) > SPLIT_S and len(tests) > 1:
+        if sum(est) > SPLIT_S and len(tests) > 1 and cls not in shared:
             out += [(e, [t]) for e, t in zip(est, tests)]
         else:
             out.append((sum(est), [cls] if len(tests) > 1 else tests))
@@ -84,7 +92,7 @@ def main():
     sys.path.insert(0, ROOT)
     from core.parallel import performance_cores
     n_jobs = a.jobs or performance_cores()
-    ids = test_ids()
+    ids, shared = test_ids()
     if a.k:
         ids = [i for i in ids if a.k.lower() in i.lower()]
     try:
@@ -92,7 +100,7 @@ def main():
             timings = json.load(f)
     except (OSError, ValueError):
         timings = {}
-    todo = [(timings.get(i, DEFAULT_S), [i]) for i in ids] if a.record else jobs(ids, timings)
+    todo = [(timings.get(i, DEFAULT_S), [i]) for i in ids] if a.record else jobs(ids, timings, shared)
     print(f"{len(ids)} tests in {len(todo)} processes, {n_jobs} at a time"
           f"{' (TCAD_FULL_TESTS)' if os.environ.get('TCAD_FULL_TESTS', '') not in ('', '0') else ''}")
     t0 = time.perf_counter()

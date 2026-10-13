@@ -242,7 +242,7 @@ currents on the tiny planar device.
 | top contact on the S/D implant (~4e19 at the surface) | ohmic    | 1792 | 0.204 -> 0.052 | 69  | 57 s  |
 | same                                                   | Schottky | 683  | 0.227 -> 0.066 | 131 | 156 s |
 | **template default: 5 nm recess + contact implant (~5e20 at the metal, +34% area)** | ohmic | 1820 | 0.204 -> 0.051 | 68 | 62 s |
-| **same (default)**                                      | **Schottky** | **1729 (-5.0%)** | 0.204 -> 0.051 | 68 | 87 s |
+| **same (default)**                                      | **Schottky** | **1729 (-5.0%)** | 0.204 -> 0.051 | 69 | 72 s (87 s before the coarse correction) |
 
 Real contacts are engineered for a low rho_c, and the template now does it
 too: the contact trench is etched `contact_recess` (5 nm) into the S/D, so
@@ -261,6 +261,8 @@ The linear solver gets those directions (one per contact island) as a
 coarse space and corrects them exactly (two-level preconditioner,
 `LinearSolver.set_coarse`). Drain ramp + Id-Vg walk (profiled, one
 process): ohmic 32.6 s, Schottky 54.0 s before, 39.8 s now, same currents.
+Full `fab simulate` I-V: 87 -> 72 s (ohmic 62 s); what remains is mostly
+the serial drain ramp (36 s vs 17 s ohmic).
 
 ### Study A: one Ti/TiN metal on NMOS and PMOS (and NiSi)
 
@@ -402,11 +404,24 @@ install steps. All output (plots, CSVs, structure JSON) is written to
 the repo with the committed reference outputs - reruns just overwrite the
 files for whichever example you ran.
 
-To confirm everything works end to end after installing:
+To confirm everything works end to end after installing, run the whole
+suite in parallel (one process per test class, performance cores; ~70 s
+wall for the 132 tests in the pip venv):
+
+```bash
+python3 testsuite/run.py                     # quick tier (default): reduced 2D sweeps, no full I-V
+TCAD_FULL_TESTS=1 python3 testsuite/run.py   # full 2D sweeps - before a merge
+python3 testsuite/run.py -k schottky         # only test ids containing "schottky"
+python3 testsuite/run.py --record            # refresh testsuite/timings.json (job ordering)
+```
+
+Run it with the interpreter that has the packages (the conda env for the
+PETSc / octree tests; they skip themselves elsewhere). Single files still
+work on their own:
 
 ```bash
 python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
-python3 testsuite/test_2d_examples.py  # every bias point of the 4 2D drivers (~1.5 min)
+python3 testsuite/test_2d_examples.py  # the 4 2D drivers (quick tier; TCAD_FULL_TESTS=1: every bias point)
 python3 testsuite/test_vtk.py          # VTK export (also checks ParaView reads it, if installed)
 python3 testsuite/test_native.py       # compiled kernels vs numpy (skipped if not built)
 python3 testsuite/test_tcadview.py     # viewer, headless (skipped without the viewer deps)

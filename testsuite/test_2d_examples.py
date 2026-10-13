@@ -27,9 +27,10 @@ structure and gets the same 1e-13 A/um floor: its ~8e-15 A/um off-state
 drain current was measured to differ by ~2e-16 A/um between the pip venv
 (Accelerate BLAS) and the conda env (OpenBLAS) - the same round-off floor.
 
-Quick by default: the two long drivers (MOSFET, BTBT) run every third
-bias point of their sweeps (a reduced copy of their config) and those
-points are compared against the full-sweep golden files - a converged bias
+Quick by default: the two long drivers run a reduced copy of their config
+(MOSFET: every third bias point; BTBT: the leakage side, Vg and Vsub from
+0 to -2 V at 0.4 V) and those points are compared against the full-sweep
+golden files - a converged bias
 point does not depend on the continuation path to it, within each
 example's rtol. TCAD_FULL_TESTS=1 runs and compares the full sweeps.
 
@@ -67,8 +68,13 @@ EXAMPLES_2D = {
                     values=["drain_A_per_um", "body_A_per_um", "source_A_per_um"],
                     rtol=2e-2, floor=1e-13,
                     quick=dict(config="configs/input_mosfet_2d_btbt.yaml",
-                               set={"btbt": dict(vgs_step_V=0.6, vsub_step_V=0.6)},
-                               rows={"idvg_btbt.csv": 28, "idvsub_btbt.csv": 24})),
+                               # leakage side only: at Vg > 0 all four models agree (on-state,
+                               # covered by mosfet_2d); Vg = -2 V keeps nonlocal GIDL, which
+                               # turns on below -1.6 V. The walk is 0.1 V steps whatever the
+                               # spacing, so the range is what costs.
+                               set={"btbt": dict(vgs_start_V=0.0, vgs_step_V=0.4,
+                                                 vsub_stop_V=-2.0, vsub_step_V=0.4)},
+                               rows={"idvg_btbt.csv": 24, "idvsub_btbt.csv": 24})),
 }
 FULL = os.environ.get("TCAD_FULL_TESTS", "") not in ("", "0")
 

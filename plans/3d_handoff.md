@@ -6,34 +6,29 @@ Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-13: Schottky merged; branch `schottky-speed` (2 commits, NOT pushed, NOT merged) - START HERE
-- `main` has Schottky contacts merged + pushed (6372dd5, incl. Study A
-  with NiSi, DEVELOPMENT_LOG 64). Remote branch `schottky-contacts` still
-  exists: the user approved deleting it but the tool permission blocked
+### LATEST 2026-10-13: Schottky merged; branch `schottky-speed` (3 commits, NOT pushed, NOT merged) - START HERE
+- `main` has Schottky contacts merged + pushed (6372dd5, DEVELOPMENT_LOG 64).
+  Remote branch `schottky-contacts` still exists: the user approved
+  deleting it but the tool permission blocked
   `git push origin --delete schottky-contacts` - user to run it.
-  (Merge commit carries a Co-Authored-By line by mistake; user said leave it.)
-- `schottky-speed` (from main), DEVELOPMENT_LOG 65-66:
-  - 022f5df Schottky runtime: cause found - the contact's S/D island is a
-    near-null direction (majority QF level tied to the metal only through
-    the contact conductance) that ILU cannot see. Fix:
-    `LinearSolver.set_coarse` two-level preconditioner, coarse space
-    `SubgridContacts.coarse_space()`; ETA_MAX_SCHOTTKY 1e-9 -> 1e-7 (relaxes
-    after a full step). Planar 3D ramp+walk: ohmic 32.6 s, Schottky 54.0 ->
-    39.8 s, same currents. All tests pass (venv 132, conda Schottky/octree/3D).
-    Not yet measured: full `fab simulate` time (was 87 s Schottky / 62 ohmic)
-    -> measure, update README 3D table + this file.
-  - 9eef409 Testsuite (user: "too long, trim it; no full I-V; parallelize"):
-    `python3 testsuite/run.py` parallel runner, 216 s -> 80 s wall (venv,
-    all pass). Quick 2D sweeps (TCAD_FULL_TESTS=1 = full). NEXT:
-    (a) `run.py --record` to write timings.json (better splitting);
-    (b) BTBT test is the floor (~40 s even quick): each curve has a
-        10-28 s fixed cost independent of point count (4 models x 2
-        curves) - find it (model setup? profile one curve) or test fewer
-        models in quick tier; (c) planar_tiny 3D 20 s in venv (5 s conda);
-    (d) then README testsuite section + run conda tier too.
-- Then: ask user to push/merge `schottky-speed`. Roadmap next: item 2
-  Schrodinger-Poisson (plan first). Open: PMOS SiGe S/D template; verify
-  Cowley-Sze numbers vs Sze.
+- `schottky-speed` (from main), DEVELOPMENT_LOG 65-66, DONE:
+  - Schottky runtime (log 65): two-level ILU preconditioner, the contact
+    S/D islands as coarse space (`LinearSolver.set_coarse`,
+    `SubgridContacts.coarse_space()`); ETA_MAX_SCHOTTKY 1e-7. Full
+    `fab simulate` (octree): **87 -> 72 s** (ohmic 62 s), metrics
+    unchanged (Ion 1729, Vt 0.204 -> 0.051, SS 82, DIBL 161). Remaining
+    gap is the serial drain ramp: 36 s Schottky vs 17 s ohmic (a lever
+    if speed matters again).
+  - Testsuite (log 66): `python3 testsuite/run.py` parallel runner, venv
+    216 -> 71 s wall, 132 tests pass; timings.json recorded; classes with
+    a setUpClass stay one process. BTBT quick tier = leakage side only
+    (0 to -2 V). The BTBT "fixed cost" is the 0.1 V walk (5-6 its/step;
+    bigger steps measured slower). README has the testsuite commands.
+  - Not run this session: the conda tier (`~/miniconda3/envs/tcad/bin/python
+    testsuite/run.py`) and TCAD_FULL_TESTS=1 - run both before merging.
+- NEXT: ask the user to push/merge `schottky-speed`. Roadmap item 2:
+  Schrodinger-Poisson / quantum correction (plan first). Open: PMOS SiGe
+  S/D template; verify Cowley-Sze numbers vs Sze.
 
 ### 2026-10-12 (night): Schottky S/D contacts DONE in 1D/2D/3D
 - Branch `schottky-contacts`, pushed (ee35cb6), NOT merged: ask the user

@@ -5823,7 +5823,13 @@ Planar 3D, drain ramp + Id-Vg walk (one process): ohmic 32.6 s; Schottky
 54.0 s before, 39.8 s now. Drain currents identical to 7 digits. Tests:
 conda Schottky + octree + 3D examples pass, no golden moved.
 
-## 66. Testsuite: parallel runner, quick tier (in progress)
+Full `fab simulate` (octree, 6 cores): 87 -> 72 s (mesh+eq 13, drain
+ramps 36, Vds = 0.05 V curve 22, Vds = 1 V curve 35 s, 69 Newton its).
+Metrics unchanged: Vt 0.204 -> 0.051 V, SS 82, DIBL 161, Ion 1729,
+Ioff 1.19e-6. Ohmic is 62 s; the gap is now mostly the serial drain ramp
+(36 vs 17 s).
+
+## 66. Testsuite: parallel runner, quick tier
 
 - `testsuite/run.py`: one process per test class (per test for classes
   over SPLIT_S = 10 s in `testsuite/timings.json`, written by `--record`),
@@ -5837,5 +5843,18 @@ conda Schottky + octree + 3D examples pass, no golden moved.
   MOSFET 7.5 vs 7.8 s.
 - `test_schottky` slab: tables built once per contact (temporary empty
   cache), not once per mesh.
-- timings.json not recorded yet (the --record run hit the BTBT row count,
-  since fixed: 28 idvg rows - the driver adds Vgs = 0).
+- BTBT "fixed cost" found: not setup (context 1.5 s, turn_on 0.7 s) but
+  the walk - every step converges in 5-6 Newton iterations, so with
+  FAST_ITERS = 4 the step never grows and each curve walks 0.1 V at a time
+  whatever its point spacing. Letting it double after <= 6 was SLOWER
+  (19.8 -> 27.7 s per curve: 0.2 V steps cost 8-42 iterations), so 0.1 V
+  stays. Quick tier now walks only the leakage side: Vg and Vsub 0 to -2 V
+  at 0.4 V (at Vg > 0 all four models agree - the on-state, covered by
+  mosfet_2d; nonlocal GIDL turns on below -1.6 V, so -2 V stays). 40 ->
+  34 s, passes against the full goldens.
+- timings.json recorded. Splitting every class over SPLIT_S was slower
+  (108 s): per-test processes repeat setUpClass (TestSchottky3D builds the
+  octree device). run.py now keeps any class with its own setUpClass in
+  one process; a finer rule (split unless min/max test time > 0.6) gave
+  87 s. Result: venv suite 80 -> 71 s wall (132 tests, all pass). Critical
+  path: TestWindow, TestSchottky3D, BTBT (~60-70 s each under load).
