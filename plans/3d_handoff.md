@@ -1,33 +1,77 @@
 # 3D program: handoff
 
-## COLD START: read this first (newest block: "LATEST 2026-10-13")
+## COLD START: read this first (newest block: "LATEST 2026-10-13 (end of session)")
 
 Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-13: `schottky-speed` MERGED into main and pushed (ab72e6b) - START HERE
-- Before the merge: conda quick tier 132/132 pass (76 s), conda
-  TCAD_FULL_TESTS=1 132/132 pass (80 s), venv 132 pass (71 s).
-- Old branches `schottky-contacts` / `schottky-speed` deleted (local + remote).
-- New work: a new feature branch from `main`.
-- `main` has Schottky contacts merged + pushed (6372dd5, DEVELOPMENT_LOG 64).
-- `schottky-speed` (from main), DEVELOPMENT_LOG 65-66, DONE:
-  - Schottky runtime (log 65): two-level ILU preconditioner, the contact
-    S/D islands as coarse space (`LinearSolver.set_coarse`,
-    `SubgridContacts.coarse_space()`); ETA_MAX_SCHOTTKY 1e-7. Full
-    `fab simulate` (octree): **87 -> 72 s** (ohmic 62 s), metrics
-    unchanged (Ion 1729, Vt 0.204 -> 0.051, SS 82, DIBL 161). Remaining
-    gap is the serial drain ramp: 36 s Schottky vs 17 s ohmic (a lever
-    if speed matters again).
-  - Testsuite (log 66): `python3 testsuite/run.py` parallel runner, venv
-    216 -> 71 s wall, 132 tests pass; timings.json recorded; classes with
-    a setUpClass stay one process. BTBT quick tier = leakage side only
-    (0 to -2 V). The BTBT "fixed cost" is the 0.1 V walk (5-6 its/step;
-    bigger steps measured slower). README has the testsuite commands.
-- NEXT: roadmap item 2:
-  Schrodinger-Poisson / quantum correction (plan first). Open: PMOS SiGe
-  S/D template; verify Cowley-Sze numbers vs Sze.
+### LATEST 2026-10-13 (end of session) - START HERE
+**State:** everything is on `main`, pushed (ea182bd). Working tree clean,
+no open feature branches of ours (old ones deleted local + remote). The
+next piece of work starts a NEW feature branch from `main`.
+
+**What `main` has now (newest first; DEVELOPMENT_LOG 60-66):**
+- Testsuite (log 66): `python3 testsuite/run.py` runs everything in
+  parallel (one process per test class; classes with a setUpClass are
+  never split - measured slower). Quick tier by default, `TCAD_FULL_TESTS=1`
+  for full 2D sweeps, `-k name` filter, `--record` refreshes
+  `testsuite/timings.json`. Last results: venv 132 pass 71 s; conda
+  132/132 76 s; conda full 132/132 80 s. Use the conda interpreter
+  (`~/miniconda3/envs/tcad/bin/python`) for PETSc/octree tests (they skip
+  in the venv). Critical path: TestWindow, TestSchottky3D, BTBT (~60 s).
+- Schottky runtime (log 65): contact S/D islands as a coarse space in a
+  two-level ILU preconditioner (`core/linsolve.py` `LinearSolver.set_coarse`,
+  `contacts/subgrid.py` `coarse_space()`).
+- Schottky S/D contacts in 1D/2D/3D, default in the fab planar template
+  (log 60-64, README "Schottky S/D contacts", `plans/schottky_plan.md`).
+
+**Reference run (check after any solver/physics change):**
+`TCAD_LINSOLVE=petsc_ilu ~/miniconda3/envs/tcad/bin/python -W ignore -m fab simulate configs/fab_planar.yaml --mesher octree --out out/x`
+-> 72 s total (mesh+eq 13, drain ramps 36, Vds 0.05 V curve 22, Vds 1 V
+curve 35); Vt 0.204 -> 0.051 V, SS 82, DIBL 161, Ion 1729 uA/um,
+Ioff 1.19e-6. (Ohmic contacts: 62 s, Ion 1820.) Profiler:
+`fab/profile_iv.py` (`--cprofile`, `--dump`, `--ohmic`).
+
+**Physics roadmap (user's order; item 1 done). KEEP THIS LIST:**
+1. ~~Schottky S/D contacts~~ DONE.
+2. **Schrodinger-Poisson / quantum correction - NEXT.** Inversion charge
+   peaks ~1 nm below the Si/SiO2 interface (quantum confinement): raises
+   Vt, lowers effective Cox / Cinv; essential for FinFET/nanosheet later.
+   Candidate models to research and compare (Sentaurus/Silvaco docs,
+   literature) BEFORE choosing:
+   - full 1D Schrodinger-Poisson (reference/validation, 1D MOS-cap),
+   - density-gradient (Ancona; a PDE per carrier, works in 2D/3D with
+     the existing Newton - the usual production choice),
+   - modified local density (MLDA, Paasch-Uebensee: cheap, local,
+     interface-distance based - needs distance-to-oxide in 3D),
+   - van Dort (Vt-shift-only bandgap widening: cheapest, least physical).
+   Workflow (user rules): research first -> write `plans/quantum_plan.md`
+   (physics, equations, discretization, validation: 1D MOS-cap C-V vs
+   full Schrodinger-Poisson and literature/Sentaurus-like data, charge
+   centroid, Vt shift ~ +50-100 mV at 1e18) -> SHOW THE PLAN TO THE USER
+   and get approval -> prototype in 1D (`mos/` MOS-cap code) -> 2D ->
+   3D fab planar. Re-measure the reference run cost after (speed must
+   survive new physics; model-agnostic speedups preferred).
+3. Mobility stack: surface orientation, surface roughness, Coulomb,
+   phonon, interface charge; PLUS (user-added) channel-doping Coulomb
+   degradation of inversion mobility, and ballistic mobility in DD
+   (1/mu_eff = 1/mu_DD + 1/mu_ballistic).
+4. Stress and its effect on mobility.
+5. FinFET, nanosheet; then the octree defaults study on a FinFET
+   (option B) and `test_octree` tolerance 3% -> 1%.
+Also open (smaller): PMOS SiGe S/D template; verify Cowley-Sze numbers
+vs Sze; Schottky drain ramp is 36 s vs 17 s ohmic (speed lever).
+
+**User's standing rules:** show a plan before big work and ask before
+starting a phase; new feature branch from `main`; update
+DEVELOPMENT_LOG.md with every commit; NO Claude/Co-Authored-By lines in
+commits or PRs; fixes general (planar/FinFET/nanosheet), never
+planar-only; prototype physics in 1D first; run the testsuite (venv +
+conda, full tier) before a merge; the user has authorized merge + push
+once tests pass ("do everything yourself" 2026-10-13) - still ask before
+starting a new phase. Runtime is first-class (Rust only for >= 5-10x;
+GPU only if total gain > 3x).
 
 ### 2026-10-12 (night): Schottky S/D contacts DONE in 1D/2D/3D
 - Branch `schottky-contacts`, pushed (ee35cb6), NOT merged: ask the user

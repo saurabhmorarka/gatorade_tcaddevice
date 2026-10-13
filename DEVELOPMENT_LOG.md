@@ -5860,3 +5860,13 @@ Ioff 1.19e-6. Ohmic is 62 s; the gap is now mostly the serial drain ramp
   path: TestWindow, TestSchottky3D, BTBT (~60-70 s each under load).
 - Before the merge to main: conda quick 132/132 (76 s), conda full
   (TCAD_FULL_TESTS=1) 132/132 (80 s), venv 132 pass (71 s).
+
+## 67. Session close: schottky-speed merged, handoff refreshed
+
+- `schottky-speed` merged into `main` and pushed (ab72e6b) after venv,
+  conda and conda-full testsuite runs (all 132 pass). Old branches
+  `schottky-contacts` and `schottky-speed` deleted (local + remote).
+- `plans/3d_handoff.md` rewritten at the top for a cold start: state,
+  reference run, the physics roadmap with Schrodinger-Poisson /
+  quantum correction next (candidate models and the validation plan),
+  and the user's standing rules.
