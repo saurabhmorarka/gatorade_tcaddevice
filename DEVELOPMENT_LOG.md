@@ -5656,3 +5656,73 @@ Study A table and every source.
 - README: new section "Schottky S/D contacts" - the model, both figures,
   the Study A table and the full source list; `contacts/` files in the
   Files table.
+
+## 62. Schottky contacts in 2D/3D: sub-grid boundary condition, default in fab
+
+Branch `schottky-contacts`. Plan section 8.
+
+**Why sub-grid.** The resolved 1D model on coarse meshes (TiN-like
+barriers, rho_c vs the 0.05 nm reference): 7e20 n: 0.5 nm 1.17x, 1 nm
+1.80x, 2 nm 15.2x; 5e20 p: 1 nm 1.84x, 2 nm 6.5x. A device mesh cannot
+resolve a 0.5-1 nm barrier (user rule: robust to coarse meshes).
+
+**Model (`contacts/subgrid.py`).**
+- `SchottkyTable`: the resolved 1D model swept per doping (log10 N step
+  0.125, metal biases in 25 mV steps to 0.4 V, then to 1 V), read at x_ref
+  past the depletion region: J(N, u), u = V_metal - phi_maj(x_ref).
+  Stored as g = asinh(J / J_s), J_s = G0 Vt per doping (G0 = 1 / rho_c).
+  A fixed scale (1 A/cm^2) failed: at 7e20 asinh-linear interpolation gave
+  J(10 mV) 1300x too small. 0.1 V bias gaps missed the bend at flat band
+  (41% at -0.25 V, PMOS). Disk cache `out/.cache/schottky_tables/` keyed
+  by a hash of every parameter; ~3-8 s per new table.
+- `SubgridContacts`: the contact's semiconductor nodes are released from
+  the Dirichlet set; majority sink J(N_i, V - phi_i) A_i / (q cv_i),
+  minority thermionic Robin flux, both via `newton_solve_2d`'s
+  `generation` hook with analytic Jacobian (FD-checked: 3e-10). The
+  metal's insulator-side nodes sit at V - Phi_Bn + (Ec - Ei).
+- `voxel_interface_areas`: metal/semiconductor voxel faces split into
+  quarters, each to the nearest semiconductor contact node; exact total.
+- Shared solver (`newton_solve_2d(schottky=...)`, opt-in; ohmic runs are
+  bit-identical: 57 s, Ion 1792, Vt 0.204 -> 0.052 reproduced): releases
+  the nodes, chains the source term, keeps the quasi-Fermi box (range
+  includes the Schottky metals' biases), returns the Schottky object for
+  `solver2d.current.contact_current`. Inexact Newton: after a damped step
+  with Schottky contacts the Krylov cap drops 1e-4 -> 1e-9
+  (`ETA_MAX_SCHOTTKY`): quasi-1D slabs at ~1e7 A/cm^2 stalled at 1e-4 and
+  1e-6. On the 3D device it changes nothing measurable.
+- Also measured and rejected: a projected/unprojected line-search
+  fallback (the stall was the linear tolerance, not the box); a stiff
+  minority coupling (no change in Krylov work).
+
+**Validation.** Quasi-1D slab on the fab's rectilinear mesher (2D),
+metal | N | ohmic, 0.5 / 1 / 2 nm: current / resolved 1D (0.05 nm) within
+0.99-1.00 to +/-0.25 V for n 7e20, n 1e20, p 5e20 (0.97 at -0.3 V p, 1e8
+A/cm^2), identical on all meshes, interface area exact, current conserved.
+
+**3D planar NMOS (octree, full I-V, 6 cores):**
+
+| contact surface doping | contacts | Ion uA/um | its Vds=1 V | time |
+|---|---|---|---|---|
+| ~4e19 (template) | ohmic    | 1792 | 69  | 57 s  |
+| ~4e19            | Schottky | 683  | 131 | 156 s |
+| ~6e20 (sd_peak 7e20, sd_rp 4) | ohmic | 1952 | 75 | 50 s |
+| ~6e20            | Schottky | 1865 | 77  | 69 s  |
+
+- The template S/D implant (peak 1e20 at Rp 12 nm) leaves 3.9-4.3e19 at
+  the contact surface: rho_c ~7e-7 Ohm cm^2, the contacts dominate. Real
+  devices keep the surface degenerate (contact implant) - plan section 9.
+- On 6e20: -4.5% Ion, same Newton iterations; ILU linear solves 0.24 vs
+  0.13 s each (more Krylov iterations and ~30% slower factorizations),
+  cause not found yet (not the Krylov cap, not the minority rows).
+- Profiler (`fab/profile_iv.py`) builds the Schottky contacts too.
+
+**Defaults.** `fab` planar template: `contact_type: schottky`,
+`contact_barrier_n_eV: 0.45` (Study A), contact metal TiN (was W; a
+label only).
+
+**Tests.** `testsuite/test_schottky.py` 17 tests: + `TestSchottkySubgrid`
+(2D slab vs resolved 1D, 1 and 2 nm) and `TestSchottky3D` (tiny planar,
+octree: interface area = voxel faces, convergence, Kirchhoff, linear-regime
+resistance bounds from the table, golden lin/sat drain currents - Schottky
+7.02e-8 / 5.60e-6 A vs ohmic 1.21e-5 / 3.41e-5 A: 60 nm^2 contacts on
+4e19 are ~6e5 Ohm each). venv 131 pass; conda octree + Schottky 23 pass.

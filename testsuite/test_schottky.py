@@ -15,7 +15,17 @@ case checks the model against references, not only against itself:
         sweeps of the two reference S/D contacts: NMOS Si:P 7e20 and PMOS
         strained Si0.5Ge0.5:B 5e20;
       * golden rho_c of those two contacts (regression).
-2D/3D cases are added when the model is ported there."""
+  TestSchottkySubgrid - the sub-grid contact used on 2D/3D meshes
+      (contacts/subgrid.py): a quasi-1D slab on the fab's rectilinear
+      mesher (metal | n+ or p+ | ohmic) at 1 and 2 nm spacing must give the
+      resolved 1D model's current (0.05 nm mesh) within 2%, identical on
+      both meshes, with the exact interface area and current conserved.
+  TestSchottky3D - the tiny planar NMOS (configs/fab_planar_tiny.yaml,
+      octree) with the template-default Schottky S/D contacts, against the
+      same device with ohmic contacts: interface area = the metal/silicon
+      voxel faces, every point converges, Kirchhoff (source + drain + body
+      = 0), the Schottky drain current below the ohmic one, golden currents.
+      (test_3d_examples keeps the ohmic reference device.)"""
 import os
 import sys
 import unittest
@@ -186,6 +196,151 @@ class TestSchottky1D(unittest.TestCase):
         rp = ns.contact_resistivity(self.sige, -5e20, sk.SchottkyContact(barrier_p_eV=0.2))
         self.assertAlmostEqual(rn / 5.18e-9, 1.0, delta=3e-3)
         self.assertAlmostEqual(rp / 6.62e-9, 1.0, delta=3e-3)
+
+
+class TestSchottkySubgrid(unittest.TestCase):
+    @staticmethod
+    def slab(mat, h, N, L=30e-7, W=4e-7):
+        from mesh3d.cartesian import build_cartesian_mesh
+        xs = np.linspace(0.0, W, 3)
+        ys = np.unique(np.concatenate([[-2e-7], np.arange(0.0, L + 1e-12, h), [L]]))
+        lab = np.zeros((len(xs) - 1, len(ys) - 1), int)
+        lab[:, 0] = 1
+        mats = [dict(name="si", kind="semi"), dict(name="metal", kind="conductor", contact="source")]
+        mesh = build_cartesian_mesh([xs, ys], lab, mats, np.full((len(xs), len(ys)), N), mat,
+                                    face_contacts={"body": (1, "max")})
+        return mesh, xs, ys, lab
+
+    def test_slab_matches_resolved_1d(self):
+        from core.params import Material
+        from contacts import newton_schottky_1d as ns
+        from contacts import subgrid as sg
+        from solver2d.newton_solver_qf_2d import newton_solve_2d
+        from solver2d.current import contact_current
+        # constant mobility in both (the 2D default is Masetti)
+        mat = Material(masetti_n=(0.0, 0.0, 0.0, 0.0, 1e40, 1e40, 1.0, 1.0, 1350.0),
+                       masetti_p=(0.0, 0.0, 0.0, 0.0, 1e40, 1e40, 1.0, 1.0, 480.0))
+        Vs = [0.05, 0.1]
+        for N, c in ((7e20, sk.SchottkyContact(barrier_n_eV=0.55)), (-5e20, sk.SchottkyContact(barrier_p_eV=0.2))):
+            x1 = ns.contact_grid(30e-7)
+            Vs_dir = [v * np.sign(N) for v in Vs]
+            ref = [r["J_left"] for r in ns.sweep(x1, np.full(len(x1), N), mat, {"left": c, "right": None}, Vs_dir,
+                                                 dV_max=0.05)]
+            Js = []
+            for h in (1e-7, 2e-7):
+                mesh, xs, ys, lab = self.slab(mat, h, N)
+                area = sg.voxel_interface_areas(lab, ["semi", "conductor"], [None, "source"], [xs, ys], mesh,
+                                                ["source"])
+                self.assertAlmostEqual(area.sum() / (xs[-1] - xs[0]), 1.0, places=9)
+                sub = sg.SubgridContacts.setup(mesh, mat, {"source": c}, area, cache=False)
+                r, row = None, []
+                for V, Jr in zip(Vs_dir, ref):
+                    kw = {} if r is None else dict(psi_init=r["psi"], phin_init=r["phin"], phip_init=r["phip"])
+                    r = newton_solve_2d(mesh, mat, {"source": V, "body": 0.0}, schottky=sub, **kw)
+                    self.assertTrue(r["converged"], (N, h, V))
+                    W = xs[-1] - xs[0]
+                    J = contact_current(mesh, mat, r, "source") / W
+                    Jb = -contact_current(mesh, mat, r, "body") / W
+                    self.assertLess(abs(J / Jr - 1.0), 0.02, (N, h, V, J, Jr))
+                    self.assertLess(abs(Jb / J - 1.0), 1e-3, (N, h, V))
+                    row.append(J)
+                Js.append(row)
+            np.testing.assert_allclose(Js[0], Js[1], rtol=1e-3)
+
+
+class TestSchottky3D(unittest.TestCase):
+    # Golden drain currents (A, full device) with Schottky contacts - captured
+    # 2026-10-12 after checking them against the ohmic device (DEVELOPMENT_LOG 62).
+    GOLDEN = {"lin": 7.021e-08, "sat": 5.602e-06}
+    RTOL = 5e-3             # linear-solver backend drift (venv SuperLU vs conda PETSc)
+
+    @classmethod
+    def setUpClass(cls):
+        from fab import flow
+        from fab.simulate import build_device, schottky_contacts
+        cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs",
+                           "fab_planar_tiny.yaml")
+        d = build_device(flow.load(cfg), mesher="octree", log=lambda *a: None)
+        d["schottky"] = schottky_contacts(d, log=lambda *a: None)
+        cls.d = d
+        cls.res = {kind: cls.solve(d, d["schottky"] if kind == "schottky" else None)
+                   for kind in ("schottky", "ohmic")}
+
+    @staticmethod
+    def solve(d, schottky):
+        from main2d_mosfet_sweep import continuation, solve_mosfet
+        from mos.mos_params import MOSDevice
+        mesh, mat, Cs = d["mesh"], d["mat"], d["Cs"]
+        dev = MOSDevice(gate_workfunction_eV=d["wf"])
+
+        def at(Vgs, Vds):
+            return lambda p, g: solve_mosfet(mesh, mat, dev, Cs, *((p, Vds) if Vgs is None else (Vgs, p)),
+                                             psi_init=g["psi"], phin_init=g["phin"], phip_init=g["phip"],
+                                             cold_retry=False, velocity_saturation=True, schottky=schottky)
+        eq = solve_mosfet(mesh, mat, dev, Cs, 0.0, 0.0, velocity_saturation=True, schottky=schottky)
+        lin, _, _ = continuation(at(None, 0.05), 0.0, eq, [0.6])
+        sat, _, _ = continuation(at(0.6, None), 0.05, lin.get(0.6, eq), [0.6])
+        return dict(eq=eq, lin=lin.get(0.6), sat=sat.get(0.6))
+
+    def test_interface_area(self):
+        d = self.d
+        lab, origin, h = d["voxels"]
+        from fab.simulate import device_materials
+        mats = device_materials(d["st"])
+        semi = np.array([m["kind"] == "semi" for m in mats] + [False])
+        sk_ = d["schottky"]
+        for name in ("source", "drain"):
+            metal = np.array([m.get("contact") == name for m in mats] + [False])
+            L = np.where(lab >= 0, lab, len(mats))
+            A = 0.0
+            for a in range(3):
+                lo = [slice(None)] * 3
+                hi = [slice(None)] * 3
+                lo[a], hi[a] = slice(0, -1), slice(1, None)
+                n = ((semi[L[tuple(lo)]] & metal[L[tuple(hi)]]) | (metal[L[tuple(lo)]] & semi[L[tuple(hi)]])).sum()
+                A += n * np.prod([h[b] for b in range(3) if b != a])
+            got = sk_.area[sk_.specs[name]["nodes"]].sum() * 1e14
+            self.assertGreater(A, 0)
+            self.assertAlmostEqual(got / A, 1.0, places=9)
+
+    def test_converged_and_kirchhoff(self):
+        from solver2d.current import contact_current
+        d = self.d
+        for kind, r in self.res.items():
+            for pt in ("eq", "lin", "sat"):
+                self.assertIsNotNone(r[pt], (kind, pt))
+                self.assertTrue(r[pt]["converged"], (kind, pt))
+            for pt in ("lin", "sat"):
+                I = {c: contact_current(d["mesh"], d["mat"], r[pt], c) for c in ("source", "drain", "body")}
+                self.assertLess(abs(sum(I.values())) / abs(I["drain"]), 2e-3, (kind, pt, I))
+
+    def test_schottky_below_ohmic_and_golden(self):
+        from fab.simulate import drain_current
+        d = self.d
+        for pt in ("lin", "sat"):
+            Is = drain_current(d, self.res["schottky"][pt])
+            Io = drain_current(d, self.res["ohmic"][pt])
+            self.assertLess(Is, Io, pt)
+            self.assertAlmostEqual(Is / self.GOLDEN[pt], 1.0, delta=self.RTOL)
+
+    def test_linear_regime_resistance(self):
+        """Vds = 0.05 V: the tiny device's contacts (~60 nm^2 each, on
+        ~4e19 Si) are ~6e5 Ohm each at zero bias, far above the channel.
+        The total resistance must lie between the ohmic device's plus the
+        contacts' zero-bias resistance (an upper bound: J(u) is superlinear
+        past ~Vt) and the ohmic one plus a third of it."""
+        from fab.simulate import drain_current
+        d, sk_ = self.d, self.d["schottky"]
+        R_c = 0.0
+        for name in ("source", "drain"):
+            s_ = sk_.specs[name]
+            i = s_["nodes"]
+            J, _ = s_["table"](np.abs(d["mesh"].Cdop[i]), np.full(len(i), 1e-4))
+            R_c += 1.0 / (2.0 * np.sum(sk_.area[i] * J / 1e-4))          # full device = 2 halves
+        R_s = 0.05 / drain_current(d, self.res["schottky"]["lin"])
+        R_o = 0.05 / drain_current(d, self.res["ohmic"]["lin"])
+        self.assertLess(R_s, R_o + R_c)
+        self.assertGreater(R_s, R_o + R_c / 3.0)
 
 
 if __name__ == "__main__":

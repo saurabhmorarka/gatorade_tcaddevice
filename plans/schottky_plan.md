@@ -14,8 +14,8 @@ material DB (Schottky-Mott); `barrier_eV` on the contact overrides it
 - A dedicated Schottky test case in the testsuite: `testsuite/test_schottky.py`
   (1D now; add 2D and 3D cases when the model is ported).
 
-**STATUS 2026-10-12: steps 1-3 and Study A DONE in 1D (DEVELOPMENT_LOG 60).
-STOP: waiting for the user's review before the 2D/3D port.**
+**STATUS 2026-10-12: 1D done (LOG 60-61); 2D/3D sub-grid port done, Schottky
+the fab default (LOG 62). Next: section 9 (contact implant, recessed contact).**
 
 ## 1. Why, and what goes wrong today
 
@@ -193,3 +193,60 @@ compared with the literature?
   and the heterojunction band reference (delta_Ei) are therefore
   required in step 2-3, not optional.
 - Runs after step 3 (needs the tunneling model), still in 1D.
+
+## 8. 2D/3D port design (2026-10-12, after the user's go-ahead)
+
+**Why not resolve the barrier on the device mesh.** Measured in 1D (TiN-like
+contacts): rho_c from the explicit model vs the 0.05 nm reference -
+7e20: 0.5 nm 1.17x, 1 nm 1.80x, 2 nm 15.2x; 5e20 p: 1 nm 1.84x, 2 nm 6.5x.
+The barrier is 0.5-1 nm thick at S/D doping; a 3D mesh cannot carry
+0.05-0.2 nm spacing at every contact (user rule: robust to coarse meshes).
+
+**Sub-grid Schottky contact (`contacts/subgrid.py`).**
+- For each (semiconductor material, contact parameters, carrier), the
+  validated 1D model is solved once on a fine 1D mesh and tabulated as
+  J(N, u): the majority current density into the metal vs the doping N at
+  the interface and the drop u = V_metal - phi_majority just past the
+  barrier (the depletion region and its tunneling are inside the table;
+  the neutral bulk is left to the device mesh). Cached on disk by a hash
+  of all parameters.
+- On the device mesh, the semiconductor nodes touching the metal become
+  ordinary free nodes: Poisson keeps them neutral (the barrier dipole is
+  sub-grid, no Dirichlet psi), the majority carrier gets the sink
+  J(N_i, V - phi_i) A_i / (q cvol_i), the minority carrier a TE Robin flux
+  v (c - c(phi = V)) A_i / cvol_i. A_i = the node's metal interface area.
+  It enters `newton_solve_2d` through the existing `generation` hook
+  (nodal, analytic Jacobian), so assembly and the linear solver are
+  untouched; the maximum-principle box stays on (the sink relaxes the
+  quasi-Fermi levels toward the metal's, inside the box).
+- Generality: valid wherever the interface curvature radius >> the
+  barrier width (1-4 nm): planar, FinFET and nanosheet contacts alike. No
+  orientation rule: A_i comes from the exact dual-cell facets into the
+  metal (octree / rectilinear) or the boundary edges (2D).
+- Terminal current of a Schottky contact = sum_i A_i (J_maj + J_min).
+
+**Validation.** 1D: sub-grid model on 0.5-2 nm meshes vs the resolved
+model on 0.05 nm (same structure, I-V within ~2%). 2D: wide-contact
+slab vs 1D. 3D: planar NMOS with Schottky S/D vs ohmic (Ion drop, R_sd
+from the contact drop), runtime vs the 57 s reference.
+
+**Defaults.** `fab` S/D contacts `type: schottky` by default (user rule).
+Barrier default: the value Study A infers from the measured NMOS rho_c,
+Phi_Bn ~0.45 eV for Ti/TiN on n+ Si (open question: no single pinned
+model fits the NMOS and PMOS data, see the README).
+
+## 9. Process features for realistic contacts (user, 2026-10-12; after Schottky is solid)
+
+Real S/D contacts are engineered for low rho_c; add both to the fab flow
+(template options, on by default for the planar device once validated):
+1. *Contact implant*: an extra shallow, high-dose implant through the
+   contact opening so the doping where the metal touches is very high
+   (the template's S/D implant leaves only ~4e19 at the surface: Ion 1792
+   -> 683 uA/um with Schottky contacts; with ~6e20 at the surface the
+   contact costs ~4.5%). The sub-grid table reads the local doping per
+   contact node, so this works without model changes.
+2. *Recessed contact*: etch the contact trench into the S/D silicon/epi
+   before the TiN fill, so the metal contacts the trench floor AND its
+   sidewalls (more area). `voxel_interface_areas` counts every
+   semiconductor/metal face in any orientation, so the sidewalls are
+   picked up automatically.

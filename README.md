@@ -162,10 +162,10 @@ the implant peaks and ranges, the voxel size, ...).
 In every modern transistor the source/drain contact is a metal (Ti/TiN,
 often with a thin TiSix at the interface) on degenerately doped epitaxy.
 That interface is a Schottky barrier, and at S/D doping almost all of the
-current tunnels through it. `contacts/` models it, so far in 1D: the 2D and
-3D port is next, and Schottky contacts will then be the default at every
-transistor S/D contact. Plan: `plans/schottky_plan.md`; numbers and
-validation: DEVELOPMENT_LOG 60.
+current tunnels through it. `contacts/` models it in 1D, 2D and 3D, and
+the `fab` planar template uses Schottky S/D contacts **by default**
+(`contact_type: ohmic` for the ideal contact). Plan:
+`plans/schottky_plan.md`; numbers and validation: DEVELOPMENT_LOG 60-62.
 
 **The model** (the split Sentaurus and Atlas use):
 
@@ -209,6 +209,48 @@ agrees with the independent depletion-model (Yu) calculation within
 <= 3% from a 0.05 to a 0.2 nm contact mesh; 546-point robustness matrix
 (n and p, 1e17-2e21, three meshes, +/-1 V) with no failures and current
 conserved to 1e-5.
+
+### 2D and 3D: the barrier as a sub-grid boundary condition
+
+At S/D doping the barrier is 0.5-1 nm thick, and resolving it on the device
+mesh does not work: the explicit model's rho_c is off 1.8x at 1 nm spacing
+and up to 15x at 2 nm. So on 2D/3D meshes the barrier is **sub-grid**
+(`contacts/subgrid.py`):
+
+- the validated 1D model (resolved on a 0.05 nm mesh) is tabulated once per
+  material and contact as J(N, u), the current density vs the doping at the
+  interface and the drop u from the metal to the semiconductor's quasi-Fermi
+  level just past the barrier (cached on disk);
+- the semiconductor nodes touching the metal become free nodes (Poisson
+  keeps them neutral); their majority carrier gets J(N_i, V - phi_i)
+  times the node's metal interface area, the minority carrier a thermionic
+  flux - both through the solver's nodal source-term hook;
+- the interface area per node comes from the exact metal/semiconductor
+  voxel faces, so floors and sidewalls of any orientation count (planar,
+  FinFET, nanosheet contacts alike).
+
+Validation: a quasi-1D slab (metal | n+ 7e20, 1e20 or p+ 5e20 | ohmic) on
+the fab's rectilinear mesher at 0.5, 1 and 2 nm spacing gives the resolved
+1D current within 1% up to +/-0.25 V (3% at 1e8 A/cm^2), identically on all
+three meshes. 3D tests: interface area, convergence, Kirchhoff, golden
+currents on the tiny planar device.
+
+**Planar NMOS (3D, octree, full Id-Vg; `python -m fab simulate`):**
+
+| S/D doping where the metal touches | contacts | Ion (uA/um) | Newton its (Vds = 1 V) | I-V time |
+|---|---|---|---|---|
+| ~4e19 (template S/D implant, peak 1e20 at 12 nm) | ohmic    | 1792 | 69  | 57 s  |
+| ~4e19                                            | Schottky | 683  | 131 | 156 s |
+| ~6e20 (`sd_peak: 7e20, sd_rp: 4`)                | ohmic    | 1952 | 75  | 50 s  |
+| ~6e20                                            | Schottky | 1865 | 77  | 69 s  |
+
+On degenerate S/D (the real Si:P 7e20 stack) the contact costs ~4.5% of
+Ion and the solve ~40% more time per iteration (same Newton iterations;
+the ILU-preconditioned linear solves take ~40% more Krylov iterations -
+not yet understood). The template's own S/D implant leaves only ~4e19 at
+the contact surface, where rho_c ~7e-7 Ohm cm^2 makes the contacts the
+dominant resistance: the ohmic contact hid this. Next: a high-dose contact
+implant and a contact recessed into the S/D (plan section 9).
 
 ### Study A: one Ti/TiN metal on NMOS and PMOS
 
@@ -614,6 +656,7 @@ python3 -m mos.mos_main
 | `contacts/newton_schottky_1d.py` | 1D quasi-Fermi Newton solve with Schottky ends (TE Robin rows + tunneling sink at the turning points), bias sweep, contact-resistivity extraction, energy-resolved current (`spectrum`) |
 | `contacts/study_ti_barriers.py` | Study A: Ti/TiN barriers (Schottky-Mott vs pinned vs measured) and rho_c on NMOS Si:P and PMOS Si0.5Ge0.5:B |
 | `contacts/plot_schottky_current.py` | Barrier, tunneling paths and tunneling vs over-the-barrier current, NMOS and PMOS, vs doping |
+| `contacts/subgrid.py` | Sub-grid Schottky contact for 2D/3D meshes: J(N, u) table from the 1D model (disk cache), nodal source term + Jacobian for `newton_solve_2d(schottky=...)`, terminal current, metal interface area per node from voxel faces |
 
 Requires `numpy`, `scipy`, `matplotlib`, `pyyaml`. Output plots and CSVs are
 written to `out/<example>/` (a separate subfolder per example; filenames don't collide).

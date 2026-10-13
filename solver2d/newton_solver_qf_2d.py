@@ -58,6 +58,12 @@ RES_ACCEPT = 1e-4       # ...and |F|_inf is below this (see _run_newton)
 ETA_MAX = 1e-4          # loosest inexact-Newton linear-solve tolerance (see _run_newton);
                         # measured on the 2D MOSFET: 1e-2 doubles the Newton iterations,
                         # 1e-6 spends it back in Krylov iterations/refactorizations
+ETA_MAX_SCHOTTKY = 1e-9  # the cap once a step had to be damped, with sub-grid Schottky contacts:
+                         # a bias step puts a large residual on the contact nodes' sink rows, and
+                         # a solve relative to that left the rest too inexact - quasi-1D TiN slabs
+                         # (n+ 7e20, p+ 5e20, ~1e7 A/cm^2) stalled at 1e-4 and 1e-6 and converged in
+                         # 4-6 iterations at 1e-9. Only after a damped step: on the 3D planar device
+                         # the default cap converges as fast as with ohmic contacts (DEVELOPMENT_LOG 62)
 QUAD_PREDICT_MAX = 1e-3  # V - only trust the quadratic-convergence prediction below this update
 RES_PREDICT_MAX = 1e-1   # |F|_inf sanity bound for the prediction exit (see _run_newton)
 QF_DENSITY_REF = 1.0     # cm^-3 - quasi-Fermi updates are weighted by n/(n+ref) in the prediction exit
@@ -932,7 +938,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
                      damping="line_search", cold_retry=True, velocity_saturation=False,
                      generation=None, linear_solver="auto", vsat_warmup=True, qf_box=True,
-                     vsat_fallback=True, poisson_start=True):
+                     vsat_fallback=True, poisson_start=True, schottky=None):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -1033,7 +1039,15 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     qf_box: project the Newton iterates' quasi-Fermi levels onto the range
     of the semiconductor contacts' Fermi levels (the maximum principle; see
     the comment where it is set up). Off when generation is given (tunneling
-    or impact-ionization pairs can carry them outside)."""
+    or impact-ionization pairs can carry them outside); kept on with a
+    generation hook marked keeps_qf_box (the Schottky contact sink).
+
+    schottky: optional contacts.subgrid.SubgridContacts - sub-grid Schottky
+    contacts (plans/schottky_plan.md section 8). Their semiconductor nodes
+    are released from the Dirichlet set (free nodes, kept neutral by
+    Poisson), the contact law enters as a generation term, and the metal's
+    insulator-side nodes sit at the metal's own potential V - Phi_Bn +
+    (Ec - Ei). None (default) leaves the solve unchanged."""
     if vsat_warmup and vsat_force(velocity_saturation) in ("hybrid", "gradqf"):
         # A quasi-Fermi force can derail Newton from a poor start: a new
         # contact bias enters as a jump of phin/phip across the first edge
@@ -1049,7 +1063,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         # differs so much that continuation sweeps failed (2D NMOS).
         kw = dict(f_tol=f_tol, verbose=verbose, psi_bc_override=psi_bc_override,
                   phin_bc_override=phin_bc_override, phip_bc_override=phip_bc_override, damping=damping,
-                  generation=generation, linear_solver=linear_solver, qf_box=qf_box, poisson_start=poisson_start)
+                  generation=generation, linear_solver=linear_solver, qf_box=qf_box, poisson_start=poisson_start,
+                  schottky=schottky)
         try:
             r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
                                 phip_init=phip_init, maxiter=min(maxiter, VSAT_DIRECT_MAXITER), cold_retry=False,
@@ -1080,6 +1095,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     N = len(mesh.points)
     Vt = mat.Vt
     ni_arr, _ = _mesh_ni_edge_g(mesh, mat)
+    if schottky is not None:
+        generation = schottky.generation(bias_by_contact, extra=generation)
     psi_bc_override = psi_bc_override or {}
     phin_bc_override = phin_bc_override or {}
     phip_bc_override = phip_bc_override or {}
@@ -1088,6 +1105,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     is_contact_boundary = np.array([bc.startswith("contact:") for bc in boundary_bc_type])
     contact_point_idx = mesh.boundary_point_index[is_contact_boundary]
     contact_names = [bc.split(":", 1)[1] for bc in boundary_bc_type[is_contact_boundary]]
+    if schottky is not None:
+        keep = ~np.isin(contact_point_idx, schottky.released())
+        contact_point_idx = contact_point_idx[keep]
+        contact_names = [nm for nm, k in zip(contact_names, keep) if k]
 
     is_contact_full = np.zeros(N, dtype=bool)
     is_contact_full[contact_point_idx] = True
@@ -1117,6 +1138,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     names_arr = np.array(contact_names, dtype=object)
     metal_psi0 = {}
     for name in set(contact_names) - set(psi_bc_override):
+        if schottky is not None and name in schottky.specs:
+            metal_psi0[name] = schottky.metal_psi0(name)
+            continue
         pts = contact_point_idx[names_arr == name]
         semi_pts = pts[~is_insulator[pts]]
         if len(semi_pts) < len(pts):
@@ -1219,9 +1243,12 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     # purpose - harmless for that solve, but the next one (the BTBT turn-on
     # ramp) then started from it and failed.
     qf_lo = qf_hi = None
-    if qf_box and generation is None and semi_bc.any():
+    if qf_box and (generation is None or getattr(generation, "keeps_qf_box", False)) and semi_bc.any():
         lo = min(phin_bc[semi_bc].min(), phip_bc[semi_bc].min())
         hi = max(phin_bc[semi_bc].max(), phip_bc[semi_bc].max())
+        if schottky is not None:
+            vs = [bias_by_contact.get(nm, 0.0) for nm in schottky.specs]
+            lo, hi = min([lo] + vs), max([hi] + vs)
         if hi > lo:
             qf_lo, qf_hi = lo, hi
 
@@ -1305,7 +1332,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             if lin is None:
                 delta = equilibrated_spsolve(J, -F)
             else:
-                eta_cap = min(ETA_MAX, lin.max_rtol(len(F)))
+                eta_cap = min(state.get("eta_max", ETA_MAX), lin.max_rtol(len(F)))
                 eta = eta_cap if merit_prev is None else min(eta_cap, 0.9 * (merit / merit_prev) ** 2)
                 delta = lin.solve(J, -F, rtol=eta)
             merit_prev = merit
@@ -1337,6 +1364,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                 step *= 0.5
             if accepted:
                 U, F = U_try, F_try
+            if schottky is not None and step < 1.0:
+                state["eta_max"] = ETA_MAX_SCHOTTKY
             upd = step * max_dpsi if accepted else 0.0
             upd_all = step * max(max_dpsi, max_dqf) if accepted else 0.0
             res_norm = np.max(np.abs(F))
@@ -1424,4 +1453,4 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     converged = bool(state.get("converged")) or res_norm < RES_ACCEPT
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
             "iters": it, "res_norm": res_norm, "converged": converged,
-            "velocity_saturation": velocity_saturation}
+            "velocity_saturation": velocity_saturation, "schottky": schottky, "bias": dict(bias_by_contact)}

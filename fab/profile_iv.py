@@ -117,10 +117,13 @@ def main():
     d = build_device(flow.load(a.config), mesher=a.mesher, log=lambda *x: None)
     MESH.append(d["mesh"])
     d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
+    import fab.simulate as fs
+    d["schottky"] = fs.schottky_contacts(d)
     print(f"mesh: {len(d['mesh'].points)} nodes, {len(d['mesh'].edges)} edges, {time.perf_counter() - t:.1f} s")
     instrument()
     t = time.perf_counter()
-    eq = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=vsat)
+    eq = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=vsat,
+                      schottky=d["schottky"])
     report(f"equilibrium ({eq['iters']} its, warm-up {eq.get('iters_warmup', 0)})", time.perf_counter() - t)
 
     import fab.simulate as fs
@@ -129,7 +132,7 @@ def main():
             return lambda pp, g: solve_mosfet(dd["mesh"], dd["mat"], dd["dev"], dd["Cs"],
                                               *((pp, Vds) if Vgs is None else (Vgs, pp)), psi_init=g["psi"],
                                               phin_init=g["phin"], phip_init=g["phip"], cold_retry=False,
-                                              velocity_saturation=vsat)
+                                              velocity_saturation=vsat, schottky=dd.get("schottky"))
         fs._solver_at = _at
     steps = []
     t = time.perf_counter()

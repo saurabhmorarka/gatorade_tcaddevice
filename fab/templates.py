@@ -18,7 +18,15 @@ PLANAR_DEFAULTS = {
     # Default gate-first TiN; "Poly" gives a doped-poly gate (n+ for nmos).
     "gate_material": "TiN",
     "gate_wf": None,        # eV; None: band-edge-like default for the type (see planar())
-    "contact_material": "W",  # source/drain contact metal (full volumes; ohmic for now)
+    "contact_material": "TiN",  # source/drain contact metal (full volumes)
+    # Source/drain contacts are Schottky by default (real devices: Ti/TiN on
+    # degenerate epi; plans/schottky_plan.md): thermionic emission + tunneling,
+    # as a sub-grid boundary condition (contacts/subgrid.py). "ohmic" = ideal.
+    "contact_type": "schottky",
+    # The metal's electron barrier (eV). 0.45: what the measured rho_c of
+    # Ti(Si)/TiN on Si:P implies in this model (README, Study A). A p+
+    # contact gets Eg - Phi_Bn of its own semiconductor (pinned to Ec).
+    "contact_barrier_n_eV": 0.45,
     "Lg": 30,               # gate length
     "tox": 1.5,             # gate oxide
     "gate_height": 40,
@@ -125,10 +133,14 @@ def planar(params):
     domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-sub_depth", "ild_top + ild_overfill + top_margin"],
               "voxel": "voxel"}
     # layer 3: terminals are process regions (whole interfaces), with a type:
-    # ohmic now; "schottky" (barrier + tunneling at the metal/epi interface) planned
+    # "schottky" (barrier + tunneling at the metal/epi interface, default for
+    # the source/drain) or "ohmic"
+    sd = {"type": p["contact_type"]}
+    if p["contact_type"] == "schottky":
+        sd["barrier_n_eV"] = "contact_barrier_n_eV"
     device = {"contacts": [
-        {"name": "source", "region": "source_contact", "type": "ohmic"},
-        {"name": "drain", "region": "drain_contact", "type": "ohmic"},
+        {"name": "source", "region": "source_contact", **sd},
+        {"name": "drain", "region": "drain_contact", **sd},
         {"name": "gate", "region": "gate", "type": "gate", "workfunction_eV": "gate_wf"},
         {"name": "body", "surface": "bottom", "type": "ohmic"},
     ]}

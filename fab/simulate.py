@@ -238,6 +238,41 @@ def _region_info(d):
     return d["region_info"]
 
 
+def schottky_contacts(d, log=print):
+    """The sub-grid Schottky boundary condition (contacts/subgrid.py) for
+    every `type: schottky` contact of the device, or None. Interface areas
+    come from the same voxels / cells the mesh was built from."""
+    from contacts.schottky import SchottkyContact
+    from contacts.subgrid import SubgridContacts, voxel_interface_areas
+    st, p, mesh = d["st"], d["params"], d["mesh"]
+    by_name = {}
+    for c in st.contacts:
+        if c.get("type") != "schottky":
+            continue
+        kw = {k: evaluate(c[k], p) for k in ("barrier_n_eV", "barrier_p_eV") if c.get(k) is not None}
+        if not kw:
+            region = next(r for r in st.regions if r.name == c["region"])
+            kw["metal"] = region.material
+        by_name[c["name"]] = SchottkyContact(**kw)
+    if not by_name:
+        return None
+    mats = device_materials(st)
+    kinds = [m["kind"] for m in mats]
+    contact_of = [m.get("contact") for m in mats]
+    if d.get("mesher") == "octree":
+        lab, origin, h = d["voxels"]
+        axes_cm = [(origin[a] + h[a] * np.arange(lab.shape[a] + 1)) * NM_TO_CM for a in range(3)]
+    else:
+        lab = d["cell_region"]
+        axes_cm = [np.asarray(a) * NM_TO_CM for a in d["axes_nm"]]
+    area = voxel_interface_areas(lab, kinds, contact_of, axes_cm, mesh, list(by_name))
+    sk = SubgridContacts.setup(mesh, d["mat"], by_name, area, log=log)
+    log("Schottky contacts: " + ", ".join(
+        f"{nm} ({s['carrier']}, Phi_Bn {by_name[nm].barriers(d['mat'].chi_eV, d['mat'].Eg_eV)[0]:.2f} eV, "
+        f"{len(s['nodes'])} nodes, {area[s['nodes']].sum() * 1e14:.0f} nm^2)" for nm, s in sk.specs.items()))
+    return sk
+
+
 def _context(cfg_path, top_nm, half_z, mesher="cartesian"):
     """Device, mesh and equilibrium, built once per process (a worker
     started by simulate() gets it from _init_worker instead)."""
@@ -247,7 +282,9 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian"):
         from mos.mos_params import MOSDevice
         d = build_device(flow.load(cfg_path), top_nm=top_nm, half_z=half_z, log=lambda *a: None, mesher=mesher)
         d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
-        d["eq"] = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=True)
+        d["schottky"] = schottky_contacts(d, log=lambda *a: None)
+        d["eq"] = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=True,
+                               schottky=d["schottky"])
         _CTX[key] = d
     return _CTX[key]
 
@@ -268,7 +305,8 @@ def _solver_at(d, Vgs, Vds):
     mesh, mat, dev, Cs = d["mesh"], d["mat"], d["dev"], d["Cs"]
     return lambda pp, gss: solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
                                         psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
-                                        cold_retry=False, velocity_saturation=True, vsat_fallback=False)
+                                        cold_retry=False, velocity_saturation=True, vsat_fallback=False,
+                                        schottky=d.get("schottky"))
 
 
 def _write_point(task, d, v, state):
