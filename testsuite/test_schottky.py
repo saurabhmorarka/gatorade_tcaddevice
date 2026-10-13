@@ -197,6 +197,23 @@ class TestSchottky1D(unittest.TestCase):
         self.assertAlmostEqual(rn / 5.18e-9, 1.0, delta=3e-3)
         self.assertAlmostEqual(rp / 6.62e-9, 1.0, delta=3e-3)
 
+    def test_nisi_pmos_leaning(self):
+        # Study A, NiSi: near-midgap pinning. The Eg - Phi_Bn transfer must
+        # give its measured p-Si hole barrier (~0.45 eV) from the measured
+        # n-Si one (0.65-0.70), and carried to Si0.5Ge0.5 it must favor PMOS:
+        # worse than TiN on Si:P, better than TiN on SiGe:B.
+        from contacts import study_ti_barriers as st
+        rows = {r["metal"]: r for r in st.measured_rows(self.si, self.sige)}
+        self.assertLess(abs(rows["NiSi"]["phi_bp_si"] - st.MEASURED_P_SI["NiSi"]), 0.05)
+        ns = self.ns
+        rho = {m: (ns.contact_resistivity(self.si, 7e20, sk.SchottkyContact(barrier_n_eV=r["phi_bn_si"])),
+                   ns.contact_resistivity(self.sige, -5e20, sk.SchottkyContact(barrier_p_eV=r["phi_bp_sige"])))
+               for m, r in rows.items() if m in ("NiSi", "TiN")}
+        self.assertGreater(rho["NiSi"][0], 1.5 * rho["TiN"][0])
+        self.assertLess(rho["NiSi"][1], 0.5 * rho["TiN"][1])
+        self.assertAlmostEqual(rho["NiSi"][0] / 7.97e-9, 1.0, delta=5e-3)
+        self.assertAlmostEqual(rho["NiSi"][1] / 3.64e-9, 1.0, delta=5e-3)
+
 
 class TestSchottkySubgrid(unittest.TestCase):
     @staticmethod

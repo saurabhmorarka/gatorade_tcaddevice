@@ -5762,3 +5762,19 @@ implant) and etch the TiN into the S/D epi for more area.
   octree is coarser - the known gap the deferred octree-defaults study on a
   FinFET is to close); tolerance 2.5% -> 3%, back to 1% with that study.
 - Tests: venv 131 pass; conda octree + Schottky + 3D examples pass.
+
+## 64. Study A: NiSi (the PMOS-leaning silicide)
+
+- `core/material_db.py`: NiSi, work function 4.65 eV (near mid-gap).
+- `contacts/study_ti_barriers.py`: NiSi Schottky-Mott and pinned rows,
+  plus "measured" rows for TiN, TiSix and NiSi: the middle of the measured
+  n-Si barrier range, carried to SiGe as Phi_Bp = Eg(SiGe) - Phi_Bn
+  (pinned level fixed relative to Ec). Check on Si: NiSi's measured p-Si
+  barrier 0.45 eV vs Eg - Phi_Bn = 0.42-0.47 eV.
+- Result (measured NiSi barrier 0.675 eV on Si, 0.075 eV on Si0.5Ge0.5):
+  rho_c NMOS 7.97e-9 (2x TiN's measured barrier), PMOS 3.64e-9 (2.8x lower
+  than TiN): why NiSi is a PMOS contact and rarely an NMOS one. Not
+  modeled: Ge segregation out of Ni(SiGe) above ~400 C at high Ge.
+- Figure: labels replaced by marker shape (metal) + color (model) legend.
+- `TestSchottky1D.test_nisi_pmos_leaning`: transfer check, NMOS/PMOS
+  ordering vs TiN, golden rho_c. README Study A table, findings, sources.

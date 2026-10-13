@@ -39,6 +39,8 @@ MATERIALS: dict = {
     ),
     "Ti": MaterialProperties(name="Ti", category="metal", workfunction_eV=4.33),
     "TiN": MaterialProperties(name="TiN", category="metal", workfunction_eV=4.6),
+    # NiSi: near-midgap on Si (4.6-4.7 reported).
+    "NiSi": MaterialProperties(name="NiSi", category="metal", workfunction_eV=4.65),
     "Al": MaterialProperties(name="Al", category="metal", workfunction_eV=4.28),
     "W": MaterialProperties(name="W", category="metal", workfunction_eV=4.55),
 }

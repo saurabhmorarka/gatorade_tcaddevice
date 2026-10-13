@@ -256,12 +256,13 @@ Cost: same Newton iterations as ohmic; the ILU-preconditioned linear
 solves take ~40% longer with the Schottky source terms (more Krylov
 iterations and slower factorizations - cause not found yet).
 
-### Study A: one Ti/TiN metal on NMOS and PMOS
+### Study A: one Ti/TiN metal on NMOS and PMOS (and NiSi)
 
 Today the same contact metal sits on the NMOS S/D (Si:P 7e20) and the PMOS
 S/D (strained Si0.5Ge0.5:B 5e20). How far is the plain work-function
 barrier from the measured one, and how far does Fermi-level pinning move
-it? (`python3 -m contacts.study_ti_barriers`)
+it? And NiSi, the silicide sometimes used for PMOS contacts but rarely for
+NMOS: does the model say why? (`python3 -m contacts.study_ti_barriers`)
 
 | metal | barrier model | Phi_Bn on Si (eV) | rho_c NMOS (Ohm cm^2) | Phi_Bp on Si0.5Ge0.5 (eV) | rho_c PMOS (Ohm cm^2) |
 |-------|---------------|------|--------|------|--------|
@@ -269,8 +270,16 @@ it? (`python3 -m contacts.study_ti_barriers`)
 | Ti    | pinned (Cowley-Sze)         | 0.67 | 8.0e-9 | 0.08 | 3.7e-9 |
 | TiN   | Schottky-Mott (Phi_m - chi) | 0.55 | 5.2e-9 | 0.20 | 6.6e-9 |
 | TiN   | pinned (Cowley-Sze)         | 0.75 | 1.0e-8 | 0.00 | 2.5e-9 |
+| NiSi  | Schottky-Mott (Phi_m - chi) | 0.60 | 6.2e-9 | 0.15 | 5.2e-9 |
+| NiSi  | pinned (Cowley-Sze)         | 0.76 | 1.1e-8 | 0.00 | 2.5e-9 |
+| TiN   | measured on n-Si, Phi_Bp = Eg - Phi_Bn | 0.47 | 3.9e-9 | 0.29 | 1.0e-8 |
+| TiSix | measured on n-Si, Phi_Bp = Eg - Phi_Bn | 0.65 | 7.3e-9 | 0.10 | 4.1e-9 |
+| NiSi  | measured on n-Si, Phi_Bp = Eg - Phi_Bn | 0.68 | 8.0e-9 | 0.08 | 3.6e-9 |
 
-Work functions: Ti 4.33 eV, TiN 4.6 eV (TiN varies 4.2-4.9 with process).
+Work functions: Ti 4.33 eV, TiN 4.6 eV (TiN varies 4.2-4.9 with process),
+NiSi 4.65 eV (near mid-gap). The "measured" rows start from the middle of
+each measured n-Si barrier range and give the SiGe hole barrier as
+Eg(SiGe) - Phi_Bn, i.e. the pinned level stays fixed relative to Ec.
 Strained Si0.5Ge0.5 on Si: Eg 0.75 eV, chi 4.05 eV (the gap shrinks almost
 entirely in the valence band, Delta Ev ~0.37 eV). Pinning: c2 = S = 0.27,
 neutral level 0.30 eV above Ev (Cowley-Sze fit for Si, as quoted in Sze &
@@ -292,11 +301,22 @@ Against the literature:
   (patent) and 5e-9 Ohm cm^2 (thesis), which in this model needs
   Phi_Bp <= ~0.14 eV: the pinned model fits, Schottky-Mott does not.
   Sensitive to the hole A** and tunneling mass in strained SiGe.
+- *NiSi:* measured 0.65-0.70 eV on n-Si and ~0.45 eV on p-Si. The two
+  add up to Eg (the Eg - Phi_Bn transfer predicts 0.42-0.47 eV on p-Si),
+  so the measured-row mapping holds on Si. Carried to Si0.5Ge0.5, the hole
+  barrier falls to ~0.08 eV: NiSi gives 3.6e-9 Ohm cm^2 on PMOS (2.8x
+  lower than TiN's measured barrier) but 8.0e-9 on NMOS (2x higher). That
+  is the reason it shows up on PMOS contacts but rarely on NMOS. Not in
+  the model: Ni(SiGe) is thermally fragile at high Ge (Ge segregates out
+  of the germanosilicide above ~400 C, roughening the interface), which is
+  why Ti-based contacts took over on high-Ge SiGe. NiSi is close to TiSix
+  in this model (both pin near mid-gap); the real NiSi PMOS advantage is
+  partly process (low-temperature formation, no TiN barrier needed).
 - So neither plain model fits both: a pinning calibrated on Si, with the
   neutral level tied to Ec, gives the right NMOS/PMOS trend.
 
 <p align="center">
-  <img src="out/schottky/study_ti_barriers.png" alt="Study A: contact resistivity vs barrier for NMOS Si:P and PMOS SiGe:B, with Schottky-Mott and pinned barriers for Ti and TiN" width="98%">
+  <img src="out/schottky/study_ti_barriers.png" alt="Study A: contact resistivity vs barrier for NMOS Si:P and PMOS SiGe:B, with Schottky-Mott and pinned barriers for Ti, TiN and NiSi, and measured-barrier points for TiN, TiSix and NiSi" width="98%">
 </p>
 
 **Sources**
@@ -325,6 +345,22 @@ Against the literature:
   <https://etd.lib.nthu.edu.tw/thesis/detail/60213f013c2765e0422c717ababd1a8a>
 - N. Stavitski et al., NiSi and PtSi specific contact resistance vs doping,
   IEEE EDL (2008): <https://ris.utwente.nl/ws/files/6873332/stavitski_edl.pdf>
+- NiSi barriers: ~0.65 eV for electrons and ~0.45 eV for holes on Si
+  (IBM, interaction of NiSi with dopants for metallic S/D):
+  <https://research.ibm.com/publications/interaction-of-nisi-with-dopants-for-metallic-sourcedrain-applications>;
+  Ni2Si/NiSi 0.66 eV (IBM, barrier heights and silicide formation for Ni,
+  Pd and Pt on silicon):
+  <https://researchweb.draco.res.ibm.com/publications/barrier-heights-and-silicide-formation-for-ni-pd-and-pt-on-silicon>
+- NiSi on p-Si, ~0.45 eV effective barrier (temperature-dependent I-V):
+  <https://avesis.uludag.edu.tr/yayin/c1235786-676b-42d1-acf7-6ceafb248039/temperature-dependent-electrical-behavior-of-nickel-silicide-schottky-diodes-on-p-type-silicon>
+- Ni germanosilicide on SiGe: thermal stability and Ge segregation (NCSU
+  thesis; NIST presentation):
+  <https://repository.lib.ncsu.edu/items/99a903b7-95a6-4de5-9886-bdd0ecb174e0/full>,
+  <https://www.nist.gov/document/ozturk2005pdf>; Ni/Pt germanosilicides on
+  SiGe:B near 1e-8 Ohm cm^2 (MRS):
+  <https://www.cambridge.org/core/journals/mrs-online-proceedings-library-archive/article/study-on-solid-phase-reactions-of-ni-and-pt-on-sige-alloys-as-contacts-to-ultrashallow-pn-junctions-for-cmos-technology-nodes-beyond-70nm/942E5D8F6F0AE5A0B59297A27D5AD9C8>;
+  Pt in NiSi moves the barrier less on SiGe than on Si (pinning, MIT):
+  <https://dspace.mit.edu/handle/1721.1/7363?show=full>
 - Schwarz et al., Schottky barrier lowering in Sentaurus (SB-MOSFETs):
   <https://yadda.icm.edu.pl/baztech/element/bwmeta1.element.baztech-d6289604-3281-4f73-b5dc-21dbee280809>
 - Silicide/Si tunneling contacts with nanoscale barrier width:
@@ -658,7 +694,7 @@ python3 -m mos.mos_main
 | `mos/mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/mos/` (or `out/mos_poly/` for a poly-gate input) |
 | `contacts/schottky.py` | Schottky contact physics kernel: barrier models (direct, Schottky-Mott, pinned), thermionic-emission boundary quantities, image-force lowering, exact piecewise-linear WKB integral with analytic derivatives, Tsu-Esaki supply, depletion-model rho_c reference |
 | `contacts/newton_schottky_1d.py` | 1D quasi-Fermi Newton solve with Schottky ends (TE Robin rows + tunneling sink at the turning points), bias sweep, contact-resistivity extraction, energy-resolved current (`spectrum`) |
-| `contacts/study_ti_barriers.py` | Study A: Ti/TiN barriers (Schottky-Mott vs pinned vs measured) and rho_c on NMOS Si:P and PMOS Si0.5Ge0.5:B |
+| `contacts/study_ti_barriers.py` | Study A: Ti/TiN/NiSi barriers (Schottky-Mott vs pinned vs measured) and rho_c on NMOS Si:P and PMOS Si0.5Ge0.5:B |
 | `contacts/plot_schottky_current.py` | Barrier, tunneling paths and tunneling vs over-the-barrier current, NMOS and PMOS, vs doping |
 | `contacts/subgrid.py` | Sub-grid Schottky contact for 2D/3D meshes: J(N, u) table from the 1D model (disk cache), nodal source term + Jacobian for `newton_solve_2d(schottky=...)`, terminal current, metal interface area per node from voxel faces |
 
