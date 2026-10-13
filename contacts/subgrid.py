@@ -49,6 +49,9 @@ U_GRID = np.round(np.arange(-0.6, 0.6001, 0.01), 4)
 # metal biases of the tabulating 1D sweeps: 25 mV steps where a contact
 # works (0.1 V gaps missed the bend at flat band: 41% off at -0.25 V, PMOS)
 V_SWEEP = tuple(np.round(np.r_[0.01, np.arange(0.025, 0.401, 0.025), 0.5, 0.6, 0.8, 1.0], 4).tolist())
+# cm^-3: a contact's doped island for coarse_space (1e18 and 1e19 measured
+# the same on the planar device; 1e20 cuts the island to the contact implant)
+COARSE_DOPING = 1e18
 
 
 def _material_key(mat):
@@ -222,6 +225,44 @@ class SubgridContacts:
     def released(self):
         """Mesh node indices the solver must NOT treat as Dirichlet."""
         return self.nodes
+
+    def coarse_space_cached(self):
+        if not hasattr(self, "_coarse"):
+            self._coarse = self.coarse_space()
+        return self._coarse
+
+    def coarse_space(self):
+        """Near-null directions of the Newton Jacobian that a contact-sink
+        boundary creates, for the linear solver's coarse correction
+        (core/linsolve.py, LinearSolver.set_coarse): one per contact, its
+        majority quasi-Fermi level shifted uniformly over the contact's
+        doped island (majority-type nodes with |Cdop| > COARSE_DOPING
+        connected to the contact through the mesh). An ohmic contact pins
+        that level; this one ties it to the metal only through the contact
+        conductance, far below the island's own, so the shift costs almost
+        nothing and ILU cannot see it (DEVELOPMENT_LOG 65). (3N, k) array
+        in U = (psi, phin, phip) order, or None."""
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        N, mesh = self.N, self.mesh
+        ins = mesh.is_insulator if mesh.is_insulator is not None else np.zeros(N, bool)
+        ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+        cols = []
+        for s in self.specs.values():
+            sign = 1.0 if s["carrier"] == "n" else -1.0
+            ok = ~ins & (sign * np.asarray(mesh.Cdop) > COARSE_DOPING)
+            seeds = s["nodes"][ok[s["nodes"]]]
+            if not len(seeds):
+                continue
+            e = ok[ii] & ok[jj]
+            G = coo_matrix((np.ones(int(e.sum())), (ii[e], jj[e])), shape=(N, N))
+            _, lab = connected_components(G, directed=False)
+            island = ok & np.isin(lab, np.unique(lab[seeds]))
+            z = np.zeros(3 * N)
+            z[(1 if s["carrier"] == "n" else 2) * N + np.flatnonzero(island)] = 1.0
+            if not any(np.array_equal(z, c) for c in cols):   # contacts sharing one island
+                cols.append(z)
+        return np.array(cols).T if cols else None
 
     def _rates(self, psi, phin, phip, bias, jacobian):
         """Per-node particle rates per volume (cm^-3 s^-1, > 0 = generation)

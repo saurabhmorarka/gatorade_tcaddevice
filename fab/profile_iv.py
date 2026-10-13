@@ -108,6 +108,7 @@ def main():
     ap.add_argument("--dump", help="directory: save the linear systems of the Id-Vg walk")
     ap.add_argument("--dump-from", type=int, default=0, help="first walk system to save")
     ap.add_argument("--dump-max", type=int, default=40)
+    ap.add_argument("--ohmic", action="store_true", help="ohmic S/D contacts instead of the Schottky default")
     a = ap.parse_args()
     from main2d_mosfet_sweep import continuation, solve_mosfet
     from mos.mos_params import MOSDevice
@@ -118,7 +119,7 @@ def main():
     MESH.append(d["mesh"])
     d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
     import fab.simulate as fs
-    d["schottky"] = fs.schottky_contacts(d)
+    d["schottky"] = None if a.ohmic else fs.schottky_contacts(d)
     print(f"mesh: {len(d['mesh'].points)} nodes, {len(d['mesh'].edges)} edges, {time.perf_counter() - t:.1f} s")
     instrument()
     t = time.perf_counter()

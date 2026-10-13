@@ -252,9 +252,15 @@ where the metal touches. Effective rho_c 7.2e-7 -> 5.8e-9 Ohm cm^2. Without
 them the plain S/D implant leaves ~4e19 at the surface and the contacts
 dominate the device; the ohmic contact hid this.
 
-Cost: same Newton iterations as ohmic; the ILU-preconditioned linear
-solves take ~40% longer with the Schottky source terms (more Krylov
-iterations and slower factorizations - cause not found yet).
+Cost: same Newton iterations as ohmic. A Schottky contact ties its S/D
+island to the metal only through the contact conductance, far below the
+island's own, so shifting the island's electron quasi-Fermi level as a
+whole costs almost nothing: a near-null direction of the Jacobian that a
+local ILU preconditioner cannot see (GMRES needed ~50% more iterations).
+The linear solver gets those directions (one per contact island) as a
+coarse space and corrects them exactly (two-level preconditioner,
+`LinearSolver.set_coarse`). Drain ramp + Id-Vg walk (profiled, one
+process): ohmic 32.6 s, Schottky 54.0 s before, 39.8 s now, same currents.
 
 ### Study A: one Ti/TiN metal on NMOS and PMOS (and NiSi)
 

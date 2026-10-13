@@ -257,6 +257,7 @@ class LinearSolver:
         self._pat = None
         self._prec = None          # backend-specific preconditioner handle
         self._ksp_kept = None      # PETSc KSP + preconditioner matrix kept for this pattern
+        self._coarse = None        # (n, k) coarse space of the ILU backends, see set_coarse
         self._fresh_its = 0        # Krylov iterations of the solve right after the last factorization
         self._scale = None         # (row_scale, col_scale) frozen at factor time
         self._t_factor = 0.0
@@ -313,6 +314,32 @@ class LinearSolver:
         self.stats["t_solve"] += time.perf_counter() - t0
         return x
 
+    def set_coarse(self, Z):
+        """Coarse space for the ILU backends: an (n, k) array of near-null
+        directions of the coming Jacobians (unscaled unknowns), or None.
+        ILU is local; a direction along which the matrix is nearly singular
+        over a large region (a Schottky contact's S/D island: its majority
+        quasi-Fermi level is tied to the metal only through the contact
+        conductance, contacts/subgrid.py coarse_space) leaves GMRES to
+        find it, ~20 extra iterations on the planar 3D device. With Z the
+        preconditioner becomes two-level (multiplicative): a Galerkin
+        correction on span(Z), then ILU on the remaining residual
+        (DEVELOPMENT_LOG 65). With a direct backend it applies to the
+        reused (lagged) factorization."""
+        same = (Z is None and self._coarse is None) or (
+            Z is not None and self._coarse is not None and Z.shape == self._coarse.shape
+            and np.array_equal(Z, self._coarse))
+        if not same:
+            self._coarse = None if Z is None else np.array(Z, float, copy=True)
+            self._forget_pattern()     # the PETSc KSP changes preconditioner type
+
+    def _coarse_scaled(self, As):
+        """(Zs, AZs): the coarse space in the scaled unknowns (x = c * y)
+        with unit columns, and the scaled matrix applied to it."""
+        Zs = self._coarse / self._scale[1][:, None]
+        Zs = Zs / np.linalg.norm(Zs, axis=0)
+        return Zs, As @ Zs
+
     def summary(self):
         s = self.stats
         return (f"{self.backend}: {s['systems']} systems, {s['factorizations']} factorizations, "
@@ -344,14 +371,15 @@ class LinearSolver:
         t0 = time.perf_counter()
         self._scale = self._pat.ruiz(A.data)
         As, bs = self._scaled(A, b, self._scale)
-        if self.backend == "superlu":
-            self._prec = dict(lu=self._superlu(As))
-            y = self._prec["lu"].solve(bs)
-        elif self.backend == "umfpack":
-            self._prec = dict(lu=self._umfpack(As))
-            y = self._prec["lu"].solve(bs)
+        if self.backend in ("superlu", "umfpack"):
+            lu = self._superlu(As) if self.backend == "superlu" else self._umfpack(As)
+            y = lu.solve(bs)
+            # exact now; reused (lagged) as GMRES preconditioner it is two-level
+            self._prec = dict(lu=lu if self._coarse is None else _TwoLevel(lu.solve, *self._coarse_scaled(As)))
         elif self.backend == "scipy_ilu":
             ilu = spla.spilu(As.tocsc(), fill_factor=self.ilu_fill, drop_tol=1e-6)
+            if self._coarse is not None:
+                ilu = _TwoLevel(ilu.solve, *self._coarse_scaled(As))
             self._prec = dict(lu=ilu)
             y, ok, its = gmres_right(As, bs, ilu.solve, rtol, self.max_krylov_ilu)
             if not ok:
@@ -447,6 +475,8 @@ class LinearSolver:
                 else kept["P"].setValuesCSR(*self._petsc_csr(As))
             kept["P"].assemble()
             kept["ksp"].setOperators(kept["P"], kept["P"])
+            if kept["two_level"] is not None:
+                self._petsc_two_level(kept, As)
             kept["ksp"].setUp()
             return kept
         M = self._petsc_mat(As)
@@ -462,13 +492,33 @@ class LinearSolver:
         if self.backend == "petsc_lu":
             pc.setType("lu")
             pc.setFactorSolverType("mumps")
-        else:
+        elif self._coarse is None:
             pc.setType("ilu")
             pc.setFactorLevels(self.ilu_levels)
             pc.setFactorOrdering("rcm")
+        else:
+            ilu = PETSc.PC().create(comm=PETSc.COMM_SELF)
+            ilu.setType("ilu")
+            ilu.setFactorLevels(self.ilu_levels)
+            ilu.setFactorOrdering("rcm")
+            pc.setType("python")
+            pc.setPythonContext(_PetscTwoLevel(ilu, As.shape[0]))
+        self._ksp_kept = dict(ksp=ksp, P=M, two_level=pc.getPythonContext() if self._coarse is not None
+                              and self.backend == "petsc_ilu" else None)
+        if self._ksp_kept["two_level"] is not None:
+            self._petsc_two_level(self._ksp_kept, As)
         ksp.setUp()
-        self._ksp_kept = dict(ksp=ksp, P=M)
         return self._ksp_kept
+
+    def _petsc_two_level(self, kept, As):
+        """(Re)factor the ILU inside the two-level preconditioner and refresh
+        its coarse space for this factorization's matrix and scaling."""
+        ctx = kept["two_level"]
+        ctx.ilu.setOperators(kept["P"], kept["P"])
+        ctx.ilu.setUp()
+        Zs, AZs = self._coarse_scaled(As)
+        perm = self._pat.block_map(self.block_size)[0] if self._use_blocks() else None
+        ctx.set(Zs if perm is None else Zs[perm], AZs if perm is None else AZs[perm])
 
     def _petsc_solve(self, As, bs, rtol, reuse, maxit=None):
         ksp = self._prec["ksp"]
@@ -490,6 +540,53 @@ class LinearSolver:
             y = out
         ok = ksp.getConvergedReason() > 0 and np.all(np.isfinite(y))
         return y, ksp.getIterationNumber(), ok
+
+
+class _TwoLevel:
+    """Multiplicative two-level preconditioner: Galerkin correction on
+    span(Z), then the fine preconditioner on what is left -
+    y = Z E^-1 Z^T v,  y += M^-1 (v - A y),  E = Z^T A Z. A Z is formed
+    once per factorization, so an application costs one fine solve and
+    two thin (n x k) products, no extra matrix-vector product."""
+
+    def __init__(self, fine, Z, AZ):
+        self.fine = fine
+        self.set(Z, AZ)
+
+    def set(self, Z, AZ):
+        self.Z, self.AZ = Z, AZ
+        self.Einv = np.linalg.pinv(Z.T @ AZ)   # pinv: a degenerate space must not break a solve
+
+    def solve(self, v):
+        w = self.Einv @ (self.Z.T @ v)
+        return self.Z @ w + self.fine(v - self.AZ @ w)
+
+
+class _PetscTwoLevel:
+    """_TwoLevel as a PETSc python PC around a PETSc ILU PC, working in
+    place on PETSc vectors: Z and A Z live on the coarse space's support
+    only (the S/D islands), so beyond the ILU apply an application is one
+    vector copy (in C) and a few support-sized updates."""
+
+    def __init__(self, ilu, n):
+        self.ilu = ilu
+        self._r = PETSc.Vec().createSeq(n, comm=PETSc.COMM_SELF)
+
+    def set(self, Z, AZ):
+        self.zi = np.flatnonzero(np.any(Z != 0.0, axis=1))
+        self.ai = np.flatnonzero(np.any(AZ != 0.0, axis=1))
+        self.Zt = np.ascontiguousarray(Z[self.zi].T)
+        self.AZ = np.ascontiguousarray(AZ[self.ai])
+        self.Einv = np.linalg.pinv(Z.T @ AZ)   # pinv: a degenerate space must not break a solve
+
+    def apply(self, pc, x, y):
+        w = self.Einv @ (self.Zt @ x.getArray(readonly=True)[self.zi])
+        x.copy(self._r)
+        with self._r as r:
+            r[self.ai] -= self.AZ @ w
+        self.ilu.apply(self._r, y)
+        with y as ya:
+            ya[self.zi] += w @ self.Zt
 
 
 def gmres_right(A, b, prec_solve, rtol, maxit):

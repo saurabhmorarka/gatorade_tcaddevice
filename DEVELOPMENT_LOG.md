@@ -5778,3 +5778,47 @@ implant) and etch the TiN into the S/D epi for more area.
 - Figure: labels replaced by marker shape (metal) + color (model) legend.
 - `TestSchottky1D.test_nisi_pmos_leaning`: transfer check, NMOS/PMOS
   ordering vs TiN, golden rho_c. README Study A table, findings, sources.
+
+## 65. Schottky runtime: coarse correction for the contact islands
+
+Profiled the planar 3D I-V (`fab.profile_iv`, new `--ohmic` switch) and
+compared the dumped Newton systems offline:
+
+- Same Newton iterations, same sparsity pattern (+1% nonzeros), same
+  ILU(2) factorization time (163 vs 161 ms). The difference is GMRES:
+  60 vs 40 iterations per fresh solve, for every ordering (rcm, natural,
+  nd, qmd) and ILU(1)/ILU(2). (`t_factor` in the solver stats includes the
+  first solve, which is why it looked like slower factorizations.)
+- Pinning the released contact rows of one field at a time: psi or phip
+  pinned -> still 60, phin (the majority level) pinned -> 40. Cause: the
+  n+ S/D island is tied to the metal only through the contact
+  conductance (~490 Ohm per contact) - far below its own - so a uniform
+  phin shift over the island is a near-null direction. ILU is local and
+  cannot represent it; GMRES has to find it.
+- Coarse space test: the exact modes (A^-1 on the contact rows) 60 -> 44
+  iterations; a contact-surface indicator 60 (no help); the island
+  indicator (majority type, |Cdop| > 1e18, connected to the contact) in
+  the SCALED unknowns (divide by the Ruiz column scale) 60 -> 47; psi+phin+
+  phip shift the same as phin alone. PETSc dgmres: no change (deflates only
+  at restarts, none happen).
+
+Implemented:
+- `core/linsolve.py`: `LinearSolver.set_coarse(Z)` - two-level
+  multiplicative preconditioner y = Z E^-1 Z^T v, y += M^-1 (v - A Z w),
+  E = Z^T A Z (pinv), A Z formed once per factorization. PETSc: a python
+  PC around the ILU PC, working in place on the islands' support (a dense
+  numpy version cost ~2 ms per iteration and ate the whole gain). Also on
+  scipy_ilu and on the lagged direct LU. Without a coarse space nothing
+  changes.
+- `contacts/subgrid.py`: `coarse_space()` (one column per distinct contact
+  island; contacts sharing one island give one column - the tiny 3D test
+  device made E singular before that dedupe), `COARSE_DOPING = 1e18`.
+- `newton_solve_2d`: passes the coarse space (None without Schottky).
+- `ETA_MAX_SCHOTTKY` 1e-9 -> 1e-7, and back to ETA_MAX after a full step.
+  The 1e-9 tightening after damped steps did cost time in 3D (contrary to
+  the note in entry 62): no cap 36.7 s, 1e-9 44.1 s. With the coarse
+  correction the TiN slabs converge at 1e-7 (still stall at 1e-6).
+
+Planar 3D, drain ramp + Id-Vg walk (one process): ohmic 32.6 s; Schottky
+54.0 s before, 39.8 s now. Drain currents identical to 7 digits. Tests:
+conda Schottky + octree + 3D examples pass, no golden moved.

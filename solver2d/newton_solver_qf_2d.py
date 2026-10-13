@@ -58,12 +58,12 @@ RES_ACCEPT = 1e-4       # ...and |F|_inf is below this (see _run_newton)
 ETA_MAX = 1e-4          # loosest inexact-Newton linear-solve tolerance (see _run_newton);
                         # measured on the 2D MOSFET: 1e-2 doubles the Newton iterations,
                         # 1e-6 spends it back in Krylov iterations/refactorizations
-ETA_MAX_SCHOTTKY = 1e-9  # the cap once a step had to be damped, with sub-grid Schottky contacts:
-                         # a bias step puts a large residual on the contact nodes' sink rows, and
-                         # a solve relative to that left the rest too inexact - quasi-1D TiN slabs
-                         # (n+ 7e20, p+ 5e20, ~1e7 A/cm^2) stalled at 1e-4 and 1e-6 and converged in
-                         # 4-6 iterations at 1e-9. Only after a damped step: on the 3D planar device
-                         # the default cap converges as fast as with ohmic contacts (DEVELOPMENT_LOG 62)
+ETA_MAX_SCHOTTKY = 1e-7  # the cap after a damped step, with sub-grid Schottky contacts (back to ETA_MAX
+                         # after a full step): a bias step puts a large residual on the contact nodes'
+                         # sink rows, and a solve relative to that leaves the rest too inexact -
+                         # quasi-1D TiN slabs (n+ 7e20, p+ 5e20, ~1e7 A/cm^2) stall at 1e-6 and converge
+                         # at 1e-7 (with the linear solver's coarse correction, DEVELOPMENT_LOG 65; 1e-9
+                         # before it). Planar 3D I-V: 1e-9 / 1e-7 / no cap 44 / 40 / 37 s, same currents
 QUAD_PREDICT_MAX = 1e-3  # V - only trust the quadratic-convergence prediction below this update
 RES_PREDICT_MAX = 1e-1   # |F|_inf sanity bound for the prediction exit (see _run_newton)
 QF_DENSITY_REF = 1.0     # cm^-3 - quasi-Fermi updates are weighted by n/(n+ref) in the prediction exit
@@ -1221,6 +1221,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         lin = default_linear_solver(mesh)
     else:
         lin = linear_solver
+    if lin is not None and hasattr(lin, "set_coarse"):
+        # Schottky S/D islands are near-null directions for ILU (see
+        # contacts/subgrid.py coarse_space); none otherwise.
+        lin.set_coarse(schottky.coarse_space_cached() if schottky is not None else None)
 
     state = {}
     # Quasi-Fermi box (maximum principle). Without generation, the solution's
@@ -1364,8 +1368,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                 step *= 0.5
             if accepted:
                 U, F = U_try, F_try
-            if schottky is not None and step < 1.0:
-                state["eta_max"] = ETA_MAX_SCHOTTKY
+            if schottky is not None:
+                state["eta_max"] = ETA_MAX_SCHOTTKY if step < 1.0 else ETA_MAX
             upd = step * max_dpsi if accepted else 0.0
             upd_all = step * max(max_dpsi, max_dqf) if accepted else 0.0
             res_norm = np.max(np.abs(F))
