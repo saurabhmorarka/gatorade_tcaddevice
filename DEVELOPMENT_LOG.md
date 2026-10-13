@@ -5822,3 +5822,20 @@ Implemented:
 Planar 3D, drain ramp + Id-Vg walk (one process): ohmic 32.6 s; Schottky
 54.0 s before, 39.8 s now. Drain currents identical to 7 digits. Tests:
 conda Schottky + octree + 3D examples pass, no golden moved.
+
+## 66. Testsuite: parallel runner, quick tier (in progress)
+
+- `testsuite/run.py`: one process per test class (per test for classes
+  over SPLIT_S = 10 s in `testsuite/timings.json`, written by `--record`),
+  longest first, performance cores, single-threaded BLAS per job.
+  `-k` filter. venv suite: 216 s serial -> 80 s wall, all pass.
+- `test_2d_examples`: quick by default - MOSFET and BTBT run every third
+  bias point (reduced config copy), checked against the full-sweep goldens
+  (points must be golden points, row count fixed); TCAD_FULL_TESTS=1 runs
+  the full sweeps. Measured: no gain yet - BTBT quick 40 s = full (Newton
+  its 2.4x fewer, but each curve has a fixed 10-28 s cost: the next target),
+  MOSFET 7.5 vs 7.8 s.
+- `test_schottky` slab: tables built once per contact (temporary empty
+  cache), not once per mesh.
+- timings.json not recorded yet (the --record run hit the BTBT row count,
+  since fixed: 28 idvg rows - the driver adds Vgs = 0).

@@ -27,12 +27,19 @@ structure and gets the same 1e-13 A/um floor: its ~8e-15 A/um off-state
 drain current was measured to differ by ~2e-16 A/um between the pip venv
 (Accelerate BLAS) and the conda env (OpenBLAS) - the same round-off floor.
 
+Quick by default: the two long drivers (MOSFET, BTBT) run every third
+bias point of their sweeps (a reduced copy of their config) and those
+points are compared against the full-sweep golden files - a converged bias
+point does not depend on the continuation path to it, within each
+example's rtol. TCAD_FULL_TESTS=1 runs and compares the full sweeps.
+
 Run with:      python3 testsuite/test_2d_examples.py [-v]
 Capture with:  python3 testsuite/test_2d_examples.py --capture [name ...]
 (capture only after independently verifying the new numbers - see README.md)
 """
 import csv
 import json
+import yaml
 import os
 import subprocess
 import sys
@@ -51,20 +58,37 @@ EXAMPLES_2D = {
     "mos_2d": dict(cmd=["main2d_mos_sweep.py"], csvs=["cv_sweep.csv"],
                    keys=["VG_V"], values=["Qs_C_cm2", "C_lf_F_cm2"], rtol=1e-3, floor=1e-14),
     "mosfet_2d": dict(cmd=["main2d_mosfet_sweep.py"], csvs=["ids_vgs.csv", "ids_vds.csv"],
-                      keys=["Vds_V", "Vgs_V"], values=["Id_A_per_um"], rtol=1e-3, floor=1e-13),
+                      keys=["Vds_V", "Vgs_V"], values=["Id_A_per_um"], rtol=1e-3, floor=1e-13,
+                      quick=dict(config="configs/input_mosfet_2d.yaml",
+                                 set={"bias": dict(vgs_step_V=0.15, vds_step_V=0.3)},
+                                 rows={"ids_vgs.csv": 26, "ids_vds.csv": 24})),
     "btbt_2d": dict(cmd=["-m", "btbt.main_btbt2d_sweep"], csvs=["idvg_btbt.csv", "idvsub_btbt.csv"],
                     keys=["model", "bias_V"],
                     values=["drain_A_per_um", "body_A_per_um", "source_A_per_um"],
-                    rtol=2e-2, floor=1e-13),
+                    rtol=2e-2, floor=1e-13,
+                    quick=dict(config="configs/input_mosfet_2d_btbt.yaml",
+                               set={"btbt": dict(vgs_step_V=0.6, vsub_step_V=0.6)},
+                               rows={"idvg_btbt.csv": 28, "idvsub_btbt.csv": 24})),
 }
+FULL = os.environ.get("TCAD_FULL_TESTS", "") not in ("", "0")
 
 
-def run_example(name):
-    """Run one 2D driver into a temp dir; return ({csv: [row dicts]}, wall seconds)."""
+def run_example(name, quick=False):
+    """Run one 2D driver into a temp dir; return ({csv: [row dicts]}, wall seconds).
+    quick: the example's reduced sweep (spec["quick"]), if it has one."""
     spec = EXAMPLES_2D[name]
     with tempfile.TemporaryDirectory() as tmp:
+        cfg = []
+        if quick and "quick" in spec:
+            with open(os.path.join(TCAD1D_ROOT, spec["quick"]["config"])) as f:
+                c = yaml.safe_load(f)
+            for section, values in spec["quick"]["set"].items():
+                c[section].update(values)
+            cfg = [os.path.join(tmp, "quick.yaml")]
+            with open(cfg[0], "w") as f:
+                yaml.safe_dump(c, f)
         t0 = time.perf_counter()
-        proc = subprocess.run([sys.executable, *spec["cmd"], "--out-dir", tmp],
+        proc = subprocess.run([sys.executable, *spec["cmd"], *cfg, "--out-dir", tmp],
                               cwd=TCAD1D_ROOT, capture_output=True, text=True)
         wall = time.perf_counter() - t0
         if proc.returncode != 0:
@@ -89,11 +113,21 @@ def extract(name, csvs):
             for fname, rows in csvs.items()}
 
 
-def compare(name, golden, new):
-    """List of human-readable mismatch strings (empty = pass)."""
+def compare(name, golden, new, quick=False):
+    """List of human-readable mismatch strings (empty = pass). quick: the
+    new rows are a reduced sweep - each must be a golden row, and their
+    number must be the expected one (a point that failed to converge is
+    missing from the CSV)."""
     spec = EXAMPLES_2D[name]
     rtol, floor = spec["rtol"], spec["floor"]
     bad = []
+    if quick:
+        for fname, nrows in new.items():
+            want = spec["quick"]["rows"][fname]
+            if len(nrows) != want:
+                bad.append(f"{fname}: {len(nrows)} rows, expected {want} (point did not converge?)")
+            bad += [f"{fname} [{k}]: not a golden bias point" for k in nrows if k not in golden[fname]]
+        golden = {f: {k: v for k, v in g.items() if k in new.get(f, {})} for f, g in golden.items()}
     for fname, grows in golden.items():
         nrows = new.get(fname, {})
         for key, gvals in grows.items():
@@ -131,9 +165,10 @@ def _make_test(name):
             self.skipTest(f"no golden file {path} (run with --capture {name})")
         with open(path) as f:
             golden = json.load(f)
-        csvs, wall = run_example(name)
-        print(f"\n  {name}: {wall:.1f}s wall-clock", end="")
-        bad = compare(name, golden, extract(name, csvs))
+        quick = not FULL and "quick" in EXAMPLES_2D[name]
+        csvs, wall = run_example(name, quick)
+        print(f"\n  {name}{' (quick)' if quick else ''}: {wall:.1f}s wall-clock", end="")
+        bad = compare(name, golden, extract(name, csvs), quick)
         self.assertFalse(bad, f"{len(bad)} mismatch(es):\n  " + "\n  ".join(bad[:30]))
     return test
 
