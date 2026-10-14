@@ -3,7 +3,11 @@
 Status: APPROVED 2026-10-13 with the recommended answers to Q1-Q4 (quantum
 box with a lattice knob; Boltzmann default, Fermi-Dirac switch; inversion
 carrier only; off by default until P3). Branch `quantum-sp`.
-P1 (1D) DONE: DEVELOPMENT_LOG 69, docs/quantum.md. Next: P2 (2D MOSFET).
+P1 (1D) DONE: DEVELOPMENT_LOG 69, docs/quantum.md. P2 (2D) and P3 (3D fab
+planar, lattice study) DONE, plus the FinFET/nanosheet box (symmetry-plane
+mirror, corner rule) and the in-Newton coupling: DEVELOPMENT_LOG 70. Next:
+P4 (2D cross-section slices for fin/sheet corners), Fermi-Dirac in 3D,
+holes for PMOS.
 
 ## 1. Goal
 

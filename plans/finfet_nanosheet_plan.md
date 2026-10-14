@@ -1,6 +1,12 @@
 # FinFET and nanosheet (GAA) flows: plan
 
-Status: DRAFT for the user's review (2026-10-13). Nothing is implemented.
+Status: first pass IMPLEMENTED 2026-10-14 (DEVELOPMENT_LOG 70,
+docs/finfet_nanosheet.md). The user set the dimensions: fin 50 nm tall and
+5 nm wide; 3 sheets 5 nm thick, 25 nm wide; CPP ~48 nm, Lg ~15 nm (2 nm
+node); the rest from the literature. Q1-Q5 below were answered by
+default: bulk FinFET, IL + HfO2 (lumped HKstack, EOT 0.85 nm), rounded
+conformal epi, single fin / stack. The draft numbers below are the
+original proposal; the implemented ones are in fab/templates.py.
 Roadmap item 5, pulled forward as a lead-in while the Schrodinger-Poisson
 channel charge (plans/quantum_plan.md) is built: both devices need it for
 volume inversion. The user's request: own fab steps per device; analytic

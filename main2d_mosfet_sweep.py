@@ -119,7 +119,7 @@ H_INIT = 0.1            # V - first continuation step (a full jump to a far targ
 
 def solve_mosfet(mesh, mat, dev, Cdop_substrate, Vgs, Vds, psi_init=None, phin_init=None, phip_init=None,
                   verbose=False, maxiter=SWEEP_MAXITER, cold_retry=True, velocity_saturation=False,
-                  vsat_fallback=True, schottky=None, quantum=None):
+                  vsat_fallback=True, schottky=None, quantum=None, quantum_update=None, quantum_tol=3e-3):
     psi_bc, phin_bc, phip_bc = gate_bc(dev, mat, Cdop_substrate, Vgs)
     bias_by_contact = {"source": 0.0, "drain": Vds, "gate": Vgs, "body": 0.0}
     return newton_solve_2d(
@@ -128,12 +128,14 @@ def solve_mosfet(mesh, mat, dev, Cdop_substrate, Vgs, Vds, psi_init=None, phin_i
         psi_bc_override={"gate": psi_bc}, phin_bc_override={"gate": phin_bc},
         phip_bc_override={"gate": phip_bc}, verbose=verbose, maxiter=maxiter,
         cold_retry=cold_retry, velocity_saturation=velocity_saturation, vsat_fallback=vsat_fallback,
-        schottky=schottky, quantum=quantum,
+        schottky=schottky, quantum=quantum, quantum_update=quantum_update, quantum_tol=quantum_tol,
     )
 
 
 def _converged(r):
-    return r.get("converged", r["res_norm"] < 1e-4)
+    # not r.get("converged", r["res_norm"] < 1e-4): the default is evaluated
+    # eagerly, and an early-exit result (a linear-solver breakdown) has no res_norm
+    return r["converged"] if "converged" in r else r["res_norm"] < 1e-4
 
 
 _FIELDS = ("psi", "phin", "phip")

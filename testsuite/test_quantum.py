@@ -162,12 +162,12 @@ class TestDeviceQuantum2D(unittest.TestCase):
         qd = DeviceQuantum(m, MAT)
         self.assertEqual((len(qd.lines), qd.carrier), (6, "n"))
 
-        def solve(VG, quantum=None, g=None):
+        def solve(VG, quantum=None, g=None, **kw):
             pb, nb, qb = gate_bc(dev, MAT, -Na, VG)
             g = g or {}
             return newton_solve_2d(m, MAT, {"gate": VG, "body": 0.0}, psi_init=g.get("psi"), phin_init=g.get("phin"),
                                    phip_init=g.get("phip"), psi_bc_override={"gate": pb},
-                                   phin_bc_override={"gate": nb}, phip_bc_override={"gate": qb}, quantum=quantum)
+                                   phin_bc_override={"gate": nb}, phip_bc_override={"gate": qb}, quantum=quantum, **kw)
         ox = y < 0
         ym = 0.5 * (y[1:] + y[:-1])
         g1 = dict(x=y, Cdop=np.where(ox, 0, -Na), eps_edge=np.where(ym < 0, dev.eps_ox, MAT.eps),
@@ -178,8 +178,10 @@ class TestDeviceQuantum2D(unittest.TestCase):
             warnings.simplefilter("ignore")
             for VG in (1.0, 2.0):
                 st = solve(VG, None, st)
-                rq = qd.solve(lambda sh, g: solve(VG, sh, g), st)
+                rq = qd.solve(lambda sh, g, **kw: solve(VG, sh, g, **kw), st)
                 self.assertTrue(rq["converged"])
+                ro = qd.solve_outer(lambda sh, g: solve(VG, sh, g), st)       # the outer loop: same answer
+                self.assertLess(np.max(np.abs(rq["psi"] - ro["psi"])), 3e-3)
                 N2 = np.sum(rq["n"][col] * m.cv_area_semi[col] / 2e-7)
                 N1 = solve_mos(g1, MAT, dev, -Na, VG, QuantumConfig(n_states=10))["Ninv"]
                 self.assertAlmostEqual(N2 / N1, 1.0, delta=0.07 if VG < 1.5 else 0.01)
@@ -204,22 +206,66 @@ class TestDeviceQuantum2D(unittest.TestCase):
         cd = np.where((Y >= 0) & (Y <= tb), np.where(X <= 4e-7, 1e20, -1e15), 0.0)
         m = build_cartesian_mesh([x, y], cm, mats, cd, MAT, face_contacts={"source": (0, "min")})
         qd = DeviceQuantum(m, MAT)
-        self.assertEqual(len(qd.lines), 19)
+        self.assertEqual(len(qd.lines), 16)          # 19 columns under the gate, 3 of them in the n+ source
         self.assertTrue(all(L.wall_end for L in qd.lines))
 
-        def solve(VG, quantum=None, g=None):
+        def solve(VG, quantum=None, g=None, **kw):
             g = g or {}
             return newton_solve_2d(m, MAT, {"gate": VG, "source": 0.0}, psi_init=g.get("psi"),
                                    phin_init=g.get("phin"), phip_init=g.get("phip"), psi_bc_override={"gate": VG},
-                                   phin_bc_override={"gate": VG}, phip_bc_override={"gate": VG}, quantum=quantum)
+                                   phin_bc_override={"gate": VG}, phip_bc_override={"gate": VG}, quantum=quantum, **kw)
         st = None
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             for VG in (0.0, 0.3, 0.6):
                 st = solve(VG, None, st)
-            rq = qd.solve(lambda sh, g: solve(0.6, sh, g), st)
+            rq = qd.solve(lambda sh, g, **kw: solve(0.6, sh, g, **kw), st)
         col = np.flatnonzero((np.abs(m.points[:, 0] - 15e-7) < 1e-12) & ~m.is_insulator)
         yy = m.points[col, 1]
         self.assertTrue(rq["converged"])
         self.assertAlmostEqual(yy[np.argmax(rq["n"][col])], tb / 2, delta=0.3e-7)     # classical: at a wall
         self.assertGreater(st["n"][col][np.argmin(np.abs(yy))], st["n"][col][np.argmin(np.abs(yy - tb / 2))])
+
+    def test_half_body_mirror(self):
+        """A half-width solve (the body ends on a symmetry plane) gives the
+        full double gate's density: the line runs over the mirrored body."""
+        import warnings
+        from mesh3d.cartesian import build_cartesian_mesh
+        from solver2d.newton_solver_qf_2d import newton_solve_2d
+        from quantum.device import DeviceQuantum
+        tb = 5e-7
+        x = np.linspace(0, 20e-7, 21)
+        out = {}
+        for half in (False, True):
+            yb = np.linspace(0.25e-7, tb / 2 if half else tb, 10 if half else 20)
+            y = np.concatenate([[-2e-7], np.linspace(-1.5e-7, 0, 4), yb] +
+                               ([] if half else [np.linspace(tb + 0.5e-7, tb + 1.5e-7, 3), [tb + 2e-7]]))
+            xm, ym = 0.5 * (x[1:] + x[:-1])[:, None], 0.5 * (y[1:] + y[:-1])[None, :]
+            cm = np.where((ym < -1.5e-7) | (ym > tb + 1.5e-7), 2, np.where((ym < 0) | (ym > tb), 1, 0)) * np.ones_like(xm, int)
+            cm = np.where((cm == 2) & (xm < 2e-7), -1, cm)
+            mats = [dict(name="si", kind="semi"), dict(name="ox", kind="insulator", eps_r=3.9),
+                    dict(name="g", kind="conductor", contact="gate")]
+            X, Y = np.meshgrid(x, y, indexing="ij")
+            cd = np.where((Y >= 0) & (Y <= tb), np.where(X <= 4e-7, 1e20, -1e15), 0.0)
+            m = build_cartesian_mesh([x, y], cm, mats, cd, MAT, face_contacts={"source": (0, "min")})
+            qd = DeviceQuantum(m, MAT)
+            self.assertTrue(all(L.wall_end for L in qd.lines))
+            self.assertEqual(all(L.mirror for L in qd.lines), half)
+
+            def solve(VG, quantum=None, g=None, **kw):
+                g = g or {}
+                return newton_solve_2d(m, MAT, {"gate": VG, "source": 0.0}, psi_init=g.get("psi"),
+                                       phin_init=g.get("phin"), phip_init=g.get("phip"), psi_bc_override={"gate": VG},
+                                       phin_bc_override={"gate": VG}, phip_bc_override={"gate": VG},
+                                       quantum=quantum, **kw)
+            st = None
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                for VG in (0.0, 0.3, 0.6):
+                    st = solve(VG, None, st)
+                rq = qd.solve(lambda sh, g, **kw: solve(0.6, sh, g, **kw), st)
+            self.assertTrue(rq["converged"])
+            col = np.flatnonzero((np.abs(m.points[:, 0] - 15e-7) < 1e-12) & ~m.is_insulator & (m.points[:, 1] <= tb / 2 + 1e-12))
+            o = np.argsort(m.points[col, 1])
+            out[half] = rq["n"][col][o]
+        self.assertLess(np.max(np.abs(out[True] / out[False] - 1)), 0.02)

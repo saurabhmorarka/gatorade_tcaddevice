@@ -33,7 +33,7 @@ HIDDEN_FIELDS = {"region_id", "material_id", "contact_id", "vtkOriginalPointIds"
 LEVELSET_PREFIX = "ls_"
 MATERIAL_FIELD = "Material"
 MATERIAL_COLORS = {"Si": "#9fb4cc", "SiO2": "#f4b8c8", "Poly": "#c0504d", "SiN": "#86c48a", "Metal": "#e2b33c",
-                   "SiGe": "#b393d6", "Ge": "#6f8fb5", "HfO2": "#f2a25c", "TiN": "#8c8c8c", "W": "#a0a0b0"}
+                   "SiGe": "#b393d6", "Ge": "#6f8fb5", "HfO2": "#f2a25c", "HKstack": "#f2a25c", "TiN": "#8c8c8c", "W": "#a0a0b0"}
 _EXTRA_COLORS = ("#7fc7c2", "#d98cb3", "#c9b27c", "#8fa3d9", "#b5c96f")
 
 

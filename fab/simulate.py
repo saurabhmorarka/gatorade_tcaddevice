@@ -176,9 +176,12 @@ def build_device(cfg, top_nm=None, half_z=True, log=print, grid=None, mesher="ca
     st, _ = flow.build(cfg, log=lambda *a: None)
     fl = flow.expand(cfg)
     p = resolve_params({k: v for k, v in fl["params"].items() if v is not None})
+    grid = dict(grid or {})
+    if p.get("mesh_h_fine") is not None:          # the template's own fine spacing (a fin: fine z)
+        grid.setdefault("h_fine", tuple(float(v) for v in p["mesh_h_fine"]))
     if mesher == "octree":
-        return _build_device_octree(st, p, half_z, log, grid or {}, t0)
-    axes_nm = device_grid(st, top_nm=top_nm, half_z=half_z, **(grid or {}))
+        return _build_device_octree(st, p, half_z, log, grid, t0)
+    axes_nm = device_grid(st, top_nm=top_nm, half_z=half_z, **grid)
     lab, net = sample_structure(st, axes_nm)
     mats = device_materials(st)
     mat = _resolve_material_block({})
@@ -293,7 +296,9 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None):
                                schottky=d["schottky"])
         if quantum is not None:
             from quantum.device import DeviceQuantum
-            d["quantum"] = DeviceQuantum(d["mesh"], d["mat"], **quantum)
+            kw = dict(quantum)
+            kw.setdefault("carrier", "p" if d["params"].get("type") == "pmos" else "n")
+            d["quantum"] = DeviceQuantum(d["mesh"], d["mat"], **kw)
             d["eq"] = _solver_at(d, 0.0, None)(0.0, d["eq"])
         _CTX[key] = d
     return _CTX[key]
@@ -310,24 +315,50 @@ def drain_current(d, r):
     return I * (2.0 if d["half_z"] else 1.0)
 
 
-def _solver_at(d, Vgs, Vds):
+def _ramp(d, vds):
+    """The drain ramps at Vgs = 0 to every Vds in `vds` from equilibrium.
+    With a quantum box the ramp's intermediate steps hold Lambda at its
+    equilibrium value (no corrector: off-state Lambda barely moves with the
+    drain, and those states are not outputs) and only each target is solved
+    Schrodinger-Poisson, from the frozen-Lambda state."""
+    from main2d_mosfet_sweep import continuation
+    qd = d.get("quantum")
+    if qd is None:
+        return continuation(_solver_at(d, 0.0, None), 0.0, d["eq"], sorted(vds))
+    frozen = _solver_at(d, 0.0, None, frozen=True)
+    ramps, it, last = continuation(frozen, 0.0, d["eq"], sorted(vds))
+    solve = _solver_at(d, 0.0, None)
+    out = {}
+    for v in sorted(ramps):
+        r = solve(v, ramps[v])
+        it += r["iters"]
+        if r.get("converged"):
+            out[v] = r
+    return out, it, last
+
+
+def _solver_at(d, Vgs, Vds, frozen=False, start=None):
     """solve(bias, guess) along a gate (Vgs=None) or drain (Vds=None) walk.
     With a quantum box, every point is a Schrodinger-Poisson loop
     (quantum/device.py) started from the last converged point's Lambda."""
     from main2d_mosfet_sweep import solve_mosfet
     mesh, mat, dev, Cs = d["mesh"], d["mat"], d["dev"], d["Cs"]
 
-    def dd(pp, gss, quantum=None):
+    def dd(pp, gss, quantum=None, **kw):
         return solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
                             psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
                             cold_retry=False, velocity_saturation=True, vsat_fallback=False,
-                            schottky=d.get("schottky"), quantum=quantum)
+                            schottky=d.get("schottky"), quantum=quantum, **kw)
     qd = d.get("quantum")
     if qd is None:
         return dd
+    if frozen:                                 # Lambda held at equilibrium (see _ramp)
+        sh = qd._shift(d["eq"]["lam"])
+        return lambda pp, gss: dd(pp, gss, sh)
     hist = []                                  # (bias, Lambda) of the last two converged points
-    if "eq" in d and d["eq"].get("lam") is not None:
-        hist.append((0.0, d["eq"]["lam"]))
+    start = start if start is not None else d.get("eq")
+    if start is not None and start.get("lam") is not None:     # the walk's first point (bias 0)
+        hist.append((0.0, start["lam"]))
 
     def solve(pp, gss):
         lam0 = None
@@ -336,7 +367,7 @@ def _solver_at(d, Vgs, Vds):
             lam0 = l1 + np.clip((pp - p1) / (p1 - p0) * (l1 - l0), -0.05, 0.05)
         elif hist:
             lam0 = hist[-1][1]
-        r = qd.solve(lambda sh, g: dd(pp, g, sh), gss, lam0=lam0)
+        r = qd.solve(lambda sh, g, **kw: dd(pp, g, sh, **kw), gss, lam0=lam0)
         if r.get("converged"):
             hist.append((pp, r["lam"]))
             del hist[:-2]
@@ -378,7 +409,7 @@ def run_curve(task):
     base = d.get("base", {}).get(Vds)
     it0 = 0
     if base is None:
-        ramp, it0, _ = continuation(_solver_at(d, 0.0, None), 0.0, d["eq"], [Vds])
+        ramp, it0, _ = _ramp(d, [Vds])
         if Vds not in ramp:
             return dict(task=task, points={}, entries=[], iters=it0, time_s=time.perf_counter() - t0)
         base = ramp[Vds]
@@ -393,7 +424,7 @@ def run_curve(task):
             pending.append(io.submit(_write_point, task, d, v, r))
         if task.get("include_zero", True):
             on_point(0.0, base)
-        states, it1, _ = continuation(_solver_at(d, None, Vds), 0.0, base, vgs, on_point=on_point,
+        states, it1, _ = continuation(_solver_at(d, None, Vds, start=base), 0.0, base, vgs, on_point=on_point,
                                       **GATE_WALK)
         if task.get("include_zero", True):
             states = {0.0: base, **states}
@@ -555,7 +586,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     _region_info(d)
     log(f"  mesh + equilibrium: {time.perf_counter() - t0:.0f} s")
     # the drain ramps at Vgs = 0 (off: the gentlest place to raise Vds), once
-    ramps, _, _ = continuation(_solver_at(d, 0.0, None), 0.0, d["eq"], sorted(vds))
+    ramps, _, _ = _ramp(d, vds)
     d["base"] = ramps
     log(f"  drain ramps: {time.perf_counter() - t0:.0f} s")
     vgs = list(np.round(np.arange(vgs_step, vgs_max + 1e-9, vgs_step), 6))

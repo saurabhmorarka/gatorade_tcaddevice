@@ -122,6 +122,14 @@ def quantum_potential(line, psi_fine, psi_node, phi_node, carrier, mat, normal=(
     r = q / np.maximum(ncl_V, 1e-300)
     lam = -Vt * np.log(np.maximum(line.w * r + 1.0 - line.w, 1e-300))
     lam = np.clip(lam, *LAMBDA_CLIP)
+    # the point value along the whole line (n_QM / n_cl at each fine point,
+    # same taper): Lambda for DD nodes off the line's own column
+    w_f = getattr(line, "w_fine", None)
+    lam_fine = None
+    if w_f is not None and statistics == "boltzmann":
+        with np.errstate(over="ignore"):
+            rf = np.where(line.is_semi, nq / (Nc * np.exp(-(U - U_ref) / Vt)), 1.0)
+        lam_fine = np.clip(-Vt * np.log(np.maximum(w_f * rf + 1.0 - w_f, 1e-300)), *LAMBDA_CLIP)
     return lam, dict(idx=line.dd_idx, q=q * scale, n_fine=nq * (mat.ni / Nc * np.exp((mu_node[0] - U_ref) / Vt)
                                                   if statistics == "boltzmann" else 1.0),
-                     levels=[(v, E + U_ref) for v, E, _ in levels], U_ref=U_ref)
+                     levels=[(v, E + U_ref) for v, E, _ in levels], U_ref=U_ref, lam_fine=lam_fine)

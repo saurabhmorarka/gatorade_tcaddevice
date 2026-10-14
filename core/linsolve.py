@@ -124,6 +124,14 @@ def resolve_backend(backend, n):
     return backend
 
 
+
+def _coarse_inverse(E):
+    """pinv of the deflation space's coarse matrix: a degenerate space must
+    not break a solve, and a non-finite one (a diverging Newton iterate)
+    drops the coarse correction - the Newton step then fails on its own
+    residual instead of on an SVD error."""
+    return np.linalg.pinv(E) if np.all(np.isfinite(E)) else np.zeros(E.T.shape)
+
 class _Pattern:
     """Cached index structure of one CSR sparsity pattern: row id of every
     stored entry, and the permutation that visits entries column by column
@@ -555,7 +563,7 @@ class _TwoLevel:
 
     def set(self, Z, AZ):
         self.Z, self.AZ = Z, AZ
-        self.Einv = np.linalg.pinv(Z.T @ AZ)   # pinv: a degenerate space must not break a solve
+        self.Einv = _coarse_inverse(Z.T @ AZ)
 
     def solve(self, v):
         w = self.Einv @ (self.Z.T @ v)
@@ -577,7 +585,7 @@ class _PetscTwoLevel:
         self.ai = np.flatnonzero(np.any(AZ != 0.0, axis=1))
         self.Zt = np.ascontiguousarray(Z[self.zi].T)
         self.AZ = np.ascontiguousarray(AZ[self.ai])
-        self.Einv = np.linalg.pinv(Z.T @ AZ)   # pinv: a degenerate space must not break a solve
+        self.Einv = _coarse_inverse(Z.T @ AZ)
 
     def apply(self, pc, x, y):
         w = self.Einv @ (self.Zt @ x.getArray(readonly=True)[self.zi])

@@ -22,7 +22,8 @@ from fab.structure import Grid, Structure
 from fab.templates import TEMPLATES
 
 # step arguments that are numbers/expressions
-NUMERIC = {"thickness", "to_height", "depth", "rp", "sigma", "peak", "dose", "lateral_sigma", "top_height", "conc"}
+NUMERIC = {"thickness", "to_height", "depth", "rp", "sigma", "peak", "dose", "lateral_sigma", "top_height", "conc",
+           "sx", "sy", "sz"}
 
 
 def load(path):
@@ -105,6 +106,8 @@ def run_step(st, step, p):
     elif op == "implant":
         st.implant(a["species"], a["rp"], a["sigma"], peak=a.get("peak"), dose=a.get("dose"),
                    lateral_sigma=a.get("lateral_sigma", 0.0), blocked_by=a.get("blocked_by"), mask=a.get("mask"))
+    elif op == "epi_doping":
+        st.epi_doping(a["species"], a["peak"], a["sx"], a["sy"], sz=a.get("sz"), regions=a["regions"])
     elif op == "dope":
         st.dope(a["species"], a["conc"], regions=a.get("regions"), materials=a.get("materials"))
     else:

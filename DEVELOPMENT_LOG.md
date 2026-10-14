@@ -5964,3 +5964,140 @@ and off by default until 3D is validated. Branch `quantum-sp`.
 - Next: P2 (2D MOSFET, `newton_solve_2d` gets separate n/p shifts), then
   P3 (3D fab planar, lattice-spacing study, reference-run cost).
 
+
+## 70. Schrodinger-Poisson in 3D (P2/P3), FinFET and nanosheet flows
+
+Branch `quantum-sp`. The overnight lattice study (P3), then the runtime
+work the user asked for, then the FinFET and nanosheet templates
+(`plans/finfet_nanosheet_plan.md`; the user's numbers: fin 50 nm tall,
+5 nm wide; 3 sheets 5 nm thick, 25 nm wide; a 2 nm-node CPP of 48 nm and
+Lg 15 nm; the rest from the literature).
+
+**Overnight study (planar, octree, before the fixes below).** Lattice
+spacing 1 / 2 / 4 nm / one centre column: Vt within 1 mV, Ion -0.4 /
++1.0 / +4.9%; the run time hardly moved (107-126 s), so the Newton solves
+were the cost, not the 0.24 s line update. `--quantum-margin 10` crashed
+("SVD did not converge"), see below.
+
+**Coupling inside Newton (speed).**
+- `newton_solve_2d(quantum_update=..., quantum_tol=3e-3)`: the corrector
+  (Lambda from the current psi) runs inside the Newton loop once the
+  update is below QUANTUM_TRIGGER (1e-2 V), so a bias point is one Newton
+  solve, not an outer loop of solves. Converged only when Newton is and
+  Lambda moved < 3 mV. Under-relaxed when it stops contracting.
+  Trigger 1e-3 / 1e-2 / 3e-2: Vds 1 V walk 122 / 110 / 99 iterations.
+- `DeviceQuantum.solve` uses it; `solve_outer` (the old loop) is the
+  reference (a test checks they agree to 3 mV). A non-converged point is
+  returned as is: the continuation halves the step (the old fallback to the
+  outer loop is what looked like a hang on margin10).
+- Drain ramps hold Lambda at its equilibrium value (off-state Lambda hardly
+  moves with the drain; the ramp's states are not outputs) and solve only
+  each target Schrodinger-Poisson (`fab/simulate._ramp`). The gate walk's
+  Lambda predictor starts from the ramp's end state.
+- step control reads the iterations up to the first corrector.
+- Planar full I-V: 111 s (overnight) -> 91 s; classical 74 s.
+
+**Bugs found and fixed in the quantum box (quantum/device.py).**
+1. Interpolated nodes (DD nodes in the box off any line's column: the
+   octree coarsens with depth, so many columns stop after 2-3 nodes) took
+   Lambda only within the line's own node range: everything deeper was
+   classical. Each line now also returns its Lambda profile on its fine
+   grid (`lam_fine`), and those nodes take it at their depth.
+2. Short columns: the line's psi beyond the column's last node was a
+   linear extrapolation of the surface slope (a far too steep well:
+   Lambda 15-50 meV too high there). Now psi comes from the 4 nearest
+   semiconductor nodes around the point (inverse-distance weights).
+3. Interpolated nodes take only Lambda >= 0: deep in the depletion region
+   the subband tail exceeds the vanishing classical density (Lambda down
+   to the -0.5 V clip), and that ratio applied at an STI-corner node with a
+   different potential gave n = 2e20 there (and slowed every walk:
+   Vds 0.05 V walk 85 -> 54 iterations once fixed).
+4. A fin: the side-wall lines' nodes sat in the top surface's footprint
+   and were overwritten by interpolation from the top lines (upper 20 nm
+   of the fin unconfined). Interpolated nodes now exclude nodes of any
+   line; overlaps take the larger Lambda.
+5. `~wall_end` on a Python bool is -1/-2 (an integer index, not a mask):
+   found by the stack test, fixed before it shipped.
+- With 1-4 fixed: planar Ion 1386 -> 1431 uA/um (margin10: 1435 - the
+  gate-edge step the overnight study suspected was this bug).
+
+**Quantum box for fins and sheets (plan section 1.4).**
+- Symmetry plane: a half-width solve cuts the fin/sheet at its centre. A
+  line that ends on a domain face that is not a contact (within 2 x the
+  line depth) runs over the mirrored body, wall to wall, and keeps the
+  real half's charge. Test: the half body gives the full double gate's
+  density within 2%.
+- Corners: a node on two lines takes the larger Lambda.
+- No lines where the interface is S/D (doped like the inversion layer
+  above `sd_doping`, 1e19), and `max_tox` 4 nm: the FinFET's 5 nm outer
+  spacer was taken for gate dielectric (800 lines through the n+ epi).
+- The carrier comes from the device type (fab) or the lighter-doped half
+  of the interface nodes (the median was fooled by the S/D overlap).
+
+**New fab operations and templates.**
+- `epi_doping` (fab/structure.py): peak inside the epi, outside
+  N = peak exp(-(dx/sx)^2/2 - (dy/sy)^2/2 - (dz/sz)^2/2) of the distance to
+  the epi (an anisotropic distance transform: for a box exactly the
+  separable Gaussian the user asked for). The epi's own surface nodes
+  count, the -EPS nodes a deposit leaves on far-away surfaces of the solid
+  it grew on do not (they seeded the tail along the whole Si/STI
+  interface).
+- `deposit(mode="conformal", to_height=...)`: a capped selective epi.
+- `HKstack` dielectric: 0.6 nm SiO2 IL + 1.4 nm HfO2 lumped into one 2 nm
+  layer, EOT 0.85 nm (eps 9.2); a 0.6 nm IL of its own needs 0.25 nm voxels.
+- `template: finfet` (configs/fab_finfet.yaml): bulk, CPP 48, Lg 15,
+  spacer 5, fin 5 x 50 nm at a 24 nm pitch, STI + fin reveal, PTS 3e18 at
+  the fin base, gate-first HKstack + TiN, spacer etch clearing the fin
+  side walls, S/D fin recess stopping 5 nm above the STI, Si:P epi 7e20
+  (sx 2, sy 3 nm), TiN trench contacts (Schottky). Structure check clean.
+- `template: nanosheet` (configs/fab_nanosheet.yaml): 3 x (SiGe 10 / Si 5)
+  superlattice, 25 nm wide stack at a 46 nm pitch, dummy poly gate, outer
+  spacer, S/D recess through the stack, SiGe lateral recess + inner spacers
+  (conformal SiN, then a directional etch-back to the sheet ends - an
+  isotropic etch-back deep enough to clear the sheet ends hollowed the
+  pockets), epi from the sheet ends, ILD + CMP, dummy-gate pull, channel
+  release, HKstack wrapping every sheet, TiN fill between the sheets. The
+  substrate mesa under the stack is gated too (PTS 1e18, sharp).
+- Template mesh spacing (`mesh_h_fine`): the octree's planar default puts
+  2 nm in z at z-facing interfaces - 5 nodes across a 5 nm fin. FinFET and
+  nanosheet use (1, 0.5, 0.5) nm: FinFET 57k -> 69k nodes, nanosheet 109k
+  -> 127k. It matters: FinFET DIBL 52 -> 66 mV/V, Ioff x3.
+- Effective width W: 2 H_fin + W_fin per fin; 2 n (W + t) per stack.
+
+**Shared-code fixes.**
+- `main2d_mosfet_sweep._converged`: `r.get("converged", r["res_norm"] <
+  1e-4)` evaluates the default eagerly; an early-exit result (a linear
+  solver breakdown) has no res_norm and crashed the FinFET walk.
+- `core/linsolve`: the coarse-space pinv of a non-finite matrix (a
+  diverging Newton iterate) raised "SVD did not converge" - the overnight
+  margin10 crash. A non-finite coarse matrix now drops the coarse
+  correction; the step then fails on its own residual.
+
+**Results** (octree, Schottky S/D, vsat; Vds 0.05 / 1.0 V planar, 0.05 / 0.7 V
+FinFET; Ion at the top Vgs, currents per um of effective width).
+
+| device | | Vt lin / sat (V) | SS (mV/dec) | DIBL (mV/V) | Ion (uA/um) | Ioff (A/um) | time |
+|---|---|---|---|---|---|---|---|
+| planar | classical | 0.204 / 0.051 | 82 | 161 | 1729 | 1.19e-6 | 74 s |
+| planar | quantum | 0.269 / 0.073 | 88 | 206 | 1447 | 8.2e-7 | ~100 s |
+| FinFET | classical | 0.206 / 0.163 | 62 | 66 | 1014 | 2.5e-7 | 243 s |
+| FinFET | quantum | 0.240 / 0.192 | 64 | 75 | 731 | 2.4e-7 | 362 s |
+
+- FinFET quantum: volume inversion (classical 1.9e20 at the walls; quantum
+  peak 3.8e19 at the fin centre), Vt +34 / +29 mV, Ion -28%.
+- FinFET timings were measured with other runs on the machine.
+- FinFET walk time: about half goes to near-threshold steps where the
+  hybrid velocity-saturation force stalls GMRES (12 of 14 s of a failed
+  attempt in Krylov); the edge-field force converges the same step in 4
+  iterations. Not changed (a physics default): for the user.
+- Nanosheet: ILU-GMRES stalls (|F| ~ 8 in the electron continuity rows of
+  the p-type PTS region under the stack, where electrons are a negligible
+  minority); exact LU converges the same step in 6 iterations. A
+  floating-body coarse space (hole quasi-Fermi shift per sheet) was tried
+  and did not help: reverted. A density-weighted acceptance for
+  continuity rows is the likely fix (shared Newton logic). The nanosheet
+  I-V runs with TCAD_LINSOLVE=petsc_lu (5.3 GB per process, one worker).
+- Figures: docs/img/quantum_3d_planar.png, quantum_3d_finfet.png
+  (quantum/compare_3d.py), finfet_* / nanosheet_* (docs/make_device_figures.py).
+- Tests: test_quantum 13 (mirror test new), test_fab 31 (epi_doping,
+  capped conformal, FinFET, nanosheet new). Conda quick tier 152/152.

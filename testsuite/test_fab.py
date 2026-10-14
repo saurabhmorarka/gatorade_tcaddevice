@@ -174,6 +174,28 @@ class TestOps(unittest.TestCase):
         nd, na, net = st.net_doping()
         self.assertEqual(nd[:, g.axes[1] < 0, :][..., :].max(), 0.0)               # none outside silicon
 
+    def test_epi_doping(self):
+        """Peak inside the epi; outside, exp(-dx^2/2sx^2) exp(-dy^2/2sy^2) of the
+        distance to the epi (a box here, so exactly separable)."""
+        st = self.st
+        st.deposit("Si", "sd_epi", "fill", to_height=6, mask={"rect": [0, 10, 0, 40]})
+        st.epi_doping("P", 1e20, sx=2.0, sy=4.0, regions=["sd_epi"])
+        g = st.grid
+        k = int(np.argmin(np.abs(g.axes[2] - 20)))
+
+        def N(x, h):
+            return st.donors[int(np.argmin(np.abs(g.axes[0] - x))), int(np.argmin(np.abs(g.axes[1] + h))), k]
+        self.assertAlmostEqual(N(5, 3) / 1e20, 1.0)                           # inside
+        self.assertAlmostEqual(N(13, 3) / 1e20, np.exp(-0.5 * (3 / 2) ** 2), places=6)     # dx = 3
+        self.assertAlmostEqual(N(5, -4) / 1e20, np.exp(-0.5 * (4 / 4) ** 2), places=6)     # dy = 4 below the substrate top
+        self.assertAlmostEqual(N(12, -2) / 1e20, np.exp(-0.5 * ((2 / 2) ** 2 + (2 / 4) ** 2)), places=6)
+
+    def test_conformal_cap(self):
+        """A conformal deposit with to_height stops there (capped epitaxy)."""
+        self.block(10.0)
+        self.st.deposit("Si", "epi", "conformal", thickness=4, to_height=6)
+        self.assertLessEqual(top_height(self.st, 5, 20, regions=["epi"]), 6.0 + 1e-6)
+
     def test_dose(self):
         st = Structure(Grid(lo=(0, -5, 0), hi=(4, 60, 4), h=(1, 0.25, 1)))
         st.substrate("Si", "substrate")
@@ -376,6 +398,94 @@ class TestPlanar(unittest.TestCase):
         nd, na, net = st.net_doping()
         self.assertGreater(na.max(), 5e19)                         # p+ source/drain
         self.assertGreater(nd.max(), 1e18)                         # n well
+
+
+
+class TestFinFET(unittest.TestCase):
+    """The FinFET template: fin width and height, the gate wrapping the fin,
+    the recessed and doped S/D epi, a clean structure check."""
+
+    @classmethod
+    def setUpClass(cls):
+        from fab import flow
+        cls.cfg = flow.load(os.path.join(TCAD1D_ROOT, "configs", "fab_finfet.yaml"))
+        cls.st, _ = flow.build(cls.cfg, log=lambda *a: None)
+        cls.p = flow.resolve_params(flow.expand(cls.cfg)["params"])
+
+    def test_structure_check(self):
+        self.assertEqual(self.st.check(), [])
+
+    def test_fin_and_gate_wrap(self):
+        st, p = self.st, self.p
+        g = st.grid
+        lab = st.cell_labels()
+        names = [r.name for r in st.regions]
+        i = int(np.argmin(np.abs(g.axes[0] - p["cpp"] / 2)))
+        j = int(np.argmin(np.abs(g.axes[1] + (-p["H_fin"] / 2))))       # mid fin height
+        row = [names[l] if l >= 0 else "gas" for l in lab[i, j, :]]
+        si = [k for k, r in enumerate(row) if r == "substrate"]
+        self.assertAlmostEqual(len(si) * g.h[2], p["W_fin"], delta=1e-9)            # exact, in cells
+        self.assertEqual(si[-1] - si[0] + 1, len(si))
+        self.assertEqual(row[si[0] - 1], "gate_oxide")
+        self.assertEqual(row[si[-1] + 1], "gate_oxide")
+        self.assertIn("gate", row[:si[0] - 1])
+        self.assertIn("gate", row[si[-1] + 2:])
+        self.assertAlmostEqual(top_height(st, p["cpp"] / 2, p["fin_pitch"] / 2, regions=["substrate"]), 0.0,
+                               delta=g.h[1])
+
+    def test_epi(self):
+        st, p = self.st, self.p
+        nd, na, net = st.net_doping()
+        g = st.grid
+        k = int(np.argmin(np.abs(g.axes[2] - p["fin_pitch"] / 2)))
+        j = int(np.argmin(np.abs(g.axes[1] + (-10))))
+        self.assertGreater(net[int(np.argmin(np.abs(g.axes[0] - 5))), j, k], 5e20)          # in the epi
+        self.assertLess(net[int(np.argmin(np.abs(g.axes[0] - p["cpp"] / 2))), j, k], 0)     # channel p
+        # the epi stops above the punch-through stopper: none below the STI top
+        epi = st.phi_union(st.regions_of(names=["sd_epi"])) < -1e-3
+        self.assertFalse(epi[:, g.axes[1] > p["H_fin"] - 1e-6, :].any())
+
+
+class TestNanosheet(unittest.TestCase):
+    """The nanosheet template: three released sheets wrapped by the gate
+    dielectric and metal, inner spacers between them under the spacers."""
+
+    @classmethod
+    def setUpClass(cls):
+        from fab import flow
+        cls.cfg = flow.load(os.path.join(TCAD1D_ROOT, "configs", "fab_nanosheet.yaml"))
+        cls.st, _ = flow.build(cls.cfg, log=lambda *a: None)
+        cls.p = flow.resolve_params(flow.expand(cls.cfg)["params"])
+
+    def test_sheets(self):
+        st, p = self.st, self.p
+        g = st.grid
+        lab = st.node_labels()
+        names = [r.name for r in st.regions]
+        i = int(np.argmin(np.abs(g.axes[0] - p["cpp"] / 2)))
+        k = int(np.argmin(np.abs(g.axes[2] - p["stack_pitch"] / 2)))
+        col = [names[l] if l >= 0 else "gas" for l in lab[i, :, k]]
+        h = -g.axes[1]
+        sheet = np.array([c == "sheets" for c in col])
+        runs = np.flatnonzero(np.diff(sheet.astype(int)))                  # sheet edges along the column
+        self.assertEqual(len(runs), 2 * p["n_sheets"])
+        tops = h[runs[0::2] + 1]
+        self.assertTrue(np.allclose(np.diff(sorted(tops)), p["t_sheet"] + p["t_sige"], atol=g.h[1]))
+        self.assertNotIn("sige", names)                                    # fully released
+        between = [c for c, hh in zip(col, h) if -p["t_sheet"] - p["t_sige"] + 1 < hh < -p["t_sheet"] - 1]
+        self.assertIn("gate", between)                                     # metal between the sheets
+        self.assertIn("gate_oxide", between)
+
+    def test_inner_spacers(self):
+        st, p = self.st, self.p
+        g = st.grid
+        lab = st.node_labels()
+        names = [r.name for r in st.regions]
+        x = p["xg0"] - p["inner_spacer"] / 2                               # under the outer spacer
+        i = int(np.argmin(np.abs(g.axes[0] - x)))
+        j = int(np.argmin(np.abs(g.axes[1] - (p["t_sheet"] + p["t_sige"] / 2))))   # mid first gap
+        k = int(np.argmin(np.abs(g.axes[2] - p["stack_pitch"] / 2)))
+        self.assertEqual(names[lab[i, j, k]], "inner_spacer")
 
 
 if __name__ == "__main__":

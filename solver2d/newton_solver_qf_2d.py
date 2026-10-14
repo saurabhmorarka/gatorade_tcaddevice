@@ -64,6 +64,11 @@ ETA_MAX_SCHOTTKY = 1e-7  # the cap after a damped step, with sub-grid Schottky c
                          # quasi-1D TiN slabs (n+ 7e20, p+ 5e20, ~1e7 A/cm^2) stall at 1e-6 and converge
                          # at 1e-7 (with the linear solver's coarse correction, DEVELOPMENT_LOG 65; 1e-9
                          # before it). Planar 3D I-V: 1e-9 / 1e-7 / no cap 44 / 40 / 37 s, same currents
+# V - run the in-Newton quantum corrector once the update is below this. Full
+# planar device, Vds = 1 V gate walk: 1e-3 -> 122 iterations, 1e-2 -> 110,
+# 3e-2 -> 99 (classical 69); Lambda contracts fast (each corrector ~100x
+# smaller than the last), so an early first corrector costs nothing.
+QUANTUM_TRIGGER = 1e-2
 QUAD_PREDICT_MAX = 1e-3  # V - only trust the quadratic-convergence prediction below this update
 RES_PREDICT_MAX = 1e-1   # |F|_inf sanity bound for the prediction exit (see _run_newton)
 QF_DENSITY_REF = 1.0     # cm^-3 - quasi-Fermi updates are weighted by n/(n+ref) in the prediction exit
@@ -975,7 +980,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
                      damping="line_search", cold_retry=True, velocity_saturation=False,
                      generation=None, linear_solver="auto", vsat_warmup=True, qf_box=True,
-                     vsat_fallback=True, poisson_start=True, schottky=None, quantum=None):
+                     vsat_fallback=True, poisson_start=True, schottky=None, quantum=None,
+                     quantum_update=None, quantum_tol=3e-3):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -1084,7 +1090,15 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     are released from the Dirichlet set (free nodes, kept neutral by
     Poisson), the contact law enters as a generation term, and the metal's
     insulator-side nodes sit at the metal's own potential V - Phi_Bn +
-    (Ec - Ei). None (default) leaves the solve unchanged."""
+    (Ec - Ei). None (default) leaves the solve unchanged.
+
+    quantum_update: state -> (Lambda_n, Lambda_p), the Schrodinger-Poisson
+    corrector (quantum.device.DeviceQuantum.update) called INSIDE the Newton
+    loop: once the update drops below QUANTUM_TRIGGER the quantum potentials
+    are recomputed from the current psi and Newton continues on the new
+    band shift. The solve is converged only when Newton is converged and the
+    last corrector changed Lambda by less than quantum_tol. One Newton solve
+    per bias point instead of an outer loop of solves."""
     if vsat_warmup and vsat_force(velocity_saturation) in ("hybrid", "gradqf"):
         # A quasi-Fermi force can derail Newton from a poor start: a new
         # contact bias enters as a jump of phin/phip across the first edge
@@ -1101,7 +1115,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         kw = dict(f_tol=f_tol, verbose=verbose, psi_bc_override=psi_bc_override,
                   phin_bc_override=phin_bc_override, phip_bc_override=phip_bc_override, damping=damping,
                   generation=generation, linear_solver=linear_solver, qf_box=qf_box, poisson_start=poisson_start,
-                  schottky=schottky, quantum=quantum)
+                  schottky=schottky, quantum=quantum, quantum_update=quantum_update, quantum_tol=quantum_tol)
         try:
             r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
                                 phip_init=phip_init, maxiter=min(maxiter, VSAT_DIRECT_MAXITER), cold_retry=False,
@@ -1307,6 +1321,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         return U_
 
     def _run_newton(psi0, phin0, phip0):
+        nonlocal qs, ni_q, dEi_q
+        for k_ in ("q_ok", "q_first_it", "q_mix", "q_dlam", "q_hist"):
+            state.pop(k_, None)
         psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
         psi0[contact_point_idx] = psi_bc
         phin0[contact_point_idx] = phin_bc
@@ -1457,6 +1474,41 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                 converged = upd_all ** 3 / upd_prev ** 2 < PSI_UPDATE_TOL
             upd_prev = upd_all if (accepted and step == 1.0) else None
             converged = converged and it >= state.get("min_iters", 1)
+            if (quantum_update is not None and accepted and not state.get("q_ok")
+                    and (converged or upd_all < QUANTUM_TRIGGER)):
+                # Schrodinger-Poisson corrector inside the Newton loop. Once
+                # it moves Lambda by less than quantum_tol it is not called
+                # again: the remaining Newton updates (< QUANTUM_TRIGGER)
+                # move Lambda by less than that.
+                lam_new = quantum_update({"psi": U[:N], "phin": U[N:2 * N], "phip": U[2 * N:]})
+                ln, lp = (np.zeros(N) if l_ is None else np.asarray(l_, float) for l_ in lam_new)
+                dlam = 0.0 if qs is None else max(np.max(np.abs(ln - qs.lam_n)), np.max(np.abs(lp - qs.lam_p)))
+                # under-relax a corrector that stopped contracting (the
+                # Lambda fixed point can oscillate at high drain bias)
+                mix = state.get("q_mix", 1.0)
+                if qs is not None and state.get("q_dlam") is not None and dlam > 0.5 * state["q_dlam"]:
+                    mix = max(0.25, 0.5 * mix)
+                state["q_mix"] = mix
+                if qs is not None and mix < 1.0:
+                    ln = qs.lam_n + mix * (ln - qs.lam_n)
+                    lp = qs.lam_p + mix * (lp - qs.lam_p)
+                state["q_updates"] = state.get("q_updates", 0) + 1
+                state.setdefault("q_first_it", it)
+                state["q_dlam"] = dlam
+                state.setdefault("q_hist", []).append((it, round(float(dlam), 5)))
+                state["q_ok"] = qs is not None and dlam <= quantum_tol
+                if qs is None or dlam > quantum_tol:
+                    qs = QuantumShift(mesh, mat, ln, lp)
+                    ni_q, dEi_q = qs.ni, qs.dEi
+                    converged = False
+                    upd_prev = merit_prev = None
+                    if it < maxiter:
+                        F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
+                                                       poisson_scale, cont_scale, edge_mask, velocity_saturation,
+                                                       generation, qs=qs)
+                        res_norm = np.max(np.abs(F))
+                        best_U, best_res = U, res_norm
+                    continue
             if converged:
                 state["converged"] = True
                 break
@@ -1496,7 +1548,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     # flag existed). Drivers should test this flag, not res_norm: the
     # quadratic-prediction exit can stop with |F|_inf up to RES_PREDICT_MAX.
     converged = bool(state.get("converged")) or res_norm < RES_ACCEPT
+    if quantum_update is not None:          # and the quantum potentials settled
+        converged = converged and bool(state.get("q_ok"))
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
             "iters": it, "res_norm": res_norm, "converged": converged,
             "velocity_saturation": velocity_saturation, "schottky": schottky, "bias": dict(bias_by_contact),
-            "qshift": qs}
+            "qshift": qs, "q_updates": state.get("q_updates", 0), "q_dlam": state.get("q_dlam"),
+            "q_first_it": state.get("q_first_it", it), "q_hist": state.get("q_hist", [])}

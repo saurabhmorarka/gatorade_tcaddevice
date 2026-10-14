@@ -31,7 +31,11 @@ DONORS = {"P", "As", "Sb", "N"}           # N: donor in SiC; harmless for Si flo
 ACCEPTORS = {"B", "In", "Al", "Ga"}
 SEMICONDUCTORS = {"Si", "SiGe", "Ge", "SiC", "GaAs"}
 CONDUCTORS = {"Poly", "Metal", "TiN", "TaN", "W", "Al", "Cu", "Co", "NiSi", "TiSi2"}
-INSULATOR_EPS = {"SiO2": 3.9, "SiN": 7.5, "Si3N4": 7.5, "HfO2": 22.0, "Al2O3": 9.0, "SiON": 5.5}
+# HKstack: a ~0.6 nm SiO2 interlayer + ~1.4 nm HfO2 lumped into one 2 nm layer
+# with the same EOT (0.85 nm: eps = 3.9 * 2.0 / 0.85). A 0.6 nm interlayer of
+# its own needs a 0.25 nm voxel (two cells across); the lumped layer gives
+# the same gate capacitance at 0.5 nm.
+INSULATOR_EPS = {"SiO2": 3.9, "SiN": 7.5, "Si3N4": 7.5, "HfO2": 22.0, "Al2O3": 9.0, "SiON": 5.5, "HKstack": 9.2}
 EPS = 2.0 ** -20                          # nm (~1e-6, exact in binary); tie-break for complements
 
 
@@ -205,12 +209,15 @@ class Structure:
         the `on` materials only - selective growth), outside the solid.
         mode fill: everything below `to_height`, outside the solid.
         mode directional: `thickness` straight up from each column's top.
-        `mask` restricts the deposit to its open area."""
+        `mask` restricts the deposit to its open area; with mode conformal
+        `to_height` caps it (a selective epitaxy grown to a height)."""
         g = self.grid
         if mode == "conformal":
             base = self.phi_union(self.regions_of(materials=on)) if on else self.solid()
             d = levelset.redistance(base, g.h, band=thickness + 3 * g.h.max())
             phi = d - thickness
+            if to_height is not None:
+                phi = np.maximum(phi, -to_height - g.y)
         elif mode == "fill":
             phi = np.broadcast_to(-to_height - g.y, g.shape).astype(float)
         elif mode == "directional":
@@ -301,6 +308,32 @@ class Structure:
             lat = (s < 0).astype(float)
         conc = prof * self._column(lat)
         self._add_doping(species, conc)
+
+    def epi_doping(self, species, peak, sx, sy, sz=None, regions=None):
+        """Analytic in-situ doped S/D epitaxy: `peak` (cm^-3) inside the epi
+        `regions`, and outside them a Gaussian tail of the distance to the
+        epi, scaled per axis:
+
+            N = peak * exp(-(dx/sx)^2/2 - (dy/sy)^2/2 - (dz/sz)^2/2)
+
+        with (dx, dy, dz) the offset to the nearest epi point in the scaled
+        metric - for a box-shaped epi exactly the separable
+        exp(-dx^2/2sx^2) exp(-dy^2/2sy^2). sx (nm) sets the junction under
+        the spacer (the overlap), sy the tail below the epi; sz defaults to
+        sx. Only semiconductor nodes keep it (net_doping)."""
+        g = self.grid
+        sz = sx if sz is None else sz
+        # the epi's nodes, its own surface included - but a deposit's level
+        # set is also -EPS on surface nodes of the solid it grew on, all
+        # within reach (an STI/fin interface far down): a surface node
+        # counts only next to the epi's interior
+        phi = self.phi_union(self.regions_of(names=regions))
+        core = phi < -1e-3 * g.h.min()
+        inside = core | ((phi <= 0) & ndimage.binary_dilation(core, structure=np.ones((3, 3, 3), bool)))
+        if not inside.any():
+            raise ValueError(f"epi_doping: no epi region among {regions}")
+        d = ndimage.distance_transform_edt(~inside, sampling=(g.h[0] / sx, g.h[1] / sy, g.h[2] / sz))
+        self._add_doping(species, peak * np.exp(-0.5 * d ** 2))
 
     def dope(self, species, conc, regions=None, materials=None):
         """Uniform doping inside the given regions/materials (all if none)."""
