@@ -4,6 +4,25 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Schrodinger-Poisson channel charge, 1D ([details](docs/quantum.md))
+
+The inversion charge comes from the Schrodinger equation, solved on lines
+across the channel body. It enters drift-diffusion as a quantum potential
+Lambda that conserves charge on any mesh. In bulk, the charge peak moves
+about 1 nm off the oxide and Vt rises by 83 mV at 1e18. In a thin double
+gate the charge peaks at the center of the body (volume inversion). 2D and
+3D are next.
+
+```math
+-\frac{\hbar^2}{2}\frac{d}{ds}\Big(\frac{1}{m_z}\frac{d\psi_k}{ds}\Big)+U\psi_k=E_k\psi_k,\qquad
+n=n_i\,e^{(\psi-\phi_n-\Lambda_n)/V_t},\qquad
+\Lambda_i=-V_t\ln\frac{\int_{V_i} n_{QM}}{n_{cl,i}V_i}
+```
+
+<p align="center">
+  <img src="docs/img/quantum_sp_1d.png" alt="Schrodinger-Poisson in 1D: density vs depth, C-V, centroid, double-gate volume inversion" width="98%">
+</p>
+
 ## 3D planar NMOS: Schottky S/D contacts ([details](docs/schottky.md))
 
 The S/D metal/semiconductor contact is modeled with thermionic emission

@@ -147,7 +147,7 @@ def _control_volumes(x: np.ndarray) -> np.ndarray:
 def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
                    tol=1e-10, max_iter=100, damping_cap=None,
                    eps=None, ni=None, n_frozen=None, p_frozen=None,
-                   interfaces=None, delta_Ei=None):
+                   interfaces=None, delta_Ei=None, quantum_shift=None):
     """Newton solve of the nonlinear Poisson equation for psi(x), given fixed
     quasi-Fermi levels phin(x), phip(x) (both zero at equilibrium).
 
@@ -186,6 +186,12 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         - see MaterialField's docstring. Added/subtracted only in the two
         n=/p= lines below; every Jacobian entry (dn/dpsi, dp/dpsi) is
         unaffected since delta_Ei doesn't depend on psi.
+    quantum_shift: optional (Lambda_n, Lambda_p), each None or an array of
+        length len(x), V: the quantum potential of quantum/ (Schrodinger
+        on lines). Unlike delta_Ei it lowers BOTH densities,
+        n *= exp(-Lambda_n/Vt), p *= exp(-Lambda_p/Vt), and is held fixed
+        during this solve (the predictor of the Schrodinger-Poisson loop,
+        quantum/coupling.py). None: exactly today's behavior.
     """
     N = len(x)
     h = np.diff(x)
@@ -194,6 +200,10 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
     eps_edge = np.broadcast_to(mat.eps if eps is None else eps, N - 1)
     ni_arr = np.broadcast_to(mat.ni if ni is None else ni, N)
     delta_Ei_arr = np.zeros(N) if delta_Ei is None else np.broadcast_to(delta_Ei, N)
+    lam_n = lam_p = 0.0
+    if quantum_shift is not None:
+        lam_n = 0.0 if quantum_shift[0] is None else np.broadcast_to(quantum_shift[0], N)
+        lam_p = 0.0 if quantum_shift[1] is None else np.broadcast_to(quantum_shift[1], N)
     n_frozen_mask = np.zeros(N, dtype=bool) if n_frozen is None else ~np.isnan(n_frozen)
     p_frozen_mask = np.zeros(N, dtype=bool) if p_frozen is None else ~np.isnan(p_frozen)
     Qit_node = np.zeros(N)
@@ -208,8 +218,8 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
     lap_coeff_p = eps_edge[1:] / hp / cvol
 
     for it in range(max_iter):
-        n = ni_arr * np.exp((psi - phin + delta_Ei_arr) / Vt)
-        p = ni_arr * np.exp((phip - psi - delta_Ei_arr) / Vt)
+        n = ni_arr * np.exp((psi - phin + delta_Ei_arr - lam_n) / Vt)
+        p = ni_arr * np.exp((phip - psi - delta_Ei_arr - lam_p) / Vt)
         if n_frozen is not None:
             n = np.where(n_frozen_mask, n_frozen, n)
         if p_frozen is not None:
@@ -265,8 +275,8 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         if np.max(np.abs(delta)) < tol:
             break
 
-    n = ni_arr * np.exp((psi - phin + delta_Ei_arr) / Vt)
-    p = ni_arr * np.exp((phip - psi - delta_Ei_arr) / Vt)
+    n = ni_arr * np.exp((psi - phin + delta_Ei_arr - lam_n) / Vt)
+    p = ni_arr * np.exp((phip - psi - delta_Ei_arr - lam_p) / Vt)
     if n_frozen is not None:
         n = np.where(n_frozen_mask, n_frozen, n)
     if p_frozen is not None:

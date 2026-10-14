@@ -5913,3 +5913,54 @@ results (Schottky, 3D) buried in the middle and the 3D images stale.
   (`make_readme_figures.py 2d-old`) stay out of the README until those
   drivers move to the quadtree mesh.
 - `.gitignore`: `out/**/vtk/` (regenerable VTK exports).
+
+## 69. Schrodinger-Poisson channel charge, phase P1 (1D)
+
+Roadmap item 2. Plan `plans/quantum_plan.md`, approved by the user with the
+recommended defaults: a quantum box under the gate oxide with a lattice-
+spacing knob (a single center line is its coarsest setting), Boltzmann
+subbands by default (Fermi-Dirac as a switch), the inversion carrier only,
+and off by default until 3D is validated. Branch `quantum-sp`.
+
+- New package `quantum/` (`bands`, `schrodinger1d`, `lines`, `coupling`,
+  `mos1d`, `validate_1d`); details in `docs/quantum.md`.
+  - Coupling: a quantum potential Lambda in n = ni exp((psi - phi_n -
+    Lambda_n)/Vt), held fixed during the Newton solve (the Trellakis
+    predictor). Lambda per node is set from the line's quantum charge in
+    the node's span, so the charge is conserved on any DD mesh.
+  - `core/physics.solve_poisson(quantum_shift=(Lambda_n, Lambda_p))` and
+    `mos_solver.solve_mos_equilibrium(quantum_shift=...)`. None is
+    bit-identical to before.
+- Line solver checks:
+  - Airy levels within 0.2%, infinite well within 0.4%;
+  - flat-band classical limit = Nc within 0.07%;
+  - (100), (110) and (111) valley masses match Stern-Howard.
+- Convergence: the number of levels, D_q and the penetration depth do not
+  matter (< 0.1 mV). Line spacing 0.1 vs 0.05 nm: ~2 mV and 0.6% Cinv.
+  Hard wall: +3-6 mV.
+- Bulk MOS-cap, tox 1.5 nm:
+  - dVt at 1e11 cm^-2: +29 mV (1e17), +83 mV (1e18);
+  - at 1e13: Cinv/Cox 0.944 -> 0.836 and 0.951 -> 0.851, centroid
+    0.54 -> 1.44 and 0.25 -> 1.07 nm.
+  - 2-3 outer iterations per bias; a 45-point sweep in ~0.3 s.
+  - Fermi-Dirac subbands: a further -3 to -4% Cinv at 1e13.
+- Double gate (tox 1.5 nm, undoped body): volume inversion at 3 nm (single
+  center peak at all VG); peaks merge at 5 nm; two peaks 1.0 nm off the
+  walls at 10 and 20 nm. dVt: +55 / +29 / +11 / +6 mV.
+- Mesh robustness: the quantum Ninv on a fab-like 0.5 nm mesh is within
+  0.3% of the fine mesh (classical within 2.5%).
+- While checking that, found and fixed a bug in shared code:
+  `build_mos_grid` dropped the -t_ox node
+  (`-np.linspace(t_ox, 0)[::-1][:-1]` removes -t_ox, not the duplicate 0).
+  Every 1D MOS-cap had a 1.39 nm oxide for tox = 1.5 nm, and Qs (computed
+  with 1.5 nm) broke Gauss's law by 7%. Fixed (`np.linspace(-t_ox, 0)`).
+  Goldens recaptured: `mos_metal` (depletion C/Cox +7.7% = 1.5/1.393) and
+  `mos_poly_*` (< 1%).
+- `_span_integral` integrates the piecewise-linear density exactly. The
+  first version treated it as constant per 0.1 nm cell, which put steps in
+  n on the default MOS grid (4 pm cells).
+- Tests: `testsuite/test_quantum.py`, 10 fast tests, 0.9 s. Suite: conda
+  142/142 (78 s), venv 142 pass (67 s), conda full `-k mos` 16/16.
+- Next: P2 (2D MOSFET, `newton_solve_2d` gets separate n/p shifts), then
+  P3 (3D fab planar, lattice-spacing study, reference-run cost).
+
