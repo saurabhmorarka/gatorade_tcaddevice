@@ -84,9 +84,23 @@ Bulk MOS-cap, tox = 1.5 nm, metal gate with V_FB = 0, (100):
 
 Both Cinv and the centroid are taken at Ninv = 1e13 cm^-2. In Cinv,
 quantization adds about 0.2 nm of electrical oxide thickness. The Vt shift
-of +83 mV at 1e18 is inside the +50-100 mV the plan expected. A direct
-comparison against a published Schrodinger-Poisson curve (Stern 1972,
-Schred) is still to do.
+of +83 mV at 1e18 is inside the +50-100 mV the plan expected.
+
+*Against published Schrodinger-Poisson* (`python3 -m quantum.compare_literature`):
+the Vt shift vs doping of Jallepalli et al. (IEEE TED 44, 297, 1997), as
+replotted in Asenov et al. (Nanotech 2002, Fig. 1; read off the plot,
++-5 mV). That figure does not state tox or the threshold criterion. With
+tox = 5 nm, a hard wall and a constant 3e11 cm^-2:
+
+| Na | 1e17 | 2.5e17 | 5e17 | 1e18 | 2e18 | 3e18 | 5e18 |
+|---|---|---|---|---|---|---|---|
+| Jallepalli | 33 | 57 | 82 | 125 | 190 | 245 | 330 mV |
+| this code | 42 | 63 | 88 | 125 | 181 | 226 | 304 mV |
+
+That is within 10% from 2.5e17 to 5e18. At 1e17 the difference is 9 mV,
+about the read-off error. With oxide penetration the shift is 5-10% lower.
+At tox = 1.5 nm all shifts are 30-45% smaller: (1 + Cdep/Cox) carries the
+surface-potential shift to the gate.
 
 Symmetric double gate, tox = 1.5 nm, midgap gates, undoped body:
 

@@ -210,6 +210,39 @@ def _mesh_dEi(mesh):
     return mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else 0.0
 
 
+class QuantumShift:
+    """The quantum potentials Lambda_n, Lambda_p (V, per node) of the
+    Schrodinger-Poisson channel charge (quantum/, plans/quantum_plan.md):
+    n = ni exp((psi + dEi - phin - Lambda_n)/Vt), p = ni exp((phip - psi -
+    dEi - Lambda_p)/Vt), held fixed during a Newton solve.
+
+    They are folded exactly into the two per-node band quantities the
+    solver already has: ni' = ni exp(-(Lambda_n + Lambda_p)/2Vt) and
+    dEi' = dEi - (Lambda_n - Lambda_p)/2. So the residual, the Jacobian,
+    SRH (n p = ni'^2 in equilibrium: the confinement-widened gap) and the
+    Scharfetter-Gummel heterojunction shifts (zero equilibrium current
+    across a Lambda step) all follow with no other change. Passed
+    explicitly (not swapped into the mesh), so the mesh-keyed caches (ILU,
+    Jacobian index, assembly plans) survive a Lambda update."""
+
+    def __init__(self, mesh, mat, lam_n=None, lam_p=None):
+        N = len(mesh.points)
+        self.lam_n = np.zeros(N) if lam_n is None else np.asarray(lam_n, float)
+        self.lam_p = np.zeros(N) if lam_p is None else np.asarray(lam_p, float)
+        ni, _ = _mesh_ni_edge_g(mesh, mat)
+        dEi = mesh.dEi_arr if getattr(mesh, "dEi_arr", None) is not None else np.zeros(N)
+        self.ni = ni * np.exp(-(self.lam_n + self.lam_p) / (2.0 * mat.Vt))
+        self.dEi = dEi - 0.5 * (self.lam_n - self.lam_p)
+        self.sg = _sg_shift_arrays(self.ni, self.dEi, mesh.edges[:, 0], mesh.edges[:, 1], mat.Vt)
+
+
+def _bands(mesh, mat, qs):
+    """(ni, dEi) per node: the mesh's own, or with the quantum shift."""
+    if qs is None:
+        return _mesh_ni_edge_g(mesh, mat)[0], _mesh_dEi(mesh)
+    return qs.ni, qs.dEi
+
+
 _MESH_CACHE = {}
 
 
@@ -261,8 +294,10 @@ def _sg_shifts(mesh, ii, jj, Vt):
 
 
 def _sg_shifts_build(mesh, ii, jj, Vt):
-    dEi = mesh.dEi_arr
-    ni = mesh.ni_arr
+    return _sg_shift_arrays(mesh.ni_arr, mesh.dEi_arr, ii, jj, Vt)
+
+
+def _sg_shift_arrays(ni, dEi, ii, jj, Vt):
     ok = (ni[ii] > 0) & (ni[jj] > 0)
     lr = np.where(ok, np.log(np.where(ok, ni[jj], 1.0) / np.where(ok, ni[ii], 1.0)), 0.0)
     de = np.where(ok, (dEi[jj] - dEi[ii]) / Vt, 0.0)
@@ -486,7 +521,7 @@ def bernoulli_pair(x):
 
 
 def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, edge_mask=None,
-                  jacobian=False):
+                  jacobian=False, qs=None):
     """Electron/hole current through every edge's (semiconductor) facet,
     direction i -> j, A per unit depth - the ONE edge-current formula the
     residual, the Jacobian and solver2d/current.py all share.
@@ -516,7 +551,7 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     if edge_mask is not None:
         geo = geo * edge_mask
     d = (psi[jj] - psi[ii]) / Vt
-    sn, sp_ = _sg_shifts(mesh, ii, jj, Vt)
+    sn, sp_ = _sg_shifts(mesh, ii, jj, Vt) if qs is None else qs.sg
     Bp, dBp, Bm, dBm = bernoulli_pair(d + sn)
     if sp_ is sn:                  # single material: both shifts are the same 0.0
         Bpp, dBpp, Bmp, dBmp = Bp, dBp, Bm, dBm
@@ -581,18 +616,19 @@ def continuity_row_scale(mat: Material, h_typ: float) -> float:
 
 
 def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
-              edge_mask=None, velocity_saturation=False, generation=None):
+              edge_mask=None, velocity_saturation=False, generation=None, qs=None):
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
-    ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
-    n, p = _densities(psi, phin, phip, ni_arr, mat.Vt, _mesh_dEi(mesh))
+    _, g_e = _mesh_ni_edge_g(mesh, mat)
+    ni_arr, dEi = _bands(mesh, mat, qs)
+    n, p = _densities(psi, phin, phip, ni_arr, mat.Vt, dEi)
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
 
     _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
     # Semiconductor-only facets already make every oxide edge carry zero
     # current; edge_mask (optional) can exclude further edges.
-    In_e, Ip_e = edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask)
+    In_e, Ip_e = edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, qs=qs)
 
     div_psi = _edge_divergence(ii, jj, g_e * (psi[jj] - psi[ii]), N)
 
@@ -640,7 +676,7 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
 
 def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
                             poisson_scale, cont_scale, edge_mask=None, velocity_saturation=False,
-                            generation=None):
+                            generation=None, qs=None):
     """generation: optional extra carrier generation (see newton_solve_2d).
 
     edge_mask: optional boolean (E,) array - see _residual()'s own
@@ -652,16 +688,17 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     edges' current (and its derivatives) entirely."""
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
-    ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
+    _, g_e = _mesh_ni_edge_g(mesh, mat)
+    ni_arr, dEi = _bands(mesh, mat, qs)
     Vt = mat.Vt
-    n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
+    n, p = _densities(psi, phin, phip, ni_arr, Vt, dEi)
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
 
     _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
     In_e, Ip_e, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
                  dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j) = edge_currents(
-        mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, jacobian=True)
+        mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, jacobian=True, qs=qs)
 
     div_psi = _edge_divergence(ii, jj, g_e * (psi[jj] - psi[ii]), N)
     div_n = _edge_divergence(ii, jj, In_e, N)
@@ -890,7 +927,7 @@ def _poisson_linear_solver(mesh):
 
 
 def poisson_solve(mesh, mat, psi, phin, phip, is_contact, psi_bc, poisson_scale, tol=1e-9, maxiter=60,
-                  max_step=1.0, verbose=False):
+                  max_step=1.0, verbose=False, qs=None):
     """Nonlinear Poisson for psi with phin and phip FROZEN (the Gummel
     half-step): the same Poisson rows as the coupled system, with no
     mobility, current or recombination term - so it is cheap and the same
@@ -898,9 +935,9 @@ def poisson_solve(mesh, mat, psi, phin, phip, is_contact, psi_bc, poisson_scale,
     max_step V (the Boltzmann charge makes the problem monotone, so this
     always converges). Returns (psi, iterations)."""
     N = len(mesh.points)
-    ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
+    _, g_e = _mesh_ni_edge_g(mesh, mat)
+    ni_arr, dEi = _bands(mesh, mat, qs)
     Vt = mat.Vt
-    dEi = _mesh_dEi(mesh)
     _, cv_semi, _ = _mesh_semi_geometry(mesh)
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     free = ~is_contact
@@ -938,7 +975,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
                      damping="line_search", cold_retry=True, velocity_saturation=False,
                      generation=None, linear_solver="auto", vsat_warmup=True, qf_box=True,
-                     vsat_fallback=True, poisson_start=True, schottky=None):
+                     vsat_fallback=True, poisson_start=True, schottky=None, quantum=None):
     """Solve the 2D QF system with each contact held at the voltage given
     in `bias_by_contact` ({contact_name: volts} - any contact not listed
     defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
@@ -1064,7 +1101,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         kw = dict(f_tol=f_tol, verbose=verbose, psi_bc_override=psi_bc_override,
                   phin_bc_override=phin_bc_override, phip_bc_override=phip_bc_override, damping=damping,
                   generation=generation, linear_solver=linear_solver, qf_box=qf_box, poisson_start=poisson_start,
-                  schottky=schottky)
+                  schottky=schottky, quantum=quantum)
         try:
             r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
                                 phip_init=phip_init, maxiter=min(maxiter, VSAT_DIRECT_MAXITER), cold_retry=False,
@@ -1095,6 +1132,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     N = len(mesh.points)
     Vt = mat.Vt
     ni_arr, _ = _mesh_ni_edge_g(mesh, mat)
+    # quantum: (Lambda_n, Lambda_p) or a QuantumShift. The contacts keep the
+    # mesh's own ni / dEi (no quantum box reaches a contact).
+    qs = quantum if quantum is None or isinstance(quantum, QuantumShift) else QuantumShift(mesh, mat, *quantum)
+    ni_q, dEi_q = _bands(mesh, mat, qs)
     if schottky is not None:
         generation = schottky.generation(bias_by_contact, extra=generation)
     psi_bc_override = psi_bc_override or {}
@@ -1189,7 +1230,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             # cold retry at 0.2 V then failed), and as a Gummel half-step
             # before every warm start it cost more than it saved.
             flat = np.full(N, qf_eq[0])
-            psi0, _ = poisson_solve(mesh, mat, psi0, flat, flat, is_contact_full, psi_bc, poisson_scale)
+            psi0, _ = poisson_solve(mesh, mat, psi0, flat, flat, is_contact_full, psi_bc, poisson_scale, qs=qs)
             # psi is then right from the first coupled iteration, which
             # would pass the update test with the perturbation below only
             # cut to ~1e-12 V (the 2D diode's equilibrium current 6e-9
@@ -1280,9 +1321,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             # opt-in only (not the default) and should only be used on an
             # already-close warm start, never a cold start.
             F_fn = lambda U_: _residual(U_, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                         poisson_scale, cont_scale)
+                                         poisson_scale, cont_scale, qs=qs)
             FJ_fn = lambda U_: _residual_and_jacobian(U_, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                                        poisson_scale, cont_scale)
+                                                        poisson_scale, cont_scale, qs=qs)
             U, res_norm, it, _K = bank_rose_solve(U, FJ_fn, F_fn, f_tol=f_tol, maxiter=maxiter,
                                                    step_clip_fn=lambda d: _uniform_clip(d, N),
                                                    verbose=verbose)
@@ -1292,7 +1333,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             raise ValueError(f"damping must be 'line_search' or 'bank_rose', got {damping!r}")
 
         F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                       poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
+                                       poisson_scale, cont_scale, edge_mask, velocity_saturation, generation, qs=qs)
         res_norm = np.max(np.abs(F))
 
         # Step control: each Newton direction is scaled uniformly so no
@@ -1343,7 +1384,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             delta[N:3 * N] = np.clip(delta[N:3 * N], -MAX_QF_STEP, MAX_QF_STEP)
             max_dpsi = np.max(np.abs(delta[:N]))
             # density-weighted quasi-Fermi update (see the prediction exit below)
-            n_cur, p_cur = _densities(U[:N], U[N:2 * N], U[2 * N:], ni_arr, Vt, _mesh_dEi(mesh))
+            n_cur, p_cur = _densities(U[:N], U[N:2 * N], U[2 * N:], ni_q, Vt, dEi_q)
             max_dqf = max(np.max(np.abs(delta[N:2 * N]) * n_cur / (n_cur + QF_DENSITY_REF)),
                           np.max(np.abs(delta[2 * N:]) * p_cur / (p_cur + QF_DENSITY_REF)))
             if max_dpsi > MAX_PSI_STEP:
@@ -1360,7 +1401,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             for _ in range(20):
                 U_try = _project(U + step * delta)
                 F_try = _residual(U_try, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                   poisson_scale, cont_scale, edge_mask, velocity_saturation, generation)
+                                   poisson_scale, cont_scale, edge_mask, velocity_saturation, generation, qs=qs)
                 merit_try = np.linalg.norm(row_scale * F_try)
                 if np.isfinite(merit_try) and merit_try < merit * (1 - 1e-4 * step):
                     accepted = True
@@ -1425,7 +1466,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             if it < maxiter:
                 F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
                                                poisson_scale, cont_scale, edge_mask, velocity_saturation,
-                                               generation)
+                                               generation, qs=qs)
         if best_res < res_norm:
             U, res_norm = best_U, best_res
         return U, res_norm, it
@@ -1449,7 +1490,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a cold-start retry.")
 
     psi, phin, phip = unpack_qf(U, N)
-    n, p = _densities(psi, phin, phip, ni_arr, Vt, _mesh_dEi(mesh))
+    n, p = _densities(psi, phin, phip, ni_q, Vt, dEi_q)
     # converged: the update-based/predicted test passed, or |F|_inf reached
     # RES_ACCEPT (the criterion every driver used on its own before this
     # flag existed). Drivers should test this flag, not res_norm: the
@@ -1457,4 +1498,5 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     converged = bool(state.get("converged")) or res_norm < RES_ACCEPT
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
             "iters": it, "res_norm": res_norm, "converged": converged,
-            "velocity_saturation": velocity_saturation, "schottky": schottky, "bias": dict(bias_by_contact)}
+            "velocity_saturation": velocity_saturation, "schottky": schottky, "bias": dict(bias_by_contact),
+            "qshift": qs}

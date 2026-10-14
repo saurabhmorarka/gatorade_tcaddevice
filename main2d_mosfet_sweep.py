@@ -119,7 +119,7 @@ H_INIT = 0.1            # V - first continuation step (a full jump to a far targ
 
 def solve_mosfet(mesh, mat, dev, Cdop_substrate, Vgs, Vds, psi_init=None, phin_init=None, phip_init=None,
                   verbose=False, maxiter=SWEEP_MAXITER, cold_retry=True, velocity_saturation=False,
-                  vsat_fallback=True, schottky=None):
+                  vsat_fallback=True, schottky=None, quantum=None):
     psi_bc, phin_bc, phip_bc = gate_bc(dev, mat, Cdop_substrate, Vgs)
     bias_by_contact = {"source": 0.0, "drain": Vds, "gate": Vgs, "body": 0.0}
     return newton_solve_2d(
@@ -128,7 +128,7 @@ def solve_mosfet(mesh, mat, dev, Cdop_substrate, Vgs, Vds, psi_init=None, phin_i
         psi_bc_override={"gate": psi_bc}, phin_bc_override={"gate": phin_bc},
         phip_bc_override={"gate": phip_bc}, verbose=verbose, maxiter=maxiter,
         cold_retry=cold_retry, velocity_saturation=velocity_saturation, vsat_fallback=vsat_fallback,
-        schottky=schottky,
+        schottky=schottky, quantum=quantum,
     )
 
 
@@ -196,7 +196,10 @@ def continuation(solve_at, p0, s0, targets, prev=None, log=None, h_init=H_INIT, 
                     log(f"    step to {p_next:+.4f} failed after {MAX_HALVINGS} halvings - curve stopped")
                 return out, total_it, (prev, cur)
             prev, cur = cur, (p_next, r)
-            if r["iters"] <= fast_iters:
+            # step_iters: a solve made of several Newton solves (the
+            # Schrodinger-Poisson loop, quantum/device.py) reports the
+            # first one's count - what the bias step itself cost
+            if r.get("step_iters", r["iters"]) <= fast_iters:
                 h *= 2.0
         out[float(tgt)] = cur[1]
         if on_point is not None:

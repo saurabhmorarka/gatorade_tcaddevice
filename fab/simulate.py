@@ -273,10 +273,16 @@ def schottky_contacts(d, log=print):
     return sk
 
 
-def _context(cfg_path, top_nm, half_z, mesher="cartesian"):
+def _qkey(quantum):
+    return tuple(sorted(quantum.items())) if quantum else None
+
+
+def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None):
     """Device, mesh and equilibrium, built once per process (a worker
-    started by simulate() gets it from _init_worker instead)."""
-    key = (cfg_path, top_nm, half_z, mesher)
+    started by simulate() gets it from _init_worker instead). quantum: None
+    (classical) or the DeviceQuantum options (Schrodinger-Poisson channel
+    charge, quantum/device.py)."""
+    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum))
     if key not in _CTX:
         from main2d_mosfet_sweep import solve_mosfet
         from mos.mos_params import MOSDevice
@@ -285,6 +291,10 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian"):
         d["schottky"] = schottky_contacts(d, log=lambda *a: None)
         d["eq"] = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=True,
                                schottky=d["schottky"])
+        if quantum is not None:
+            from quantum.device import DeviceQuantum
+            d["quantum"] = DeviceQuantum(d["mesh"], d["mat"], **quantum)
+            d["eq"] = _solver_at(d, 0.0, None)(0.0, d["eq"])
         _CTX[key] = d
     return _CTX[key]
 
@@ -301,12 +311,37 @@ def drain_current(d, r):
 
 
 def _solver_at(d, Vgs, Vds):
+    """solve(bias, guess) along a gate (Vgs=None) or drain (Vds=None) walk.
+    With a quantum box, every point is a Schrodinger-Poisson loop
+    (quantum/device.py) started from the last converged point's Lambda."""
     from main2d_mosfet_sweep import solve_mosfet
     mesh, mat, dev, Cs = d["mesh"], d["mat"], d["dev"], d["Cs"]
-    return lambda pp, gss: solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
-                                        psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
-                                        cold_retry=False, velocity_saturation=True, vsat_fallback=False,
-                                        schottky=d.get("schottky"))
+
+    def dd(pp, gss, quantum=None):
+        return solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
+                            psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
+                            cold_retry=False, velocity_saturation=True, vsat_fallback=False,
+                            schottky=d.get("schottky"), quantum=quantum)
+    qd = d.get("quantum")
+    if qd is None:
+        return dd
+    hist = []                                  # (bias, Lambda) of the last two converged points
+    if "eq" in d and d["eq"].get("lam") is not None:
+        hist.append((0.0, d["eq"]["lam"]))
+
+    def solve(pp, gss):
+        lam0 = None
+        if len(hist) == 2 and hist[1][0] != hist[0][0]:      # secant predictor, like psi's
+            (p0, l0), (p1, l1) = hist
+            lam0 = l1 + np.clip((pp - p1) / (p1 - p0) * (l1 - l0), -0.05, 0.05)
+        elif hist:
+            lam0 = hist[-1][1]
+        r = qd.solve(lambda sh, g: dd(pp, g, sh), gss, lam0=lam0)
+        if r.get("converged"):
+            hist.append((pp, r["lam"]))
+            del hist[:-2]
+        return r
+    return solve
 
 
 def _write_point(task, d, v, state):
@@ -337,7 +372,8 @@ def run_curve(task):
     0 to the first value is adaptive and not recorded."""
     from main2d_mosfet_sweep import continuation
     t0 = time.perf_counter()
-    d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"))
+    d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"),
+                 task.get("quantum"))
     Vds = task["Vds"]
     base = d.get("base", {}).get(Vds)
     it0 = 0
@@ -500,7 +536,7 @@ def _octree_vtu_geometry(d):
 
 
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
-             vtk="all", workers=None, log=print, mesher="cartesian"):
+             vtk="all", workers=None, log=print, mesher="cartesian", quantum=None):
     from solver2d.mosfet_metrics import mosfet_metrics
     # The linear solver is core/linsolve's "auto" (PETSc block ILU at these
     # sizes) unless TCAD_LINSOLVE says otherwise. This used to force direct
@@ -511,8 +547,11 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     t0 = time.perf_counter()
     from core.parallel import performance_cores
     from main2d_mosfet_sweep import continuation
-    key = (config, top_nm, half_z, mesher)
-    d = _context(config, top_nm, half_z, mesher)                 # mesh + equilibrium, once
+    key = (config, top_nm, half_z, mesher, _qkey(quantum))
+    d = _context(config, top_nm, half_z, mesher, quantum)        # mesh + equilibrium, once
+    if d.get("quantum") is not None:
+        q = d["quantum"]
+        log(f"  quantum box: {len(q.lines)} lines, carrier {q.carrier}, {len(q.extra_nodes)} interpolated nodes")
     _region_info(d)
     log(f"  mesh + equilibrium: {time.perf_counter() - t0:.0f} s")
     # the drain ramps at Vgs = 0 (off: the gentlest place to raise Vds), once
@@ -532,7 +571,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
             log(f"  Vds={v:g} V: drain ramp failed - curve skipped")
             continue
         tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
-                          vtk_keep=(0.0, max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk")))
+                          vtk_keep=(0.0, max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
+                          quantum=quantum))
     n_work = workers or performance_cores()
     ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
     # one BLAS / OpenMP thread per worker process (inherited at spawn)

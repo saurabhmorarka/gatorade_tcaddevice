@@ -30,6 +30,12 @@ def main(argv=None):
     m.add_argument("--vgs-max", type=float, default=1.2)
     m.add_argument("--vgs-step", type=float, default=0.1)
     m.add_argument("--full-width", action="store_true", help="solve the full width (default: half + symmetry)")
+    m.add_argument("--quantum", action="store_true",
+                   help="Schrodinger-Poisson channel charge (quantum box under the gate; plans/quantum_plan.md)")
+    m.add_argument("--quantum-spacing", type=float, default=None, metavar="NM",
+                   help="one Schrodinger line per NM x NM lattice cell (default: every interface column)")
+    m.add_argument("--quantum-margin", type=float, default=None, metavar="NM",
+                   help="extend the quantum box NM past the gate along the same wall (under the spacers)")
     m.add_argument("--mesher", choices=("cartesian", "octree"), default="cartesian",
                    help="device mesh: graded rectilinear (default) or octree (exact Voronoi dual)")
     args = ap.parse_args(argv)
@@ -39,8 +45,11 @@ def main(argv=None):
     if args.cmd == "simulate":
         from fab.simulate import simulate
         out = args.out or os.path.join("out", os.path.splitext(os.path.basename(args.config))[0] + "_sim")
+        quantum = None
+        if args.quantum or args.quantum_spacing or args.quantum_margin:
+            quantum = dict(spacing_nm=args.quantum_spacing, margin_nm=args.quantum_margin)
         simulate(args.config, out, vds=args.vds, vgs_max=args.vgs_max, vgs_step=args.vgs_step,
-                 half_z=not args.full_width, mesher=args.mesher)
+                 half_z=not args.full_width, mesher=args.mesher, quantum=quantum)
         return 0
     cfg = flow.load(args.config)
     if args.cmd == "expand":
