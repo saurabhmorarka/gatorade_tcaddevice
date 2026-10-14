@@ -12,3 +12,6 @@ out/fab_*/
 
 # Schottky contact tables (contacts/subgrid.py): regenerable disk cache
 out/.cache/
+
+# VTK exports of the 2D drivers (--vtk): regenerable, ~0.5 MB per bias point
+out/**/vtk/

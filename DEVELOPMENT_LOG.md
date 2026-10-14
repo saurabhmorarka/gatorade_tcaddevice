@@ -5870,3 +5870,46 @@ Ioff 1.19e-6. Ohmic is 62 s; the gap is now mostly the serial drain ramp
   reference run, the physics roadmap with Schrodinger-Poisson /
   quantum correction next (candidate models and the validation plan),
   and the user's standing rules.
+
+## 68. README refresh: newest first, one equation per result, details in docs/
+
+The README had grown to 723 lines, oldest work first, with the newest
+results (Schottky, 3D) buried in the middle and the 3D images stale.
+
+- `README.md` (723 -> 125 lines) now runs newest first: Schottky contacts,
+  3D device solve, 3D virtual fab, 2D BTBT/GIDL, 2D NMOS, avalanche, 1D
+  diode + MOS-cap, setup. Each section is one or two lines, one
+  equation (GitHub ```math), one or two images and a link to details.
+  The equations are the ones the code solves: Tsu-Esaki current with the
+  WKB transmission; drift-diffusion with the Caughey-Thomas field mobility
+  (`mobility_field`); the implant as a Gaussian in depth from the local
+  silicon surface times a lateral erfc under the mask
+  (`Structure.implant`); Kane on traced paths with F_eff = Eg / (q l)
+  (`btbt/paths2d.py`); the Scharfetter-Gummel flux; Chynoweth
+  ionization; Poisson-Boltzmann and C = dQ/dV.
+- The cut text moved verbatim (image paths fixed) to `docs/schottky.md`,
+  `docs/fab.md`, `docs/2d.md`, `docs/1d.md`, `docs/setup.md`,
+  `docs/files.md`. `docs/fab.md` fixed on the way: the S/D contacts are
+  TiN (`contact_material`), not W, and the step list now includes the
+  contact recess and contact implant.
+- New images in `docs/img/` (tracked; `out/fab_*` is ignored), all from
+  `docs/make_readme_figures.py`:
+  - `fab_structure.png`, `fab_doping_cutaway.png`, `fab_process_steps.png`:
+    the exact voxel faces of the current planar build (tcadview's
+    `_voxel_boundary`), ILD hidden; the cutaway keeps the far half of the
+    width so the camera sees the cut face, silicon coloured by signed-log
+    net doping.
+  - `fab_ids_vgs.png`: fresh `fab simulate --mesher octree` with the
+    default Schottky contacts: 74 s, Ion 1729 uA/um, Vt 0.204 -> 0.051 V,
+    SS 82 mV/dec, DIBL 161 mV/V (matches entry 65).
+  - `mosfet2d_fields.png`: 2D NMOS off/on at Vds = 1 V from the `--vtk all`
+    export: potential with equipotentials, log n with the junction, log
+    |Jn| with electron current lines.
+- Found, not fixed: the 2D diode and MOS-cap drivers still use the
+  point-cloud mesh (no `mesh: style` option), and their solutions are
+  visibly noisy (jagged junction edge, streaks through the MOS depletion
+  and inversion layer). Delaunay re-triangulation for display did not
+  change it, so it is in the nodal values. Their maps
+  (`make_readme_figures.py 2d-old`) stay out of the README until those
+  drivers move to the quadtree mesh.
+- `.gitignore`: `out/**/vtk/` (regenerable VTK exports).
