@@ -131,18 +131,53 @@ width; Ion at Vgs = 0.8 V.
 | device | Vt lin / sat (V) | SS (mV/dec) | DIBL (mV/V) | Ion (uA/um) | Ioff (A/um) | full I-V |
 |---|---|---|---|---|---|---|
 | FinFET | 0.205 / 0.162 | 62 | 66 | 1015 | 2.6e-7 | 190 s |
-| nanosheet, PTS 1e19 | 0.206 / 0.101 | 72 | 163 | 1101 | 4.6e-6 | 585 s |
+| nanosheet, PTS 1e19 (two implants) | 0.207 / 0.176 | 61 | 48 | 1082 | 2.2e-8 | 454 s |
 | nanosheet, BDI | 0.207 / 0.176 | 61 | 48 | 1046 | 2.1e-8 | 427 s |
 
-- BDI isolates the mesa: Ioff 220x lower, DIBL 48 instead of 163 mV/V,
-  SS 61 instead of 72 mV/dec. With only a punch-through stopper (even at
-  1e19) the S/D epi still reaches the substrate under the stack, a
-  sub-sheet leakage path the gate does not control.
+- PTS and BDI now isolate the mesa equally well. The PTS used to be one
+  1e19 implant 5 nm below the mesa top (sigma 4 nm); the S/D recess goes
+  3 nm into the mesa and the epi's doping tail reaches ~12 nm below it,
+  deeper than the stopper, which left a 4e17 gap under the gate 58-68 nm
+  down: a punch-through path the gate does not control (Ioff 4.6e-6 A/um,
+  DIBL 163 mV/V, SS 72). A second implant 15 nm below the mesa top
+  (`pts_depths: [5, 15]`, a multi-energy implant) keeps ~1e19 under the
+  gate to 62 nm and adds nothing to the sheets (they are >25 nm above it).
 - Gate steps of 0.1 V for the nanosheet, 0.05 V for the FinFET; the
   adaptive walk takes about the same continuation steps either way.
 - Runtime history (BDI nanosheet, both curves): 2050 s (direct LU, one
   worker) -> 717 s (update-based convergence) -> 427 s (adaptive ILU level,
   dielectric-light mesh, ramps in the workers): DEVELOPMENT_LOG 71.
+
+## GIDL (off-state leakage)
+
+A separate off-state run, not part of the I-V: high drain bias only, the
+gate walked from 0 into off (NMOS Vds 0.7 V, Vgs 0 -> -0.8 V; PMOS
+Vds -0.7 V, Vgs 0 -> +0.8 V), local tunneling on (`--tunneling local`:
+Kane band-to-band with Hurkx's occupation factor + Hurkx trap-assisted,
+btbt/local3d.py).
+
+    python3 -m fab simulate configs/fab_nanosheet_bdi.yaml --mesher octree \
+        --vds 0.7 --vgs-min -0.8 --vgs-max 0 --vgs-step 0.1 --tunneling local
+
+| device | Id at Vgs = 0 | Id deepest off (A/um) | without tunneling | run |
+|---|---|---|---|---|
+| NMOS nanosheet BDI | 2.1e-8 | 7.3e-13 (floor from -0.4 V) | 1e-17 | ~400 s |
+| NMOS nanosheet PTS | 2.2e-8 | 2.0e-12 (floor from -0.4 V) | - | 390 s |
+| PMOS nanosheet BDI | 4.9e-9 | 7.8e-13 (floor from +0.3 V) | - | 456 s |
+| PMOS nanosheet PTS | 5.0e-9 | 2.0e-12 (floor from +0.3 V) | - | 347 s |
+| PMOS FinFET | 3.0e-8 | 4.6e-12, still falling | - | 152 s |
+| NMOS FinFET | | +2% over no tunneling at Vds 0.7 V | | 210 s |
+
+- The nanosheet floor is band-to-band (Kane) generation at the drain-side
+  gate edge, the same in all three sheets; the sheets have no body
+  contact, so the holes recombine at the source end of the sheets and the
+  current leaves through the source (drain and source currents balance to
+  1e-4). Without tunneling it is 1e-17 A/um.
+- The floor barely moves with the gate (unlike the 2D bulk devices,
+  which have a body contact): not understood yet. The floating sheets
+  are one suspect; a nonlocal (path) tunneling model is the real check.
+- The PTS floor (2e-12) is ~3x BDI's: probably the p+ stopper / n+ epi
+  junction under the S/D (not checked).
 
 ## Known issues / next
 
@@ -158,5 +193,11 @@ width; Ion at Vgs = 0.8 V.
 - Corners of fins and sheets take the larger Lambda of their two lines (a
   first pass; 2D cross-section Schrodinger slices, quantum plan P4, would
   replace it).
-- PMOS variants (SiGe:B 5e20 epi) work through `type: pmos` but are not
-  validated yet.
+- PMOS variants (`configs/fab_*_pmos.yaml`, Si0.5Ge0.5:B 5e20 epi,
+  strained on Si: its own band gap, ni and permittivity per node) run;
+  hole mobility in the SiGe epi is still silicon's.
+- **Quick test device**: `configs/fab_nanosheet_quick.yaml` - the BDI
+  nanosheet with one sheet (70k nodes vs 123k). Same Vt / SS / DIBL /
+  Ioff as the 3-sheet device (0.206 / 0.175 V, 61, 47, 2.1e-8); Ion
+  1242 vs 1046 uA/um (one sheet, no inner sheets). Full I-V in ~220 s
+  (vs 427 s), for trying mobility and other physics before the full device.

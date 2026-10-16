@@ -36,6 +36,10 @@ def main(argv=None):
                    help="one Schrodinger line per NM x NM lattice cell (default: every interface column)")
     m.add_argument("--quantum-margin", type=float, default=None, metavar="NM",
                    help="extend the quantum box NM past the gate along the same wall (under the spacers)")
+    m.add_argument("--vgs-min", type=float, default=0.0,
+                   help="also walk the gate from 0 down to this (negative: GIDL), same step")
+    m.add_argument("--tunneling", choices=("local",), default=None,
+                   help="band-to-band + trap-assisted tunneling (btbt/local3d.py): GIDL, junction leakage")
     m.add_argument("--mesher", choices=("cartesian", "octree"), default="cartesian",
                    help="device mesh: graded rectilinear (default) or octree (exact Voronoi dual)")
     args = ap.parse_args(argv)
@@ -49,7 +53,8 @@ def main(argv=None):
         if args.quantum or args.quantum_spacing or args.quantum_margin:
             quantum = dict(spacing_nm=args.quantum_spacing, margin_nm=args.quantum_margin)
         simulate(args.config, out, vds=args.vds, vgs_max=args.vgs_max, vgs_step=args.vgs_step,
-                 half_z=not args.full_width, mesher=args.mesher, quantum=quantum)
+                 half_z=not args.full_width, mesher=args.mesher, quantum=quantum, vgs_min=args.vgs_min,
+                 tunneling=args.tunneling)
         return 0
     cfg = flow.load(args.config)
     if args.cmd == "expand":

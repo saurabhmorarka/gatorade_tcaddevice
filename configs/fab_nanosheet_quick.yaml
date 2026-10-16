@@ -1,0 +1,19 @@
+# Quick-test nanosheet: the BDI nanosheet (configs/fab_nanosheet_bdi.yaml)
+# with ONE sheet - for trying physics ideas (mobility models, ...) in a
+# couple of minutes before running the full 3-sheet device. 70k octree
+# nodes vs 123k; currents are per um of the sheet's own effective width,
+# so Ion/Ioff compare with the 3-sheet device to within the bottom/top
+# sheet differences. Lengths in nm unless a unit is given.
+#
+#   python3 -m fab simulate configs/fab_nanosheet_quick.yaml --mesher octree \
+#       --vds 0.05 0.7 --vgs-max 0.8 --vgs-step 0.1
+template: nanosheet
+params:
+  type: nmos
+  cpp: 48nm
+  Lg: 15nm
+  n_sheets: 1
+  t_sheet: 5nm
+  W_sheet: 25nm
+  t_sige: 10nm
+  isolation: bdi

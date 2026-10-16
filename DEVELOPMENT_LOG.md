@@ -6235,3 +6235,107 @@ with the user present, or compared on iteration counts / CPU time, are
 quoted.
 
 Tests: venv 155 (1 skipped) and conda quick tier 155 pass; planar_tiny golden recaptured (nodes 15602 -> 14570, currents within 0.08%).
+
+
+## 72. GIDL in 3D (local tunneling), SiGe PMOS epi, PTS punch-through fix, LU fallback
+
+Branch `quantum-sp`. The 2D GIDL study (NMOS, and PMOS with a SiGe epi) is
+brought to the 3D FinFET and nanosheet (PTS and BDI), and the GIDL run is
+its own off-state simulation: high drain bias only, the gate walked from
+0 into off (NMOS Vds 0.7 V, Vgs 0 -> -0.8 V; PMOS Vds -0.7 V, Vgs 0 ->
++0.8 V). The on-state I-V stays without tunneling.
+
+**Local tunneling on the octree mesh** (btbt/local3d.py, new). The 2D model
+(btbt/local2d.py) takes the node field from the P1 gradient of triangles;
+the octree mesh has only nodes and edges, so the field is the magnitude of
+a least-squares gradient over each node's semiconductor edges (exact for a
+linear psi; the normal component is zeroed on the half-width symmetry
+plane). Kane band-to-band carries Hurkx's occupation factor
+D = (ni^2 - n p) / ((n + ni)(p + ni)): the uncapped local Kane rate
+otherwise fires wherever the built-in field is high, and generated
+6e-7 A in a near-equilibrium planar state. Hurkx TAT as in 2D. Full
+Jacobian over (psi, phin, phip); testsuite/test_tunneling3d.py checks the
+field (exact, linear psi), the Jacobian (FD, < 1e-6) and equilibrium (no
+generation, < 1e-12 of raw Kane).
+
+- `fab simulate --tunneling local --vgs-min V`: negative gate values walk
+  from Vgs = 0 separately. The model is turned on at equilibrium (a direct
+  solve, a log-strength ramp as fallback).
+- Both rates have the SRH form (they only pull n p toward ni^2), so the
+  quasi-Fermi box stays on (`keeps_qf_box`, read by contacts/subgrid.py).
+  With the box off, the planar GIDL run took 1130 s and its positive walk
+  failed; with it, 100 s.
+
+**SiGe in 3D** (fab/simulate.py, mesh3d/octree.py). A "SiGe" region is
+Si0.5Ge0.5 strained on Si (People & Bean, the 2D SiGe-PMOS study's
+material): Eg 0.75 eV, ni 6.3e12, eps_r 13.95. The octree assembly gives
+each node the material with the largest semiconductor share of its
+control volume (ni, delta-Ei, Eg, conduction-band offset per node;
+permittivity per semiconductor label). NMOS meshes are unchanged.
+New configs: fab_finfet_pmos, fab_nanosheet_pmos, fab_nanosheet_bdi_pmos.
+Hole mobility in the epi is still silicon's.
+
+**MUMPS LU fallback in the ILU-GMRES solver** (core/linsolve.py). The PTS
+nanosheet's negative-gate walk hung overnight (11 h): with electrons a
+vanishing minority, block ILU-GMRES fails at every level. Now a fresh ILU
+failure falls back to GMRES preconditioned by a MUMPS LU, kept and reused
+for the next 10 factorizations. That walk, Vgs 0 -> -0.8 V: stuck at
+-0.5 V after 806 s -> 174 s, 60 iterations. Only the large-3D iterative
+path (>= 60k unknowns) reaches it; 1D/2D stay on direct LU.
+
+**PTS punch-through fix** (fab/templates.py). The PTS nanosheet leaked
+4.6e-6 A/um at Vgs = 0, Vds 0.7 V. The current ran 58-68 nm down, below
+the stopper: one 1e19 implant 5 nm below the mesa top (sigma 4 nm),
+while the S/D recess goes 3 nm into the mesa and the epi's doping tail
+(epi_sy 4 nm) reaches ~12 nm below it - 7e18 at 60 nm under the S/D vs
+4e17 of stopper under the gate. A second stopper implant 15 nm below the
+mesa top (`pts_depths`, default [5, 15] for pts, [5] for bdi; a
+multi-energy implant) keeps ~1e19 under the gate down to 62 nm and adds
+nothing to the sheets.
+
+| PTS nanosheet NMOS | before | after |
+|---|---|---|
+| Vt lin / sat (V) | 0.206 / 0.101 | 0.207 / 0.176 |
+| SS (mV/dec) | 72 | 61 |
+| DIBL (mV/V) | 163 | 48 |
+| Ion (uA/um) | 1101 | 1082 |
+| Ioff (A/um) | 4.6e-6 | 2.2e-8 |
+| full I-V | 585 s | 454 s |
+
+It now matches the BDI device (0.207 / 0.176, 61, 48, 1046, 2.1e-8).
+
+**GIDL results** (A/um, deepest off-state bias):
+
+| device | Id(Vgs=0) | deepest off | run |
+|---|---|---|---|
+| NMOS nanosheet BDI | 2.1e-8 | 7.3e-13 floor (1e-17 without tunneling) | ~400 s |
+| NMOS nanosheet PTS | 2.2e-8 | 2.0e-12 floor | 390 s |
+| PMOS nanosheet BDI | 4.9e-9 | 7.8e-13 floor | 456 s |
+| PMOS nanosheet PTS | 5.0e-9 | 2.0e-12 floor | 347 s |
+| PMOS FinFET | 3.0e-8 | 4.6e-12, still falling at +0.8 V | 152 s |
+| NMOS FinFET | 2.6e-7 | +2% over no tunneling at Vds 0.7 V | 210 s |
+| planar NMOS | | 5.9e-12 floor (Vds 0.7 V) | 100 s |
+
+- The BDI floor is real: drain +7.315e-13, source -7.315e-13 A/um
+  (balanced to 5e-5); without tunneling 5e-18. All of it is Kane
+  generation at the drain-side gate edge (x 28-32 nm), equal in the three
+  sheets; the same amount recombines (Kane, np > ni^2) at the source-side
+  gate edge - the sheets have no body contact.
+- The floor barely moves with the gate, unlike the 2D bulk devices: not
+  understood yet. The channel potential does follow the gate (-0.10 ->
+  -0.36 V at the sheet centre, Vgs -0.5 -> -0.8 V). The floating sheets
+  are a suspect; a nonlocal (path) model is the real check.
+- The FinFET's off current is dominated by another path (not GIDL);
+  not traced yet.
+
+**Quick test device**: configs/fab_nanosheet_quick.yaml, the BDI nanosheet
+with one sheet (70k nodes vs 123k): Vt 0.206 / 0.175 V, SS 61, DIBL 47,
+Ioff 2.1e-8 (the 3-sheet device: 0.207 / 0.176, 61, 48, 2.1e-8), Ion 1242
+vs 1046 uA/um. Full I-V 221 s (measured with two other jobs running) vs
+427 s - for trying mobility ideas before the full device.
+
+Regression vs the committed results (DEVELOPMENT_LOG 71): BDI nanosheet
+I-V identical (max relative difference 1e-9), 388 s (was 427 s); FinFET
+within 3e-5, 192 s (was 190 s).
+
+Tests: venv 158 (1 skipped) and conda quick tier 158 pass.

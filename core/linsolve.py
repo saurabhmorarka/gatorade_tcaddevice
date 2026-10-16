@@ -85,6 +85,12 @@ AUTO_ITERATIVE_MIN = 60000   # unknowns; 2D-sized systems stay on direct LU
 ILU_RAISE_ITS = 50
 ILU_ADAPT_WINDOW = 5
 ILU_LEVELS_MAX = 4
+# A fresh block ILU-GMRES that still fails (electrons a vanishing minority
+# over a whole region: their quasi-Fermi rows nearly undetermined - the PTS
+# nanosheet at negative gate) is redone with an exact MUMPS LU preconditioner,
+# and the next LU_STICKY factorizations stay on LU before ILU is tried again.
+LU_FALLBACK = True
+LU_STICKY = 10
 LOOSE_RTOL = 1e-3            # a fresh ILU-GMRES that missed rtol but reached this is still used (_loose_ok)
 REUSE_ITS_FACTOR = 3         # a reused preconditioner may take this x the fresh one's iterations
 REUSE_ITS_MIN = 20           # ... but never fewer than this (see LinearSolver._krylov)
@@ -274,6 +280,8 @@ class LinearSolver:
         # whenever fresh factorizations keep needing many GMRES iterations
         self._adapt_levels = ilu_levels is None and bool(block_size)
         self._fresh_hist = []
+        self._lu_kept = None       # PETSc MUMPS KSP of the LU fallback (petsc_ilu backend)
+        self._lu_sticky = 0
         self.ilu_fill = ilu_fill
         self._pat = None
         self._prec = None          # backend-specific preconditioner handle
@@ -380,6 +388,10 @@ class LinearSolver:
         if self._ksp_kept is not None:
             self._ksp_kept["ksp"].destroy()
             self._ksp_kept = None
+        if self._lu_kept is not None:
+            self._lu_kept["ksp"].destroy()
+            self._lu_kept = None
+        self._lu_sticky = 0
 
     def _scaled(self, A, b, scale):
         r, c = scale
@@ -420,13 +432,21 @@ class LinearSolver:
             y, ok, its = gmres_right(As, bs, ilu.solve, rtol, self.max_krylov_ilu)
             if not ok and not self._loose_ok(As, bs, y):
                 raise RuntimeError("scipy ILU-GMRES failed on a freshly built preconditioner")
+        elif self.backend == "petsc_ilu" and self._lu_sticky > 0:
+            self._lu_sticky -= 1
+            y, its = self._lu_fallback(As, bs, rtol)
         else:
             self._prec = self._petsc_setup(As)
             y, its, ok = self._petsc_solve(As, bs, rtol, reuse=False)
             if not ok and not self._loose_ok(As, bs, y):
-                raise RuntimeError(f"PETSc {self.backend} failed on a freshly built preconditioner")
-        self._fresh_its = its if self.backend in ("scipy_ilu", "petsc_ilu") else 0
-        if self._adapt_levels and self._use_blocks():
+                if not (LU_FALLBACK and self.backend == "petsc_ilu"):
+                    raise RuntimeError(f"PETSc {self.backend} failed on a freshly built preconditioner")
+                self.stats["lu_fallbacks"] = self.stats.get("lu_fallbacks", 0) + 1
+                self._lu_sticky = LU_STICKY
+                y, its = self._lu_fallback(As, bs, rtol)
+        lu_now = bool(self._prec and self._prec.get("lu_direct"))
+        self._fresh_its = its if self.backend in ("scipy_ilu", "petsc_ilu") and not lu_now else 0
+        if self._adapt_levels and self._use_blocks() and not lu_now:
             self._fresh_hist.append(its)
             if (len(self._fresh_hist) >= ILU_ADAPT_WINDOW and self.ilu_levels < ILU_LEVELS_MAX
                     and np.mean(self._fresh_hist[-ILU_ADAPT_WINDOW:]) > ILU_RAISE_ITS):
@@ -447,6 +467,9 @@ class LinearSolver:
         into the 300-iteration limit cost ~1.5 s before the fallback
         refactored anyway, against 0.08 s for the refactorization."""
         As, bs = self._scaled(A, b, self._scale)
+        if self._prec.get("lu_direct"):                  # the LU fallback, reused as preconditioner
+            y, its, ok = self._lu_solve(As, bs, rtol, reuse=True, maxit=self.max_krylov)
+            return self._scale[1] * y, its, ok
         maxit = self.max_krylov if self.backend in ("superlu", "umfpack", "petsc_lu") else self.max_krylov_ilu
         if self.backend in ("scipy_ilu", "petsc_ilu"):   # (measured there; direct-LU reuse untouched)
             maxit = min(maxit, max(REUSE_ITS_MIN, REUSE_ITS_FACTOR * self._fresh_its))
@@ -553,6 +576,51 @@ class LinearSolver:
             self._petsc_two_level(self._ksp_kept, As)
         ksp.setUp()
         return self._ksp_kept
+
+    def _lu_mat(self, As):
+        I = PETSc.IntType
+        if getattr(self._pat, "_csr_I", None) is None:
+            self._pat._csr_I = (self._pat.indptr.astype(I), self._pat.indices.astype(I))
+        return PETSc.Mat().createAIJ(size=As.shape, csr=(*self._pat._csr_I, As.data), comm=PETSc.COMM_SELF)
+
+    def _lu_fallback(self, As, bs, rtol):
+        """Solve with a fresh MUMPS LU preconditioner (its ordering and
+        symbolic phase kept while the pattern lasts) and keep it as the
+        reused preconditioner; (y, its)."""
+        kept = self._lu_kept
+        if kept is None:
+            M = self._lu_mat(As)
+            ksp = PETSc.KSP().create(comm=PETSc.COMM_SELF)
+            ksp.setOperators(M, M)
+            ksp.setType("gmres")
+            ksp.setGMRESRestart(self.max_krylov)
+            ksp.setPCSide(PETSc.PC.Side.RIGHT)
+            ksp.setNormType(PETSc.KSP.NormType.UNPRECONDITIONED)
+            pc = ksp.getPC()
+            pc.setType("lu")
+            pc.setFactorSolverType("mumps")
+            kept = self._lu_kept = dict(ksp=ksp, P=M, lu_direct=True)
+        else:
+            kept["P"].setValuesCSR(*self._pat._csr_I, As.data)
+            kept["P"].assemble()
+            kept["ksp"].setOperators(kept["P"], kept["P"])
+        kept["ksp"].setUp()
+        self._prec = kept
+        y, its, ok = self._lu_solve(As, bs, rtol, reuse=False, maxit=self.max_krylov)
+        if not ok and not self._loose_ok(As, bs, y):
+            raise RuntimeError("PETSc ILU-GMRES and the MUMPS LU fallback both failed on a fresh preconditioner")
+        return y, its
+
+    def _lu_solve(self, As, bs, rtol, reuse, maxit):
+        ksp = self._prec["ksp"]
+        ksp.setTolerances(rtol=rtol, atol=1e-50, max_it=maxit)
+        if reuse:
+            ksp.setOperators(self._lu_mat(As), self._prec["P"])
+        bv = PETSc.Vec().createWithArray(bs.copy(), comm=PETSc.COMM_SELF)
+        xv = bv.duplicate()
+        ksp.solve(bv, xv)
+        y = xv.getArray().copy()
+        return y, ksp.getIterationNumber(), ksp.getConvergedReason() > 0 and np.all(np.isfinite(y))
 
     def _petsc_two_level(self, kept, As):
         """(Re)factor the ILU inside the two-level preconditioner and refresh

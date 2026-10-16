@@ -392,6 +392,13 @@ NANOSHEET_DEFAULTS = {
     "t_bdi": 10,
     "bdi_material": "SiN",
     "pts_peak": None, "pts_sigma": 4,       # None: 1e19 (pts) / 1e18 (bdi)
+    # Stopper implant depths below the mesa top (nm), one implant each
+    # (a multi-energy implant). None: pts [5, 15], bdi [5]. With pts the S/D
+    # recess goes 3 nm into the mesa and the epi tail (epi_sy) reaches
+    # ~12 nm below it; a single 5 nm stopper left a 4e17 gap under the gate
+    # at 15 nm, a punch-through path (Id 4.6e-6 A/um at Vgs = 0). The deep
+    # one closes it without adding to the sheets (it is >25 nm below them).
+    "pts_depths": None,
     "epi_over": 5, "epi_thickness": 18,
     "epi_peak": None, "epi_sx": 2.0, "epi_sy": 4.0,
 }
@@ -422,6 +429,8 @@ def nanosheet(params):
         p["t_bdi"] = 0
     if p.get("pts_peak") is None:
         p["pts_peak"] = 1e18 if bdi else 1e19
+    if p.get("pts_depths") is None:
+        p["pts_depths"] = [5] if bdi else [5, 15]
     gm, hk, sg = p["gate_material"], p["gate_dielectric"], p["sige_material"]
     sub_sp = "B" if n else "P"
     process = [
@@ -447,8 +456,14 @@ def nanosheet(params):
         {"step": "deposit", "label": "STI oxide fill", "mode": "fill", "material": "SiO2", "name": "sti",
          "to_height": 5},
         {"step": "planarize", "label": "STI CMP (stop on the stack)", "to_height": 0},
-        {"step": "implant", "label": "punch-through stopper", "species": sub_sp, "peak": "pts_peak",
-         "rp": "H_sl + 5", "sigma": "pts_sigma"},
+    ]
+    process += [
+        {"step": "implant", "label": "punch-through stopper" + (f" ({k + 1}/{len(p['pts_depths'])})"
+                                                                if len(p["pts_depths"]) > 1 else ""),
+         "species": sub_sp, "peak": "pts_peak", "rp": f"H_sl + {dpt}", "sigma": "pts_sigma"}
+        for k, dpt in enumerate(p["pts_depths"])
+    ]
+    process += [
         # with BDI the STI stays 2 nm above the mesa top: flush, the S/D epi
         # beside the stack would meet the mesa's top edge
         {"step": "etch", "label": "STI recess (stack reveal)", "mode": "anisotropic", "regions": ["sti"],

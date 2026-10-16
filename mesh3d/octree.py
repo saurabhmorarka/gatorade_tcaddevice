@@ -753,8 +753,9 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
     shape = label.shape
     N, P, node_idx = dual["N"], dual["P"], dual["node_idx"]
     kinds = np.array([m["kind"] for m in materials] + [GAS])
-    eps = np.array([mat.eps if m["kind"] == SEMI else EPS0 * float(m.get("eps_r", 1.0)) for m in materials]
-                   + [0.0])
+    semi_mat = [m.get("material") or mat if m["kind"] == SEMI else None for m in materials]
+    eps = np.array([semi_mat[k].eps if m["kind"] == SEMI else EPS0 * float(m.get("eps_r", 1.0))
+                    for k, m in enumerate(materials)] + [0.0])
     nm2, nm3, cm = 1e-14, 1e-21, 1e-7
     VN, VL, VV = dual["vol"]
     kv = kinds[VL]
@@ -852,6 +853,22 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
 
     pts_nm = P[dev] + origin
     semi_node = cv_semi[dev] > 0
+    # band structure per node: the semiconductor filling most of its control
+    # volume (a Si / SiGe interface node takes the larger share)
+    from core.materials import delta_Ei_of
+    sl = np.flatnonzero([m["kind"] == SEMI for m in materials])
+    vol_l = np.zeros((N, len(materials)))
+    s_ = kv == SEMI
+    np.add.at(vol_l, (VN[s_], VL[s_]), VV[s_])
+    k_node = np.where(vol_l[:, sl].max(axis=1) > 0, sl[np.argmax(vol_l[:, sl], axis=1)], -1)[dev] \
+        if len(sl) else np.full(int(dev.sum()), -1)
+    def per_node(f, fill):
+        tab = np.array([f(semi_mat[k]) if semi_mat[k] is not None else fill for k in range(len(materials))])
+        return np.where(k_node >= 0, tab[np.maximum(k_node, 0)], fill)
+    ni_node = per_node(lambda m_: m_.ni, 0.0)
+    dEi_node = per_node(lambda m_: delta_Ei_of(m_, mat), 0.0)
+    Eg_node = per_node(lambda m_: m_.Eg_eV, mat.Eg_eV)
+    ecoff_node = per_node(lambda m_: m_.Vt * np.log(m_.Nc / m_.ni), mat.Vt * np.log(mat.Nc / mat.ni))
     net = np.asarray(node_net, float)[tuple(node_idx[dev].T)]
     contacts = []
     for nm in names:
@@ -864,9 +881,8 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
         edge_weight=A * nm2 / (L * cm), edge_g=G * nm2 / (L * cm),
         facet_length=A * nm2, facet_length_semi=As * nm2,
         cv_area=cv[dev] * nm3, cv_area_semi=cv_semi[dev] * nm3,
-        Cdop=np.where(semi_node, net, 0.0), ni_arr=np.where(semi_node, mat.ni, 0.0), is_insulator=~semi_node,
-        dEi_arr=np.zeros(n_dev), Eg_arr=np.full(n_dev, mat.Eg_eV),
-        ec_off_arr=np.full(n_dev, mat.Vt * np.log(mat.Nc / mat.ni)),
+        Cdop=np.where(semi_node, net, 0.0), ni_arr=np.where(semi_node, ni_node, 0.0), is_insulator=~semi_node,
+        dEi_arr=np.where(semi_node, dEi_node, 0.0), Eg_arr=Eg_node, ec_off_arr=ecoff_node,
         boundary_point_index=b_idx, boundary_bc_type=b_type, boundary_edges=set(),
         domain=SimpleNamespace(contacts=contacts), h_min_cm=float(L.min() * cm) if len(L) else 0.0,
         grid_index=node_idx[dev], node_id=new_id, dim=3,

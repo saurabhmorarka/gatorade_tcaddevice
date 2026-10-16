@@ -133,6 +133,30 @@ def sample_structure(st, axes_nm):
     return lab.reshape([len(c) for c in centres]), net
 
 
+SIGE_DEFAULT_X = 0.5        # Ge fraction of a plain "SiGe" (the PMOS S/D epi: Si0.5Ge0.5:B)
+_SEMI_MATS = {}
+
+
+def semiconductor_material(name):
+    """The core Material of a fab semiconductor: "Si" the silicon default;
+    "SiGe" (Ge fraction SIGE_DEFAULT_X) or "SiGe0.3" etc. a SiGe alloy
+    compressively strained on Si (People & Bean offsets: the gap narrows in
+    the valence band) - the 2D SiGe-PMOS study's material
+    (configs/input_pmos_2d_btbt_sige.yaml)."""
+    if name not in _SEMI_MATS:
+        if name == "Si":
+            _SEMI_MATS[name] = _resolve_material_block({})
+        elif name.startswith("SiGe"):
+            x = float(name[4:]) if len(name) > 4 else SIGE_DEFAULT_X
+            _SEMI_MATS[name] = _resolve_material_block({
+                "name": f"SiGe_x{x:g}_strained",
+                "alloy": {"end_member_a": "Silicon", "end_member_b": "Germanium", "x_a": 1.0 - x,
+                          "bowing_eV": 0.36, "strain": {"substrate": "Silicon", "x_substrate_Ge": 0.0}}})
+        else:
+            raise NotImplementedError(f"device semiconductor {name!r}: only Si and SiGe are wired into 3D")
+    return _SEMI_MATS[name]
+
+
 def device_materials(st):
     """One mesh material per fab region: semiconductor, insulator (eps from
     the table) or conductor (the contact whose region it is)."""
@@ -140,7 +164,7 @@ def device_materials(st):
     out = []
     for r in st.regions:
         if is_semiconductor(r.material):
-            out.append(dict(name=r.name, kind=SEMI))
+            out.append(dict(name=r.name, kind=SEMI, material=semiconductor_material(r.material)))
         elif r.material in CONDUCTORS:
             if r.name not in by_region:
                 raise ValueError(f"conductor region {r.name!r} ({r.material}) is not a contact in the device layer")
@@ -280,12 +304,13 @@ def _qkey(quantum):
     return tuple(sorted(quantum.items())) if quantum else None
 
 
-def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None):
+def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneling=None):
     """Device, mesh and equilibrium, built once per process (a worker
     started by simulate() gets it from _init_worker instead). quantum: None
     (classical) or the DeviceQuantum options (Schrodinger-Poisson channel
-    charge, quantum/device.py)."""
-    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum))
+    charge, quantum/device.py). tunneling: None or "local" (Kane band-to-band
+    + Hurkx trap-assisted, btbt/local3d.py: GIDL and junction leakage)."""
+    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum), tunneling)
     if key not in _CTX:
         from main2d_mosfet_sweep import solve_mosfet
         from mos.mos_params import MOSDevice
@@ -300,8 +325,70 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None):
             kw.setdefault("carrier", "p" if d["params"].get("type") == "pmos" else "n")
             d["quantum"] = DeviceQuantum(d["mesh"], d["mat"], **kw)
             d["eq"] = _solver_at(d, 0.0, None)(0.0, d["eq"])
+        if tunneling is not None:
+            if quantum is not None:
+                raise NotImplementedError("tunneling with the quantum box is not supported yet")
+            d["tunneling"] = tunneling_model(d, tunneling)
+            d["eq"] = _tunneling_turn_on(d)
         _CTX[key] = d
     return _CTX[key]
+
+
+TUNNELING_MODELS = ("local",)
+
+
+def tunneling_model(d, name):
+    """The generation hook of tunneling model `name` on the device mesh:
+    "local" = btbt/local3d.py, the 2D drivers' "local" model (uncapped Kane
+    band-to-band + Hurkx trap-assisted; in silicon the trap-assisted part
+    dominates)."""
+    from btbt.local3d import LocalTunneling3D
+    from solver2d.newton_solver_qf_2d import _mesh_ni_edge_g
+    from tat.tat import KaneBTBTModel, HurkxTATModel
+    if name not in TUNNELING_MODELS:
+        raise ValueError(f"tunneling must be one of {TUNNELING_MODELS}, not {name!r}")
+    mesh, mat = d["mesh"], d["mat"]
+    k = KaneBTBTModel.si_kane_quadratic()
+    kane = KaneBTBTModel(A=k.A, B=k.B, P=k.P, F_sat_V_cm=np.inf)
+    sym = (2, float(np.asarray(mesh.points)[:, 2].max())) if d["half_z"] else None
+    return LocalTunneling3D(mesh, mat, _mesh_ni_edge_g(mesh, mat)[0], kane=kane, hurkx=HurkxTATModel(),
+                            symmetry_plane=sym)
+
+
+class _ScaledGeneration:
+    """A generation hook times lam (and its Jacobian)."""
+
+    def __init__(self, model, lam):
+        self.model, self.lam = model, lam
+        self.keeps_qf_box = getattr(model, "keeps_qf_box", False)
+
+    def __call__(self, psi, phin, phip, jacobian=False):
+        Gn, Gp, dn, dp = self.model(psi, phin, phip, jacobian)
+        s = self.lam
+        return s * Gn, s * Gp, None if dn is None else s * dn, None if dp is None else s * dp
+
+
+def _tunneling_turn_on(d):
+    """Equilibrium with the tunneling model on: one solve from the plain
+    equilibrium (the rates carry the occupation factor and vanish there);
+    if that fails, switched on gradually (strength 10^-9 -> 1, continuation in
+    its log10, btbt/main_btbt2d_sweep.py's turn_on)."""
+    from main2d_mosfet_sweep import continuation, solve_mosfet
+    model = d.pop("tunneling")
+
+    def at(lg, g):
+        return solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, psi_init=g["psi"],
+                            phin_init=g["phin"], phip_init=g["phip"], cold_retry=False, velocity_saturation=True,
+                            schottky=d.get("schottky"), generation=_ScaledGeneration(model, 10.0 ** lg))
+    r = at(0.0, d["eq"])                      # with the occupation factor the rates vanish in equilibrium
+    if not r.get("converged"):
+        r0 = at(-9.0, d["eq"])
+        out, _, _ = continuation(at, -9.0, r0, [-6.0, -4.0, -3.0, -2.0, -1.0, -0.5, 0.0])
+        r = out.get(0.0)
+    d["tunneling"] = model
+    if r is None:
+        raise RuntimeError("tunneling turn-on at equilibrium did not converge")
+    return r
 
 
 def _init_worker(key, d):
@@ -348,7 +435,7 @@ def _solver_at(d, Vgs, Vds, frozen=False, start=None):
         return solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
                             psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
                             cold_retry=False, velocity_saturation=True, vsat_fallback=False,
-                            schottky=d.get("schottky"), quantum=quantum, **kw)
+                            schottky=d.get("schottky"), quantum=quantum, generation=d.get("tunneling"), **kw)
     qd = d.get("quantum")
     if qd is None:
         return dd
@@ -404,7 +491,7 @@ def run_curve(task):
     from main2d_mosfet_sweep import continuation
     t0 = time.perf_counter()
     d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"),
-                 task.get("quantum"))
+                 task.get("quantum"), task.get("tunneling"))
     Vds = task["Vds"]
     base = d.get("base", {}).get(Vds)
     it0 = 0
@@ -414,6 +501,7 @@ def run_curve(task):
             return dict(task=task, points={}, entries=[], iters=it0, time_s=time.perf_counter() - t0)
         base = ramp[Vds]
     vgs = sorted(v for v in task["vgs"] if v > 0)
+    vgs_neg = sorted((v for v in task["vgs"] if v < 0), reverse=True)     # a GIDL walk: 0 -> negative
     # Each point's .vtu is written in a background thread while Newton
     # walks on (zlib and most of numpy release the GIL): the writes were
     # ~0.4-0.6 s x 13 on the slowest curve's path (DEVELOPMENT_LOG 59).
@@ -426,6 +514,10 @@ def run_curve(task):
             on_point(0.0, base)
         states, it1, _ = continuation(_solver_at(d, None, Vds, start=base), 0.0, base, vgs, on_point=on_point,
                                       **GATE_WALK)
+        if vgs_neg:
+            neg, it2, _ = continuation(_solver_at(d, None, Vds, start=base), 0.0, base, vgs_neg,
+                                       on_point=on_point, **GATE_WALK)
+            states, it1 = {**neg, **states}, it1 + it2
         if task.get("include_zero", True):
             states = {0.0: base, **states}
         pts = {v: drain_current(d, r) for v, r in states.items()}
@@ -567,7 +659,7 @@ def _octree_vtu_geometry(d):
 
 
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
-             vtk="all", workers=None, log=print, mesher="cartesian", quantum=None):
+             vtk="all", workers=None, log=print, mesher="cartesian", quantum=None, vgs_min=0.0, tunneling=None):
     from solver2d.mosfet_metrics import mosfet_metrics
     # The linear solver is core/linsolve's "auto" (PETSc block ILU at these
     # sizes) unless TCAD_LINSOLVE says otherwise. This used to force direct
@@ -578,8 +670,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     t0 = time.perf_counter()
     from core.parallel import performance_cores
     from main2d_mosfet_sweep import continuation
-    key = (config, top_nm, half_z, mesher, _qkey(quantum))
-    d = _context(config, top_nm, half_z, mesher, quantum)        # mesh + equilibrium, once
+    key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling)
+    d = _context(config, top_nm, half_z, mesher, quantum, tunneling)        # mesh + equilibrium, once
     if d.get("quantum") is not None:
         q = d["quantum"]
         log(f"  quantum box: {len(q.lines)} lines, carrier {q.carrier}, {len(q.extra_nodes)} interpolated nodes")
@@ -590,6 +682,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     # then starts at once instead of waiting for the ramp to the highest
     # Vds (nanosheet: ~80 s of serial ramps before any curve started).
     vgs = list(np.round(np.arange(vgs_step, vgs_max + 1e-9, vgs_step), 6))
+    if vgs_min < 0:                                   # below 0 (GIDL): walked from 0 separately
+        vgs = sorted(list(np.round(-np.arange(vgs_step, -vgs_min + 1e-9, vgs_step), 6)) + vgs)
     # One worker per curve. Splitting a curve into segments (each walking
     # from Vgs = 0 to its first point) cannot shorten it: a segment's walk
     # takes the same continuation steps as the curve, so the last segment
@@ -599,8 +693,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     tasks = []
     for v in vds:
         tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
-                          vtk_keep=(0.0, max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
-                          quantum=quantum))
+                          vtk_keep=(0.0, min(vgs), max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
+                          quantum=quantum, tunneling=tunneling))
     n_work = workers or performance_cores()
     ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
     # one BLAS / OpenMP thread per worker process (inherited at spawn)
@@ -640,8 +734,13 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
             for a, b in zip(c["Vgs"], c["Id"]):
                 w.writerow([c["Vds"], a, b])
     m = None
-    if len(curves) >= 2 and all(len(c["Vgs"]) > 3 for c in curves):
-        m = mosfet_metrics(curves[0], curves[-1], (d["L_nm"] or 1e3) * 1e-3)
+    pos = [dict(c, Vgs=c["Vgs"][c["Vgs"] >= 0], Id=c["Id"][c["Vgs"] >= 0]) for c in curves]   # (GIDL walk aside)
+    if len(pos) >= 2 and all(len(c["Vgs"]) > 3 for c in pos):
+        try:
+            m = mosfet_metrics(pos[0], pos[-1], (d["L_nm"] or 1e3) * 1e-3)
+        except Exception as e:                 # (e.g. a PMOS sweep: metrics are NMOS-oriented)
+            log(f"  metrics skipped: {e}")
+    if m is not None:
         log(f"  Vt,cc = {m['Vt_cc_lo']:.3f} V -> {m['Vt_cc_hi']:.3f} V, DIBL = {m['DIBL_mV_per_V']:.0f} mV/V, "
             f"SS = {m['SS_lo']:.0f} mV/dec")
         log(f"  Ion = {m['Ion'] * 1e6:.0f} uA/um, Ioff = {m['Ioff']:.2e} A/um, Ion/Ioff = {m['Ion_Ioff']:.2e}")

@@ -332,7 +332,9 @@ class SubgridContacts:
                     dGn = dGn + a[2] if a[2] is not None else dGn
                     dGp = dGp + a[3] if a[3] is not None else dGp
             return Gn, Gp, dGn, dGp
-        g.keeps_qf_box = extra is None      # relaxes toward the metal Fermi level: inside the box
+        # relaxes toward the metal Fermi level: inside the box (and so does an
+        # extra hook that says so, e.g. an SRH-form tunneling rate)
+        g.keeps_qf_box = extra is None or bool(getattr(extra, "keeps_qf_box", False))
         return g
 
     def terminal_current(self, result, name, bias):
