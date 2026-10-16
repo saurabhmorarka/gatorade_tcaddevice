@@ -194,10 +194,16 @@ btbt/local3d.py).
   first pass; 2D cross-section Schrodinger slices, quantum plan P4, would
   replace it).
 - PMOS variants (`configs/fab_*_pmos.yaml`, Si0.5Ge0.5:B 5e20 epi,
-  strained on Si: its own band gap, ni and permittivity per node) run;
-  hole mobility in the SiGe epi is still silicon's.
-- **Quick test device**: `configs/fab_nanosheet_quick.yaml` - the BDI
-  nanosheet with one sheet (70k nodes vs 123k). Same Vt / SS / DIBL /
-  Ioff as the 3-sheet device (0.206 / 0.175 V, 61, 47, 2.1e-8); Ion
-  1242 vs 1046 uA/um (one sheet, no inner sheets). Full I-V in ~220 s
-  (vs 427 s), for trying mobility and other physics before the full device.
+  strained on Si: its own band gap, ni and permittivity per node) run.
+  Mobility is per node by material (DEVELOPMENT_LOG 73), but the SiGe
+  parameters are still silicon's: no verified Masetti-type set for
+  heavily doped SiGe:B yet. The S/D epi is a boxy, merged block (no
+  {111} facets yet).
+- **One-sheet option** (`n_sheets` is a template parameter, the user's
+  choice; the default stays 3): `configs/fab_nanosheet_quick.yaml` is the
+  BDI nanosheet with one sheet, 70k nodes vs 123k, full I-V ~220 s vs
+  427 s. It is NOT a stand-in for the 3-sheet device in general: each
+  sheet's effective channel length depends on the S/D junction profile at
+  its height, so Vt / DIBL / SS can differ sheet to sheet. In this device
+  they happened to match (Vt 0.206 / 0.175 V, SS 61, DIBL 47, Ioff 2.1e-8
+  vs 0.207 / 0.176, 61, 48, 2.1e-8); Ion did not (1242 vs 1046 uA/um).

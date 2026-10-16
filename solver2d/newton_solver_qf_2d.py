@@ -313,19 +313,56 @@ def _sg_shift_arrays(ni, dEi, ii, jj, Vt):
     return de + lr, de - lr
 
 
+# The Material fields the doping-dependent mobility reads (any of them may
+# differ per material: a SiGe S/D epi on a Si channel).
+MOBILITY_FIELDS = ("doping_mobility", "masetti_n", "masetti_p", "mu_n_max", "mu_n_min", "N_ref_n", "alpha_n",
+                   "mu_p_max", "mu_p_min", "N_ref_p", "alpha_p")
+
+
+def _mobility_key(m):
+    return tuple(tuple(v) if isinstance(v, (list, tuple)) else v for v in (getattr(m, f) for f in MOBILITY_FIELDS))
+
+
+def node_materials(mesh, mat):
+    """(materials, index): the distinct semiconductor materials of the mesh
+    and each node's index into them - entry 0 is `mat` (the solver's base
+    material). A mesh without per-node materials (mesh.node_materials
+    None, or a single material) is all `mat`."""
+    mats = getattr(mesh, "node_materials", None)
+    idx = getattr(mesh, "node_material_index", None)
+    if mats is None or idx is None:
+        return [mat], None
+    return [mat] + [m for m in mats[1:]], np.asarray(idx)
+
+
 def _mesh_mobility_nodal(mesh, mat):
     """Static (solve-independent) per-NODE doping-dependent mobility
     arrays, following the same precomputed-array pattern as
     _mesh_ni_edge_g's ni_arr/edge_g below (mesh.Cdop is always populated,
     homogeneous mesh or not, so - unlike ni_arr - this needs no
-    homogeneous-mesh fallback branch)."""
+    homogeneous-mesh fallback branch). Each node takes its own material's
+    parameters (node_materials); a single-material mesh is the base
+    material's, as before."""
+    mats, idx = node_materials(mesh, mat)
+    keys = tuple(_mobility_key(m) for m in mats)
+    if idx is None or len(set(keys)) == 1:
+        return _mesh_cached(mesh, ("mu_nodal",) + keys[0], lambda: _mesh_mobility_nodal_build(mesh, mat))
+    return _mesh_cached(mesh, ("mu_nodal_multi",) + keys, lambda: _mesh_mobility_nodal_multi(mesh, mats, idx))
+
+
+def _mesh_mobility_nodal_multi(mesh, mats, idx):
+    mu_n = np.empty(len(mesh.Cdop))
+    mu_p = np.empty(len(mesh.Cdop))
+    for k, m in enumerate(mats):
+        on = idx == k
+        if on.any():
+            n_k, p_k = _mesh_mobility_nodal_build(mesh, m)
+            mu_n[on], mu_p[on] = n_k[on], p_k[on]
+    return mu_n, mu_p
+
+
+def _mesh_mobility_nodal_build(mesh, mat):
     model = getattr(mat, "doping_mobility", "caughey_thomas")
-    key = ("mu_nodal", model, tuple(mat.masetti_n), tuple(mat.masetti_p), mat.mu_n_max, mat.mu_n_min,
-           mat.N_ref_n, mat.alpha_n, mat.mu_p_max, mat.mu_p_min, mat.N_ref_p, mat.alpha_p)
-    return _mesh_cached(mesh, key, lambda: _mesh_mobility_nodal_build(mesh, mat, model))
-
-
-def _mesh_mobility_nodal_build(mesh, mat, model):
     N_abs = np.abs(mesh.Cdop)
     if model == "masetti":
         return mobility_masetti(N_abs, mat.masetti_n), mobility_masetti(N_abs, mat.masetti_p)
@@ -334,6 +371,26 @@ def _mesh_mobility_nodal_build(mesh, mat, model):
     mu_n_node = mobility_doping(N_abs, mat.mu_n_max, mat.mu_n_min, mat.N_ref_n, mat.alpha_n)
     mu_p_node = mobility_doping(N_abs, mat.mu_p_max, mat.mu_p_min, mat.N_ref_p, mat.alpha_p)
     return mu_n_node, mu_p_node
+
+
+def _edge_vsat(mesh, mat):
+    """(vsat_n, vsat_p) per edge - the mean of its two nodes' materials -
+    or the base material's scalars when every material has the same. The
+    Caughey-Thomas exponents beta_n / beta_p must agree across materials
+    (mobility_field takes one)."""
+    mats, idx = node_materials(mesh, mat)
+    for b in ("beta_n", "beta_p"):
+        if len({getattr(m, b) for m in mats}) > 1:
+            raise NotImplementedError(f"materials with different {b} in one device")
+    vs = [(m.vsat_n, m.vsat_p) for m in mats]
+    if idx is None or len(set(vs)) == 1:
+        return mat.vsat_n, mat.vsat_p
+
+    def build():
+        ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+        tn, tp = np.array([v[0] for v in vs]), np.array([v[1] for v in vs])
+        return 0.5 * (tn[idx[ii]] + tn[idx[jj]]), 0.5 * (tp[idx[ii]] + tp[idx[jj]])
+    return _mesh_cached(mesh, ("vsat_edge",) + tuple(vs), build)
 
 
 VSAT_FORCES = ("efield", "hybrid", "gradqf")
@@ -436,8 +493,9 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
         phin = phip = np.zeros_like(psi)
     Fn, dFn = _edge_force(force, dpsi, phin[jj] - phin[ii], n[ii], n[jj], L, mat.Vt, +1.0)
     Fp, dFp = _edge_force(force, dpsi, phip[jj] - phip[ii], p[ii], p[jj], L, mat.Vt, -1.0)
-    mu_n, dmu_n_dF = mobility_field(Fn, mu_n0, mat.vsat_n, mat.beta_n)
-    mu_p, dmu_p_dF = mobility_field(Fp, mu_p0, mat.vsat_p, mat.beta_p)
+    vsat_n, vsat_p = _edge_vsat(mesh, mat)
+    mu_n, dmu_n_dF = mobility_field(Fn, mu_n0, vsat_n, mat.beta_n)
+    mu_p, dmu_p_dF = mobility_field(Fp, mu_p0, vsat_p, mat.beta_p)
     return mu_n, mu_p, tuple(dmu_n_dF * d for d in dFn), tuple(dmu_p_dF * d for d in dFp)
 
 

@@ -865,6 +865,17 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
     def per_node(f, fill):
         tab = np.array([f(semi_mat[k]) if semi_mat[k] is not None else fill for k in range(len(materials))])
         return np.where(k_node >= 0, tab[np.maximum(k_node, 0)], fill)
+    # the distinct semiconductor materials (0 = the base mat) and each node's
+    # index, for what reads per-node material parameters (the mobility)
+    uniq = [mat]
+    to_u = np.zeros(len(materials), dtype=int)
+    for k in sl:
+        j = next((i for i, u in enumerate(uniq) if u is semi_mat[k]), None)
+        if j is None:
+            uniq.append(semi_mat[k])
+            j = len(uniq) - 1
+        to_u[k] = j
+    mat_idx = np.where(k_node >= 0, to_u[np.maximum(k_node, 0)], 0)
     ni_node = per_node(lambda m_: m_.ni, 0.0)
     dEi_node = per_node(lambda m_: delta_Ei_of(m_, mat), 0.0)
     Eg_node = per_node(lambda m_: m_.Eg_eV, mat.Eg_eV)
@@ -883,6 +894,7 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
         cv_area=cv[dev] * nm3, cv_area_semi=cv_semi[dev] * nm3,
         Cdop=np.where(semi_node, net, 0.0), ni_arr=np.where(semi_node, ni_node, 0.0), is_insulator=~semi_node,
         dEi_arr=np.where(semi_node, dEi_node, 0.0), Eg_arr=Eg_node, ec_off_arr=ecoff_node,
+        node_materials=uniq, node_material_index=mat_idx,
         boundary_point_index=b_idx, boundary_bc_type=b_type, boundary_edges=set(),
         domain=SimpleNamespace(contacts=contacts), h_min_cm=float(L.min() * cm) if len(L) else 0.0,
         grid_index=node_idx[dev], node_id=new_id, dim=3,

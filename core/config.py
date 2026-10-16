@@ -93,6 +93,36 @@ def _resolve_material_block(block: dict) -> Material:
         mat.ni = float(block["ni_cm3"])
     if block.get("doping_mobility") is not None:          # masetti (default) | caughey_thomas
         mat.doping_mobility = str(block["doping_mobility"])
+    apply_mobility_block(mat, block.get("mobility"))
+    return mat
+
+
+# Fields a material block's `mobility:` sub-block may set (core/params.py
+# Material). Every material - an alloy region included - starts from
+# silicon's values; the 2D/3D solver reads each node's own material.
+MOBILITY_BLOCK_FIELDS = ("doping_mobility", "masetti_n", "masetti_p", "mu_n_max", "mu_n_min", "N_ref_n",
+                         "alpha_n", "mu_p_max", "mu_p_min", "N_ref_p", "alpha_p", "vsat_n", "vsat_p",
+                         "beta_n", "beta_p")
+
+
+def apply_mobility_block(mat: Material, mob) -> Material:
+    """mobility: {field: value} on `mat` (in place). masetti_n/p are the
+    9 Masetti coefficients (mu_min1, mu_min2, mu1, Pc, Cr, Cs, alpha,
+    beta, mu_max)."""
+    if not mob:
+        return mat
+    unknown = set(mob) - set(MOBILITY_BLOCK_FIELDS)
+    if unknown:
+        raise ValueError(f"material mobility: unknown field(s) {sorted(unknown)}; "
+                         f"allowed: {list(MOBILITY_BLOCK_FIELDS)}")
+    for k, v in mob.items():
+        if k in ("masetti_n", "masetti_p"):
+            v = tuple(float(x) for x in v)
+            if len(v) != 9:
+                raise ValueError(f"material mobility: {k} needs 9 coefficients, got {len(v)}")
+        elif k != "doping_mobility":
+            v = float(v)
+        setattr(mat, k, v)
     return mat
 
 

@@ -6328,14 +6328,65 @@ It now matches the BDI device (0.207 / 0.176, 61, 48, 1046, 2.1e-8).
 - The FinFET's off current is dominated by another path (not GIDL);
   not traced yet.
 
-**Quick test device**: configs/fab_nanosheet_quick.yaml, the BDI nanosheet
-with one sheet (70k nodes vs 123k): Vt 0.206 / 0.175 V, SS 61, DIBL 47,
-Ioff 2.1e-8 (the 3-sheet device: 0.207 / 0.176, 61, 48, 2.1e-8), Ion 1242
-vs 1046 uA/um. Full I-V 221 s (measured with two other jobs running) vs
-427 s - for trying mobility ideas before the full device.
+**One-sheet option**: configs/fab_nanosheet_quick.yaml, the BDI nanosheet
+with n_sheets: 1 (70k nodes vs 123k), full I-V 221 s (measured with two
+other jobs running) vs 427 s. An option, not a stand-in: each sheet's
+effective channel length follows the S/D junction profile at its height,
+so Vt / DIBL / SS need not match the multi-sheet device. Here they did
+(Vt 0.206 / 0.175 V, SS 61, DIBL 47, Ioff 2.1e-8 vs 0.207 / 0.176, 61, 48,
+2.1e-8); Ion did not (1242 vs 1046 uA/um). (Wording corrected in entry 73.)
 
 Regression vs the committed results (DEVELOPMENT_LOG 71): BDI nanosheet
 I-V identical (max relative difference 1e-9), 388 s (was 427 s); FinFET
 within 3e-5, 192 s (was 190 s).
 
 Tests: venv 158 (1 skipped) and conda quick tier 158 pass.
+
+
+## 73. Per-material mobility (2D and 3D)
+
+Branch `quantum-sp`. The 2D/3D drift-diffusion solver took every node's
+mobility from one material (silicon): a SiGe S/D epi only set the band
+structure (Eg, ni, offsets, eps), its holes moved with silicon's
+mobility - in the 2D SiGe-PMOS study as much as in the new 3D PMOS
+devices. Now each node takes its own material's parameters.
+
+- Meshes record the distinct semiconductor materials and each node's
+  index (`node_materials`, `node_material_index`): mesh2d (from the
+  region materials it already painted), the octree assembly (the
+  material with the largest semiconductor share of the node's control
+  volume, as for ni / Eg) and the 2D->3D extrusion.
+- solver2d/newton_solver_qf_2d.py: `_mesh_mobility_nodal` evaluates the
+  doping-dependent model (Masetti / Caughey-Thomas) per material and picks
+  per node; `_edge_vsat` gives per-edge saturation velocities (mean of
+  the two nodes). The Caughey-Thomas exponents must agree across
+  materials. When every material has the same parameters (every device
+  today) the single-material path runs, bit for bit as before.
+- A material block may set its own parameters:
+  `mobility: {masetti_p: [9 coefficients], vsat_p: ..., ...}`
+  (core/config.py `apply_mobility_block`, unknown fields rejected).
+
+**SiGe parameters: still silicon's.** No published doping-dependent
+(Masetti-type) hole parameter set for Ge or SiGe could be verified. The
+measured data found (McGregor et al., J. Electron. Mater. 1993; Manku et
+al., IEEE TED 40, 1993) show the hole drift mobility of heavily doped
+strained SiGe rising with Ge content, but only to 30% Ge and ~2e19 cm^-3,
+far from the Si0.5Ge0.5:B 5e20 epi. Left for the user to choose.
+
+Checks:
+- 2D SiGe PMOS (configs/input_pmos_2d_btbt_sige.yaml, none + local
+  tunneling): identical to the pre-change solver on Id-Vg; Id-Vsub within
+  9e-5 on the 1e-13 A points - the pre-change code itself varies 4e-5 run
+  to run there.
+- Sensitivity: SiGe hole mobility x2 (Masetti mu_max, mu_min1, mu1) ->
+  on-current +2.6% at Vgs -1 V, +1.4% at -0.6 V; off-state and GIDL
+  <= 0.4% (S/D series resistance only; the channel is silicon).
+- 3D PMOS FinFET: SiGe nodes 18120 (Eg 0.75 eV); changing the SiGe
+  parameters moves exactly those nodes' mobility.
+- Epi shape (looked at for the user): boxy - a flat-topped block filling
+  the cell width (merged with the neighbour), no {111} facets, NMOS and
+  PMOS alike. Faceted epi deferred by the user.
+
+Tests: testsuite/test_mobility.py +4 (per-node pick, same-parameter path
+bit-identical, per-edge vsat, mobility block). venv 162 (1 skipped) and
+conda quick tier 162 pass.
