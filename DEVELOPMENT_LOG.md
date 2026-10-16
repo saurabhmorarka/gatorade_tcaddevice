@@ -5913,3 +5913,480 @@ results (Schottky, 3D) buried in the middle and the 3D images stale.
   (`make_readme_figures.py 2d-old`) stay out of the README until those
   drivers move to the quadtree mesh.
 - `.gitignore`: `out/**/vtk/` (regenerable VTK exports).
+
+## 69. Schrodinger-Poisson channel charge, phase P1 (1D)
+
+Roadmap item 2. Plan `plans/quantum_plan.md`, approved by the user with the
+recommended defaults: a quantum box under the gate oxide with a lattice-
+spacing knob (a single center line is its coarsest setting), Boltzmann
+subbands by default (Fermi-Dirac as a switch), the inversion carrier only,
+and off by default until 3D is validated. Branch `quantum-sp`.
+
+- New package `quantum/` (`bands`, `schrodinger1d`, `lines`, `coupling`,
+  `mos1d`, `validate_1d`); details in `docs/quantum.md`.
+  - Coupling: a quantum potential Lambda in n = ni exp((psi - phi_n -
+    Lambda_n)/Vt), held fixed during the Newton solve (the Trellakis
+    predictor). Lambda per node is set from the line's quantum charge in
+    the node's span, so the charge is conserved on any DD mesh.
+  - `core/physics.solve_poisson(quantum_shift=(Lambda_n, Lambda_p))` and
+    `mos_solver.solve_mos_equilibrium(quantum_shift=...)`. None is
+    bit-identical to before.
+- Line solver checks:
+  - Airy levels within 0.2%, infinite well within 0.4%;
+  - flat-band classical limit = Nc within 0.07%;
+  - (100), (110) and (111) valley masses match Stern-Howard.
+- Convergence: the number of levels, D_q and the penetration depth do not
+  matter (< 0.1 mV). Line spacing 0.1 vs 0.05 nm: ~2 mV and 0.6% Cinv.
+  Hard wall: +3-6 mV.
+- Bulk MOS-cap, tox 1.5 nm:
+  - dVt at 1e11 cm^-2: +29 mV (1e17), +83 mV (1e18);
+  - at 1e13: Cinv/Cox 0.944 -> 0.836 and 0.951 -> 0.851, centroid
+    0.54 -> 1.44 and 0.25 -> 1.07 nm.
+  - 2-3 outer iterations per bias; a 45-point sweep in ~0.3 s.
+  - Fermi-Dirac subbands: a further -3 to -4% Cinv at 1e13.
+- Double gate (tox 1.5 nm, undoped body): volume inversion at 3 nm (single
+  center peak at all VG); peaks merge at 5 nm; two peaks 1.0 nm off the
+  walls at 10 and 20 nm. dVt: +55 / +29 / +11 / +6 mV.
+- Mesh robustness: the quantum Ninv on a fab-like 0.5 nm mesh is within
+  0.3% of the fine mesh (classical within 2.5%).
+- While checking that, found and fixed a bug in shared code:
+  `build_mos_grid` dropped the -t_ox node
+  (`-np.linspace(t_ox, 0)[::-1][:-1]` removes -t_ox, not the duplicate 0).
+  Every 1D MOS-cap had a 1.39 nm oxide for tox = 1.5 nm, and Qs (computed
+  with 1.5 nm) broke Gauss's law by 7%. Fixed (`np.linspace(-t_ox, 0)`).
+  Goldens recaptured: `mos_metal` (depletion C/Cox +7.7% = 1.5/1.393) and
+  `mos_poly_*` (< 1%).
+- `_span_integral` integrates the piecewise-linear density exactly. The
+  first version treated it as constant per 0.1 nm cell, which put steps in
+  n on the default MOS grid (4 pm cells).
+- Tests: `testsuite/test_quantum.py`, 10 fast tests, 0.9 s. Suite: conda
+  142/142 (78 s), venv 142 pass (67 s), conda full `-k mos` 16/16.
+- Next: P2 (2D MOSFET, `newton_solve_2d` gets separate n/p shifts), then
+  P3 (3D fab planar, lattice-spacing study, reference-run cost).
+
+
+## 70. Schrodinger-Poisson in 3D (P2/P3), FinFET and nanosheet flows
+
+Branch `quantum-sp`. The overnight lattice study (P3), then the runtime
+work the user asked for, then the FinFET and nanosheet templates
+(`plans/finfet_nanosheet_plan.md`; the user's numbers: fin 50 nm tall,
+5 nm wide; 3 sheets 5 nm thick, 25 nm wide; a 2 nm-node CPP of 48 nm and
+Lg 15 nm; the rest from the literature).
+
+**Overnight study (planar, octree, before the fixes below).** Lattice
+spacing 1 / 2 / 4 nm / one centre column: Vt within 1 mV, Ion -0.4 /
++1.0 / +4.9%; the run time hardly moved (107-126 s), so the Newton solves
+were the cost, not the 0.24 s line update. `--quantum-margin 10` crashed
+("SVD did not converge"), see below.
+
+**Coupling inside Newton (speed).**
+- `newton_solve_2d(quantum_update=..., quantum_tol=3e-3)`: the corrector
+  (Lambda from the current psi) runs inside the Newton loop once the
+  update is below QUANTUM_TRIGGER (1e-2 V), so a bias point is one Newton
+  solve, not an outer loop of solves. Converged only when Newton is and
+  Lambda moved < 3 mV. Under-relaxed when it stops contracting.
+  Trigger 1e-3 / 1e-2 / 3e-2: Vds 1 V walk 122 / 110 / 99 iterations.
+- `DeviceQuantum.solve` uses it; `solve_outer` (the old loop) is the
+  reference (a test checks they agree to 3 mV). A non-converged point is
+  returned as is: the continuation halves the step (the old fallback to the
+  outer loop is what looked like a hang on margin10).
+- Drain ramps hold Lambda at its equilibrium value (off-state Lambda hardly
+  moves with the drain; the ramp's states are not outputs) and solve only
+  each target Schrodinger-Poisson (`fab/simulate._ramp`). The gate walk's
+  Lambda predictor starts from the ramp's end state.
+- step control reads the iterations up to the first corrector.
+- Planar full I-V: 111 s (overnight) -> 91 s; classical 74 s.
+
+**Bugs found and fixed in the quantum box (quantum/device.py).**
+1. Interpolated nodes (DD nodes in the box off any line's column: the
+   octree coarsens with depth, so many columns stop after 2-3 nodes) took
+   Lambda only within the line's own node range: everything deeper was
+   classical. Each line now also returns its Lambda profile on its fine
+   grid (`lam_fine`), and those nodes take it at their depth.
+2. Short columns: the line's psi beyond the column's last node was a
+   linear extrapolation of the surface slope (a far too steep well:
+   Lambda 15-50 meV too high there). Now psi comes from the 4 nearest
+   semiconductor nodes around the point (inverse-distance weights).
+3. Interpolated nodes take only Lambda >= 0: deep in the depletion region
+   the subband tail exceeds the vanishing classical density (Lambda down
+   to the -0.5 V clip), and that ratio applied at an STI-corner node with a
+   different potential gave n = 2e20 there (and slowed every walk:
+   Vds 0.05 V walk 85 -> 54 iterations once fixed).
+4. A fin: the side-wall lines' nodes sat in the top surface's footprint
+   and were overwritten by interpolation from the top lines (upper 20 nm
+   of the fin unconfined). Interpolated nodes now exclude nodes of any
+   line; overlaps take the larger Lambda.
+5. `~wall_end` on a Python bool is -1/-2 (an integer index, not a mask):
+   found by the stack test, fixed before it shipped.
+- With 1-4 fixed: planar Ion 1386 -> 1431 uA/um (margin10: 1435 - the
+  gate-edge step the overnight study suspected was this bug).
+
+**Quantum box for fins and sheets (plan section 1.4).**
+- Symmetry plane: a half-width solve cuts the fin/sheet at its centre. A
+  line that ends on a domain face that is not a contact (within 2 x the
+  line depth) runs over the mirrored body, wall to wall, and keeps the
+  real half's charge. Test: the half body gives the full double gate's
+  density within 2%.
+- Corners: a node on two lines takes the larger Lambda.
+- No lines where the interface is S/D (doped like the inversion layer
+  above `sd_doping`, 1e19), and `max_tox` 4 nm: the FinFET's 5 nm outer
+  spacer was taken for gate dielectric (800 lines through the n+ epi).
+- The carrier comes from the device type (fab) or the lighter-doped half
+  of the interface nodes (the median was fooled by the S/D overlap).
+
+**New fab operations and templates.**
+- `epi_doping` (fab/structure.py): peak inside the epi, outside
+  N = peak exp(-(dx/sx)^2/2 - (dy/sy)^2/2 - (dz/sz)^2/2) of the distance to
+  the epi (an anisotropic distance transform: for a box exactly the
+  separable Gaussian the user asked for). The epi's own surface nodes
+  count, the -EPS nodes a deposit leaves on far-away surfaces of the solid
+  it grew on do not (they seeded the tail along the whole Si/STI
+  interface).
+- `deposit(mode="conformal", to_height=...)`: a capped selective epi.
+- `HKstack` dielectric: 0.6 nm SiO2 IL + 1.4 nm HfO2 lumped into one 2 nm
+  layer, EOT 0.85 nm (eps 9.2); a 0.6 nm IL of its own needs 0.25 nm voxels.
+- `template: finfet` (configs/fab_finfet.yaml): bulk, CPP 48, Lg 15,
+  spacer 5, fin 5 x 50 nm at a 24 nm pitch, STI + fin reveal, PTS 3e18 at
+  the fin base, gate-first HKstack + TiN, spacer etch clearing the fin
+  side walls, S/D fin recess stopping 5 nm above the STI, Si:P epi 7e20
+  (sx 2, sy 3 nm), TiN trench contacts (Schottky). Structure check clean.
+- `template: nanosheet` (configs/fab_nanosheet.yaml): 3 x (SiGe 10 / Si 5)
+  superlattice, 25 nm wide stack at a 46 nm pitch, dummy poly gate, outer
+  spacer, S/D recess through the stack, SiGe lateral recess + inner spacers
+  (conformal SiN, then a directional etch-back to the sheet ends - an
+  isotropic etch-back deep enough to clear the sheet ends hollowed the
+  pockets), epi from the sheet ends, ILD + CMP, dummy-gate pull, channel
+  release, HKstack wrapping every sheet, TiN fill between the sheets. The
+  substrate mesa under the stack is gated too (PTS 1e18, sharp).
+- Template mesh spacing (`mesh_h_fine`): the octree's planar default puts
+  2 nm in z at z-facing interfaces - 5 nodes across a 5 nm fin. FinFET and
+  nanosheet use (1, 0.5, 0.5) nm: FinFET 57k -> 69k nodes, nanosheet 109k
+  -> 127k. It matters: FinFET DIBL 52 -> 66 mV/V, Ioff x3.
+- Effective width W: 2 H_fin + W_fin per fin; 2 n (W + t) per stack.
+
+**Shared-code fixes.**
+- `main2d_mosfet_sweep._converged`: `r.get("converged", r["res_norm"] <
+  1e-4)` evaluates the default eagerly; an early-exit result (a linear
+  solver breakdown) has no res_norm and crashed the FinFET walk.
+- `core/linsolve`: the coarse-space pinv of a non-finite matrix (a
+  diverging Newton iterate) raised "SVD did not converge" - the overnight
+  margin10 crash. A non-finite coarse matrix now drops the coarse
+  correction; the step then fails on its own residual.
+
+**Results** (octree, Schottky S/D, vsat; Vds 0.05 / 1.0 V planar, 0.05 / 0.7 V
+FinFET; Ion at the top Vgs, currents per um of effective width).
+
+| device | | Vt lin / sat (V) | SS (mV/dec) | DIBL (mV/V) | Ion (uA/um) | Ioff (A/um) | time |
+|---|---|---|---|---|---|---|---|
+| planar | classical | 0.204 / 0.051 | 82 | 161 | 1729 | 1.19e-6 | 74 s |
+| planar | quantum | 0.269 / 0.073 | 88 | 206 | 1447 | 8.2e-7 | ~100 s |
+| FinFET | classical | 0.206 / 0.163 | 62 | 66 | 1014 | 2.5e-7 | 243 s |
+| FinFET | quantum | 0.240 / 0.192 | 64 | 75 | 731 | 2.4e-7 | 362 s |
+
+- FinFET quantum: volume inversion (classical 1.9e20 at the walls; quantum
+  peak 3.8e19 at the fin centre), Vt +34 / +29 mV, Ion -28%.
+- FinFET timings were measured with other runs on the machine.
+- FinFET walk time: about half goes to near-threshold steps where the
+  hybrid velocity-saturation force stalls GMRES (12 of 14 s of a failed
+  attempt in Krylov); the edge-field force converges the same step in 4
+  iterations. Not changed (a physics default): for the user.
+- Nanosheet: ILU-GMRES stalls (|F| ~ 8 in the electron continuity rows of
+  the p-type PTS region under the stack, where electrons are a negligible
+  minority); exact LU converges the same step in 6 iterations. A
+  floating-body coarse space (hole quasi-Fermi shift per sheet) was tried
+  and did not help: reverted. A density-weighted acceptance for
+  continuity rows is the likely fix (shared Newton logic). The nanosheet
+  I-V runs with TCAD_LINSOLVE=petsc_lu (5.3 GB per process, one worker).
+- Figures: docs/img/quantum_3d_planar.png, quantum_3d_finfet.png
+  (quantum/compare_3d.py), finfet_* / nanosheet_* (docs/make_device_figures.py).
+- Tests: test_quantum 13 (mirror test new), test_fab 31 (epi_doping,
+  capped conformal, FinFET, nanosheet new). Conda quick tier 152/152.
+
+## 71. Nanosheet isolation (PTS / BDI) and the 3D runtime pass: 2050 -> 427 s
+
+Branch `quantum-sp`. The nanosheet template gets two ways of isolating the
+substrate mesa under the stack, then the user's goal: the nanosheet full
+I-V (two curves) in ~3 min, the FinFET ~1 min, with fixes that survive
+the mobility models still to come (no physics shortcuts).
+
+**Nanosheet isolation (`isolation: pts | bdi`, fab/templates.py).**
+- `pts`: a heavy punch-through stopper only, 1e19 sharp (sigma 4 nm) under
+  the stack (`configs/fab_nanosheet.yaml`).
+- `bdi`: bottom dielectric isolation - a 10 nm sacrificial high-Ge SiGe
+  layer under the superlattice, removed under the whole stack once the
+  dummy gate holds it, refilled by a conformal SiN and a directional
+  etch-back; the S/D recess stops on the SiN, the epi meets only the sheet
+  ends; light PTS 1e18 (`configs/fab_nanosheet_bdi.yaml`). The STI stays
+  2 nm above the mesa top (flush, the epi beside the stack touched the
+  mesa's top edge).
+- Figures `docs/img/nanosheet_bdi_*`; tests in test_fab (both builds,
+  the SiN under the stack, no epi/mesa contact with BDI).
+
+**Where the time went (measured first).** Profile of the nanosheet
+Vds = 0.7 V walk: 90% in the linear solves (GMRES internals 384 s,
+preconditioner applications 181 s of 628 s), assembly ~6%: Rust assembly
+would not pay. The full I-V needed 8-10 Newton iterations per point, at
+2.8-4.8 s each (0.4 s on the planar device). The Vds = 0.05 V curve also
+loses ~45% of its walk to failed steps near threshold (below).
+
+**Kept.**
+1. Update-based convergence (solver2d/newton_solver_qf_2d.py,
+   UPD_PSI_TOL / UPD_DENS_TOL / UPD_DENS_MEAN / UPD_DENS_REF): converged
+   when the Newton correction moves psi < 1e-6 V and every carrier's
+   density by < 1e-4 relative (node mean < 1e-5; density floored at
+   1e10), Sentaurus/DEVSIM-style - but only once Newton has stopped
+   converging (a damped step, or an update that shrank < 2x). |F|_inf alone
+   stalled the nanosheet (one electron row at ~0.2, the line search
+   crawling at 1/32: 53 of a gate step's 75 iterations changed nothing):
+   gate walk 0 -> 0.4 V 720 -> 308 s. Accepting it mid-convergence moved
+   the 2D diode's +-0.1 V current 0.1-0.4% (a small difference of large
+   drift and diffusion terms): hence the stagnation condition (diode
+   golden unchanged).
+2. `LOOSE_RTOL = 1e-3` (core/linsolve.py): a fresh ILU-GMRES that missed a
+   tight rtol (1e-7) but reduced the residual 1e3x is used instead of
+   raising (the walk halved its step again and again on these).
+3. A linear-solver breakdown inside the vsat fallback path returns a
+   failed point (the caller halves) instead of crashing the I-V.
+4. Adaptive block-ILU level (core/linsolve.py, ILU_RAISE_ITS 50,
+   ILU_ADAPT_WINDOW 5, ILU_LEVELS_MAX 4): start at ILU(2), raise by one when
+   the last 5 fresh factorizations averaged > 50 GMRES iterations. Replayed
+   nanosheet Jacobians (40 captured systems, Vds 0.7): ILU(2) 162 s,
+   ILU(3) 107, ILU(4) 87, ILU(5) 99, ILU(6) 117; orderings RCM (kept) <
+   natural < ND < QMD; GMRES restart 40 and BiCGStab no better. Planar stays
+   at ILU(2) (fresh median 34 its; ILU(4) cost it 1.5x the CPU), FinFET and
+   nanosheet climb to 4 (FinFET Vds 0.7 walk 233 -> 178 iterations, CPU -22%).
+5. Mesh priority (the user's rule: semiconductor first, dielectric only
+   for capacitance, metal nothing), mesh3d/octree.py `target_spacing`:
+   inside insulators the spacing grows 2x per nm (growth_insulator 2.0) to
+   16 nm (h_max_insulator) - fine at the silicon interface, coarse fast;
+   and the 0.5 nm interface spacing only on silicon doped below 1e19
+   (fine_max_doping) - the channel, not a degenerate S/D's dielectric
+   surfaces. Junctions and metal contacts keep it (a sub-grid Schottky
+   contact's current moved 1.9% without, planar_tiny). Layer thicknesses
+   stay exact (the tree splits at every label change). BDI nanosheet
+   142.7k -> 123.0k nodes. The 2:1 balance and the face matching at
+   silicon and metal surfaces set a floor: even with no grading inside the
+   dielectrics, 55.7k dielectric nodes remain (half of them within 2 nm of
+   silicon).
+6. Two octree mesher fixes found by 5 (both made the quality gate fail on
+   the trimmed nanosheet):
+   - a facet lying exactly ON a metal surface was labelled by each cell
+     sampling a different side of that plane (metal from one, the epi from
+     the other); the metal-labelled side was dropped before pairing, so
+     the facet was "seen from one side only". Facets are now paired on
+     their geometric area, and a side that saw only metal takes the other
+     side's parts.
+   - `split_for_stray` finding no split within 3 voxels of a stray node
+     now searches up to 6 and, failing that, halves the nearest
+     metal-facing leaves (the repair loop always progresses).
+7. fab simulate: the drain ramps run in the curve workers, each to its
+   own Vds (the low-Vds curve no longer waits ~80 s for the high-Vds ramp).
+
+**Tried and dropped (all on the FinFET/nanosheet walk; numbers in the
+session notes).**
+- Per-node vector quasi-Fermi driving force (Sentaurus/Genius element
+  style, least-squares nodal gradient, full Jacobian - checked against
+  finite differences): 1.7x the nonzeros, ILU-GMRES broke down; 493 s and no
+  point converged (hybrid: ~60 s).
+- Frozen-mobility Jacobian (d mu/d phi dropped, residual exact): 8 min to
+  Vgs 0.2 V.
+- Lagged (Picard) mobility: the outer loop contracts only 1.5-2x per pass
+  near threshold, ~40x slower.
+- Quasi-Fermi box margin, frozen merit row scaling, per-node log-density
+  step limits, step-size memory in the gate walk: no fewer failed steps.
+- Coarser drain-ramp first steps: 64 s default vs 98-224 s.
+- Gate step 0.1 V instead of 0.05 V (the user agreed to it): the adaptive
+  walk takes about the same steps either way - 182 vs 176 iterations.
+
+**The near-threshold stall (not fixed, a physics question).** The failing
+gate steps (Vgs 0.15-0.34 V at Vds 0.05 V) were traced to 64 nodes in the
+S/D junction tail at the drain end of the sheets (doping ~8e15): the
+Jacobian is exact (FD to 4e-5), the Newton direction descends, but Newton
+asks for 20-190x density changes there and the quasi-Fermi box clips them.
+That doping is the hybrid force's crossover density (VSAT_REF_DENSITY
+1e16), where the drive switches to the edge field - there the junction's
+built-in ~1e6 V/cm - so a small drop of n collapses the mobility. Moving
+the crossover (1e18) cut the FinFET walk 169 -> 56 iterations but moved
+subthreshold Id -36%: rejected by the user. Left as is.
+
+**Results** (octree, Schottky S/D, vsat hybrid, 2 workers; nanosheet
+Vgs step 0.1 V, FinFET / planar 0.05 V; Vds 0.05 / 0.7 V).
+
+| device | nodes | before (this branch's start) | now | Vt lin / sat | SS | DIBL | Ion (uA/um) | Ioff (A/um) |
+|---|---|---|---|---|---|---|---|---|
+| nanosheet BDI | 142.7k -> 123.0k | 2050 s (direct LU, 1 worker) / 717 s | 427 s | 0.207 / 0.176 | 61 | 48 | 1046 | 2.1e-8 |
+| nanosheet PTS | 110.3k | - | 585 s | 0.206 / 0.101 | 72 | 163 | 1101 | 4.6e-6 |
+| FinFET | 60.9k | 240 s | 190 s (169 s on a quieter run) | 0.205 / 0.162 | 62 | 66 | 1015 | 2.6e-7 |
+| planar | 73.5k -> 63.3k | 62 s | 59-67 s | 0.200 / 0.096 | 80 | 159 | 915 | 3.4e-7 |
+
+- Currents vs the start of the work: BDI nanosheet within 0.5% at every
+  point (mesh); FinFET up to +2.5% in subthreshold (mesh, ~0.7 mV of Vt),
+  < 0.4% above threshold; planar < 0.4%.
+- Planar: the dielectric-light mesh (-13% nodes) takes more Newton
+  iterations on the Vds = 0.7 V walk (78 -> 90), time neutral (48 -> 46 s).
+- The PTS nanosheet's Vds = 0.7 V curve (339 iterations) is the slowest
+  now: a leaky punch-through device, not looked at yet.
+- Target was ~3 min for the nanosheet; ~360 s was accepted for now; 427 s
+  committed at the user's call (the remaining lever is the hybrid-force
+  physics above, rejected; or a stronger preconditioner).
+
+The machine slept during part of the session (lid closed): only runs
+with the user present, or compared on iteration counts / CPU time, are
+quoted.
+
+Tests: venv 155 (1 skipped) and conda quick tier 155 pass; planar_tiny golden recaptured (nodes 15602 -> 14570, currents within 0.08%).
+
+
+## 72. GIDL in 3D (local tunneling), SiGe PMOS epi, PTS punch-through fix, LU fallback
+
+Branch `quantum-sp`. The 2D GIDL study (NMOS, and PMOS with a SiGe epi) is
+brought to the 3D FinFET and nanosheet (PTS and BDI), and the GIDL run is
+its own off-state simulation: high drain bias only, the gate walked from
+0 into off (NMOS Vds 0.7 V, Vgs 0 -> -0.8 V; PMOS Vds -0.7 V, Vgs 0 ->
++0.8 V). The on-state I-V stays without tunneling.
+
+**Local tunneling on the octree mesh** (btbt/local3d.py, new). The 2D model
+(btbt/local2d.py) takes the node field from the P1 gradient of triangles;
+the octree mesh has only nodes and edges, so the field is the magnitude of
+a least-squares gradient over each node's semiconductor edges (exact for a
+linear psi; the normal component is zeroed on the half-width symmetry
+plane). Kane band-to-band carries Hurkx's occupation factor
+D = (ni^2 - n p) / ((n + ni)(p + ni)): the uncapped local Kane rate
+otherwise fires wherever the built-in field is high, and generated
+6e-7 A in a near-equilibrium planar state. Hurkx TAT as in 2D. Full
+Jacobian over (psi, phin, phip); testsuite/test_tunneling3d.py checks the
+field (exact, linear psi), the Jacobian (FD, < 1e-6) and equilibrium (no
+generation, < 1e-12 of raw Kane).
+
+- `fab simulate --tunneling local --vgs-min V`: negative gate values walk
+  from Vgs = 0 separately. The model is turned on at equilibrium (a direct
+  solve, a log-strength ramp as fallback).
+- Both rates have the SRH form (they only pull n p toward ni^2), so the
+  quasi-Fermi box stays on (`keeps_qf_box`, read by contacts/subgrid.py).
+  With the box off, the planar GIDL run took 1130 s and its positive walk
+  failed; with it, 100 s.
+
+**SiGe in 3D** (fab/simulate.py, mesh3d/octree.py). A "SiGe" region is
+Si0.5Ge0.5 strained on Si (People & Bean, the 2D SiGe-PMOS study's
+material): Eg 0.75 eV, ni 6.3e12, eps_r 13.95. The octree assembly gives
+each node the material with the largest semiconductor share of its
+control volume (ni, delta-Ei, Eg, conduction-band offset per node;
+permittivity per semiconductor label). NMOS meshes are unchanged.
+New configs: fab_finfet_pmos, fab_nanosheet_pmos, fab_nanosheet_bdi_pmos.
+Hole mobility in the epi is still silicon's.
+
+**MUMPS LU fallback in the ILU-GMRES solver** (core/linsolve.py). The PTS
+nanosheet's negative-gate walk hung overnight (11 h): with electrons a
+vanishing minority, block ILU-GMRES fails at every level. Now a fresh ILU
+failure falls back to GMRES preconditioned by a MUMPS LU, kept and reused
+for the next 10 factorizations. That walk, Vgs 0 -> -0.8 V: stuck at
+-0.5 V after 806 s -> 174 s, 60 iterations. Only the large-3D iterative
+path (>= 60k unknowns) reaches it; 1D/2D stay on direct LU.
+
+**PTS punch-through fix** (fab/templates.py). The PTS nanosheet leaked
+4.6e-6 A/um at Vgs = 0, Vds 0.7 V. The current ran 58-68 nm down, below
+the stopper: one 1e19 implant 5 nm below the mesa top (sigma 4 nm),
+while the S/D recess goes 3 nm into the mesa and the epi's doping tail
+(epi_sy 4 nm) reaches ~12 nm below it - 7e18 at 60 nm under the S/D vs
+4e17 of stopper under the gate. A second stopper implant 15 nm below the
+mesa top (`pts_depths`, default [5, 15] for pts, [5] for bdi; a
+multi-energy implant) keeps ~1e19 under the gate down to 62 nm and adds
+nothing to the sheets.
+
+| PTS nanosheet NMOS | before | after |
+|---|---|---|
+| Vt lin / sat (V) | 0.206 / 0.101 | 0.207 / 0.176 |
+| SS (mV/dec) | 72 | 61 |
+| DIBL (mV/V) | 163 | 48 |
+| Ion (uA/um) | 1101 | 1082 |
+| Ioff (A/um) | 4.6e-6 | 2.2e-8 |
+| full I-V | 585 s | 454 s |
+
+It now matches the BDI device (0.207 / 0.176, 61, 48, 1046, 2.1e-8).
+
+**GIDL results** (A/um, deepest off-state bias):
+
+| device | Id(Vgs=0) | deepest off | run |
+|---|---|---|---|
+| NMOS nanosheet BDI | 2.1e-8 | 7.3e-13 floor (1e-17 without tunneling) | ~400 s |
+| NMOS nanosheet PTS | 2.2e-8 | 2.0e-12 floor | 390 s |
+| PMOS nanosheet BDI | 4.9e-9 | 7.8e-13 floor | 456 s |
+| PMOS nanosheet PTS | 5.0e-9 | 2.0e-12 floor | 347 s |
+| PMOS FinFET | 3.0e-8 | 4.6e-12, still falling at +0.8 V | 152 s |
+| NMOS FinFET | 2.6e-7 | +2% over no tunneling at Vds 0.7 V | 210 s |
+| planar NMOS | | 5.9e-12 floor (Vds 0.7 V) | 100 s |
+
+- The BDI floor is real: drain +7.315e-13, source -7.315e-13 A/um
+  (balanced to 5e-5); without tunneling 5e-18. All of it is Kane
+  generation at the drain-side gate edge (x 28-32 nm), equal in the three
+  sheets; the same amount recombines (Kane, np > ni^2) at the source-side
+  gate edge - the sheets have no body contact.
+- The floor barely moves with the gate, unlike the 2D bulk devices: not
+  understood yet. The channel potential does follow the gate (-0.10 ->
+  -0.36 V at the sheet centre, Vgs -0.5 -> -0.8 V). The floating sheets
+  are a suspect; a nonlocal (path) model is the real check.
+- The FinFET's off current is dominated by another path (not GIDL);
+  not traced yet.
+
+**One-sheet option**: configs/fab_nanosheet_quick.yaml, the BDI nanosheet
+with n_sheets: 1 (70k nodes vs 123k), full I-V 221 s (measured with two
+other jobs running) vs 427 s. An option, not a stand-in: each sheet's
+effective channel length follows the S/D junction profile at its height,
+so Vt / DIBL / SS need not match the multi-sheet device. Here they did
+(Vt 0.206 / 0.175 V, SS 61, DIBL 47, Ioff 2.1e-8 vs 0.207 / 0.176, 61, 48,
+2.1e-8); Ion did not (1242 vs 1046 uA/um). (Wording corrected in entry 73.)
+
+Regression vs the committed results (DEVELOPMENT_LOG 71): BDI nanosheet
+I-V identical (max relative difference 1e-9), 388 s (was 427 s); FinFET
+within 3e-5, 192 s (was 190 s).
+
+Tests: venv 158 (1 skipped) and conda quick tier 158 pass.
+
+
+## 73. Per-material mobility (2D and 3D)
+
+Branch `quantum-sp`. The 2D/3D drift-diffusion solver took every node's
+mobility from one material (silicon): a SiGe S/D epi only set the band
+structure (Eg, ni, offsets, eps), its holes moved with silicon's
+mobility - in the 2D SiGe-PMOS study as much as in the new 3D PMOS
+devices. Now each node takes its own material's parameters.
+
+- Meshes record the distinct semiconductor materials and each node's
+  index (`node_materials`, `node_material_index`): mesh2d (from the
+  region materials it already painted), the octree assembly (the
+  material with the largest semiconductor share of the node's control
+  volume, as for ni / Eg) and the 2D->3D extrusion.
+- solver2d/newton_solver_qf_2d.py: `_mesh_mobility_nodal` evaluates the
+  doping-dependent model (Masetti / Caughey-Thomas) per material and picks
+  per node; `_edge_vsat` gives per-edge saturation velocities (mean of
+  the two nodes). The Caughey-Thomas exponents must agree across
+  materials. When every material has the same parameters (every device
+  today) the single-material path runs, bit for bit as before.
+- A material block may set its own parameters:
+  `mobility: {masetti_p: [9 coefficients], vsat_p: ..., ...}`
+  (core/config.py `apply_mobility_block`, unknown fields rejected).
+
+**SiGe parameters: still silicon's.** No published doping-dependent
+(Masetti-type) hole parameter set for Ge or SiGe could be verified. The
+measured data found (McGregor et al., J. Electron. Mater. 1993; Manku et
+al., IEEE TED 40, 1993) show the hole drift mobility of heavily doped
+strained SiGe rising with Ge content, but only to 30% Ge and ~2e19 cm^-3,
+far from the Si0.5Ge0.5:B 5e20 epi. Left for the user to choose.
+
+Checks:
+- 2D SiGe PMOS (configs/input_pmos_2d_btbt_sige.yaml, none + local
+  tunneling): identical to the pre-change solver on Id-Vg; Id-Vsub within
+  9e-5 on the 1e-13 A points - the pre-change code itself varies 4e-5 run
+  to run there.
+- Sensitivity: SiGe hole mobility x2 (Masetti mu_max, mu_min1, mu1) ->
+  on-current +2.6% at Vgs -1 V, +1.4% at -0.6 V; off-state and GIDL
+  <= 0.4% (S/D series resistance only; the channel is silicon).
+- 3D PMOS FinFET: SiGe nodes 18120 (Eg 0.75 eV); changing the SiGe
+  parameters moves exactly those nodes' mobility.
+- Epi shape (looked at for the user): boxy - a flat-topped block filling
+  the cell width (merged with the neighbour), no {111} facets, NMOS and
+  PMOS alike. Faceted epi deferred by the user.
+
+Tests: testsuite/test_mobility.py +4 (per-node pick, same-parameter path
+bit-identical, per-edge vsat, mobility block). venv 162 (1 skipped) and
+conda quick tier 162 pass.

@@ -1,0 +1,20 @@
+# One-sheet nanosheet: the BDI nanosheet (configs/fab_nanosheet_bdi.yaml)
+# with n_sheets: 1 - an OPTION for trying physics ideas faster (70k octree
+# nodes vs 123k), not a replacement for the 3-sheet device: each sheet's
+# effective channel length follows the S/D junction profile at its height,
+# so Vt / DIBL / SS / Ion need not match the multi-sheet device. Check
+# against the full device before drawing conclusions. Lengths in nm unless
+# a unit is given.
+#
+#   python3 -m fab simulate configs/fab_nanosheet_quick.yaml --mesher octree \
+#       --vds 0.05 0.7 --vgs-max 0.8 --vgs-step 0.1
+template: nanosheet
+params:
+  type: nmos
+  cpp: 48nm
+  Lg: 15nm
+  n_sheets: 1
+  t_sheet: 5nm
+  W_sheet: 25nm
+  t_sige: 10nm
+  isolation: bdi

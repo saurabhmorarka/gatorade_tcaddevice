@@ -1,0 +1,29 @@
+=== classical
+  Vt,cc = 0.204 V -> 0.051 V, DIBL = 161 mV/V, SS = 82 mV/dec
+  Ion = 1729 uA/um, Ioff = 1.19e-06 A/um, Ion/Ioff = 1.45e+03
+total 73 s -> out/qstudy_classical
+=== all
+  quantum box: 239 lines, carrier n, 102 interpolated nodes
+  Vt,cc = 0.268 V -> 0.072 V, DIBL = 206 mV/V, SS = 91 mV/dec
+  Ion = 1389 uA/um, Ioff = 8.37e-07 A/um, Ion/Ioff = 1.66e+03
+total 111 s -> out/qstudy_all
+=== margin10
+Traceback (most recent call last):
+    raise LinAlgError("SVD did not converge")
+numpy.linalg.LinAlgError: SVD did not converge
+  quantum box: 490 lines, carrier n, 201 interpolated nodes
+=== s2
+  quantum box: 193 lines, carrier n, 806 interpolated nodes
+  Vt,cc = 0.268 V -> 0.072 V, DIBL = 207 mV/V, SS = 91 mV/dec
+  Ion = 1384 uA/um, Ioff = 8.37e-07 A/um, Ion/Ioff = 1.65e+03
+total 126 s -> out/qstudy_s2
+=== s4
+  quantum box: 73 lines, carrier n, 3150 interpolated nodes
+  Vt,cc = 0.268 V -> 0.073 V, DIBL = 206 mV/V, SS = 91 mV/dec
+  Ion = 1403 uA/um, Ioff = 8.26e-07 A/um, Ion/Ioff = 1.70e+03
+total 123 s -> out/qstudy_s4
+=== center
+  quantum box: 2 lines, carrier n, 5780 interpolated nodes
+  Vt,cc = 0.274 V -> 0.072 V, DIBL = 212 mV/V, SS = 90 mV/dec
+  Ion = 1457 uA/um, Ioff = 8.41e-07 A/um, Ion/Ioff = 1.73e+03
+total 107 s -> out/qstudy_center

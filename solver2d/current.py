@@ -43,7 +43,8 @@ def contact_current(mesh, mat, result, contact_name):
     # facets, same mobility model) the solver's residual used.
     from solver2d.newton_solver_qf_2d import edge_currents
     In_e, Ip_e = edge_currents(mesh, mat, result["psi"], result["n"], result["p"], result["phin"],
-                               result["phip"], result.get("velocity_saturation", False))
+                               result["phip"], result.get("velocity_saturation", False),
+                               qs=result.get("qshift"))
     I_e = In_e + Ip_e  # A/cm, direction i -> j
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
 

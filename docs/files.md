@@ -17,6 +17,16 @@
 | `core/physics.py` | Bernoulli function (+ its derivative), nonlinear Poisson (Newton, generalized to array eps/ni and frozen-carrier modes), Scharfetter-Gummel continuity solves |
 | `core/analytic.py` | Diode closed-form comparisons (Vbi, depletion width, Shockley law) |
 | `mos/mos_analytic.py` | MOS-cap closed-form comparisons (flat-band/threshold voltage, analytic low-/high-freq C-V) |
+| `quantum/bands.py` | Subband masses (m_z, m_d, degeneracy) of the Si valleys for any confinement direction; parabolic holes |
+| `quantum/schrodinger1d.py` | Effective-mass Schrodinger equation on a line (BenDaniel-Duke, oxide penetration) and the subband density |
+| `quantum/lines.py` | A Schrodinger line through the channel body and the charge-conserving quantum potential Lambda on the DD nodes |
+| `quantum/coupling.py` | Predictor-corrector Schrodinger-Poisson outer loop |
+| `quantum/mos1d.py`, `quantum/validate_1d.py` | 1D MOS-cap and double-gate drivers; the P1 validation table and figure (docs/quantum.md) |
+| `quantum/device.py` | The 2D/3D quantum box: Schrodinger lines from every gate-dielectric interface (wall to wall in fins and sheets, mirrored at a symmetry plane), Lambda on every node, the corrector called inside Newton |
+| `quantum/compare_3d.py` | Classical vs Schrodinger-Poisson figure from two `fab simulate` runs (Id-Vg, density profile at the solver nodes, sections, Lambda) |
+| `quantum/compare_literature.py` | The 1D Vt shift against Jallepalli et al. (docs/quantum.md) |
+| `configs/fab_finfet.yaml`, `configs/fab_nanosheet.yaml` | **Edit these** for the FinFET / nanosheet (fab/templates.py `finfet`, `nanosheet`; docs/finfet_nanosheet.md) |
+| `docs/make_device_figures.py` | Structure figures of the FinFET and nanosheet (3D, gate cut, doping cutaway, 2D cuts) |
 | `core/solver.py` | Diode equilibrium solve + bias sweep (dispatches to either solver below) |
 | `core/newton_solver.py` | Diode's fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
 | `mos/mos_solver.py` | MOS-cap equilibrium C-V sweep (low-frequency) and frozen-carrier quasi-small-signal sweep (high-frequency) |

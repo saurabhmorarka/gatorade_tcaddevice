@@ -58,6 +58,7 @@ FIELD_UNITS = {
     "ConductionBandEnergy": "eV", "ValenceBandEnergy": "eV", "eQuasiFermiEnergy": "eV",
     "hQuasiFermiEnergy": "eV", "ElectricField": "V/cm", "AbsElectricField": "V/cm",
     "eCurrentDensity": "A/cm^2", "hCurrentDensity": "A/cm^2", "TotalCurrentDensity": "A/cm^2",
+    "eQuantumPotential": "V", "hQuantumPotential": "V",
 }
 
 
@@ -112,7 +113,8 @@ def nodal_vectors(mesh, mat, state):
     L = np.linalg.norm(P[jj] - P[ii], axis=1)
     facet_semi, _, _ = _mesh_semi_geometry(mesh)
     E = -_edge_fit(mesh, (psi[jj] - psi[ii]) / L, mesh.facet_length)
-    In, Ip = edge_currents(mesh, mat, psi, n, p, phin, phip, state.get("velocity_saturation", False))
+    In, Ip = edge_currents(mesh, mat, psi, n, p, phin, phip, state.get("velocity_saturation", False),
+                           qs=state.get("qshift"))
     fs = np.where(facet_semi > 0, facet_semi, 1.0)
     Jn = _edge_fit(mesh, In / fs, facet_semi)
     Jp = _edge_fit(mesh, Ip / fs, facet_semi)
@@ -250,6 +252,9 @@ def state_point_data(mesh, mat, state, vectors=True):
         "ConductionBandEnergy": Ec, "ValenceBandEnergy": Ec - Eg,
         "eQuasiFermiEnergy": semi(-phin), "hQuasiFermiEnergy": semi(-phip),
     })
+    qs = state.get("qshift")
+    if qs is not None:                   # Schrodinger-Poisson channel charge (quantum/)
+        pd.update({"eQuantumPotential": semi(qs.lam_n), "hQuantumPotential": semi(qs.lam_p)})
     if vectors and "n" in state and getattr(mesh, "edges", None) is not None:
         pd.update(nodal_vectors(mesh, mat, state))
     return pd

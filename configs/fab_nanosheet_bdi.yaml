@@ -1,0 +1,18 @@
+# Nanosheet (GAA) NMOS, 2 nm-node class (fab/templates.py nanosheet): one
+# stack of 3 sheets in one contacted poly pitch, replacement metal gate.
+# Bottom dielectric isolation (isolation: bdi): 10 nm SiN under the stack,
+# so the S/D epi meets only the sheet ends. PTS variant: fab_nanosheet.yaml.
+# Lengths in nm unless a unit is given.
+#
+#   python3 -m fab build configs/fab_nanosheet_bdi.yaml
+#   python3 -m tcadview out/fab_nanosheet_bdi/build.pvd
+template: nanosheet
+params:
+  type: nmos
+  cpp: 48nm
+  Lg: 15nm
+  n_sheets: 3
+  t_sheet: 5nm
+  W_sheet: 25nm
+  t_sige: 10nm
+  isolation: bdi

@@ -2,43 +2,43 @@
   "C_ox_F_cm2": 3.4531332469920002e-06,
   "per_doping": [
     {
-      "C_lf_over_Cox_at_VGmax": 0.07186794999255683,
-      "C_lf_over_Cox_at_VGmin": 0.8869059563965177,
+      "C_lf_over_Cox_at_VGmax": 0.07105576284053536,
+      "C_lf_over_Cox_at_VGmin": 0.8805340466364358,
       "Ngate_cm3": 1e+17,
       "V_FB_V": -0.7738435813203122,
       "V_T_V": -0.04542478707870601
     },
     {
-      "C_lf_over_Cox_at_VGmax": 0.08644922549376843,
-      "C_lf_over_Cox_at_VGmin": 0.8866583186200733,
+      "C_lf_over_Cox_at_VGmax": 0.08620241788672728,
+      "C_lf_over_Cox_at_VGmin": 0.8796933591116393,
       "Ngate_cm3": 1e+18,
       "V_FB_V": -0.8333700106526445,
       "V_T_V": -0.10495121641103833
     },
     {
-      "C_lf_over_Cox_at_VGmax": 0.26120056601017727,
-      "C_lf_over_Cox_at_VGmin": 0.8890374219159086,
+      "C_lf_over_Cox_at_VGmax": 0.26072830630542554,
+      "C_lf_over_Cox_at_VGmin": 0.8818813036916976,
       "Ngate_cm3": 1e+19,
       "V_FB_V": -0.8928964399849759,
       "V_T_V": -0.16447764574336976
     },
     {
-      "C_lf_over_Cox_at_VGmax": 0.6344892098712024,
-      "C_lf_over_Cox_at_VGmin": 0.8992488691705924,
+      "C_lf_over_Cox_at_VGmax": 0.6309816903847393,
+      "C_lf_over_Cox_at_VGmin": 0.8920699275871216,
       "Ngate_cm3": 1e+20,
       "V_FB_V": -0.9524228693173074,
       "V_T_V": -0.2240040750757012
     },
     {
-      "C_lf_over_Cox_at_VGmax": 0.8991822228185198,
-      "C_lf_over_Cox_at_VGmin": 0.9168959870163359,
+      "C_lf_over_Cox_at_VGmax": 0.8897113502604073,
+      "C_lf_over_Cox_at_VGmin": 0.9100640658379113,
       "Ngate_cm3": 1e+21,
       "V_FB_V": -1.0119492986496392,
       "V_T_V": -0.28353050440803307
     },
     {
-      "C_lf_over_Cox_at_VGmax": 0.951415709407071,
-      "C_lf_over_Cox_at_VGmin": 0.9267888109410392,
+      "C_lf_over_Cox_at_VGmax": 0.9443351774691302,
+      "C_lf_over_Cox_at_VGmin": 0.9215310481423773,
       "Ngate_cm3": 1e+22,
       "V_FB_V": -1.071475727981971,
       "V_T_V": -0.34305693374036494

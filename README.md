@@ -4,6 +4,55 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## FinFET and nanosheet flows, 2 nm-node class ([details](docs/finfet_nanosheet.md))
+
+Two new virtual-fab templates at a 48 nm contacted poly pitch and a 15 nm
+gate. The bulk FinFET has a 5 x 50 nm fin, an IL + HfO2 gate stack and a
+recessed, in-situ doped S/D epi. The nanosheet is a replacement-metal-gate
+flow with three released 5 x 25 nm sheets, inner spacers and the gate
+wrapping every sheet. The S/D epi doping is analytic, with a Gaussian
+taper of the distance to the epi.
+
+```math
+N = N_{peak}\,\exp\!\Big(-\tfrac{1}{2}\big(\tfrac{d_x}{s_x}\big)^2-\tfrac{1}{2}\big(\tfrac{d_y}{s_y}\big)^2\Big)
+```
+
+<p align="center">
+  <img src="docs/img/finfet_gatecut.png" alt="FinFET cut through the gate" width="48%">
+  <img src="docs/img/nanosheet_gatecut.png" alt="Nanosheet cut through the gate" width="48%">
+</p>
+
+## Schrodinger-Poisson channel charge in 3D ([details](docs/quantum.md))
+
+The Schrodinger lines now run in 3D devices: down from the planar gate
+oxide, and wall to wall across a fin or a sheet. The quantum potential is
+updated inside the Newton loop, so each bias point is a single solve. In
+a 5 nm fin, the electrons move from the walls to the middle of the fin
+(volume inversion). Vt rises 30 mV and Ion falls 28%. The planar quantum
+I-V takes about 100 s (classical: 74 s).
+
+<p align="center">
+  <img src="docs/img/quantum_3d_finfet.png" alt="FinFET classical vs Schrodinger-Poisson: Id-Vg, density across the fin, gate cross-sections, Lambda" width="98%">
+</p>
+
+## Schrodinger-Poisson channel charge, 1D ([details](docs/quantum.md))
+
+The inversion charge comes from the Schrodinger equation, solved on lines
+across the channel body. It enters drift-diffusion as a quantum potential
+Lambda that conserves charge on any mesh. In bulk, the charge peak moves
+about 1 nm off the oxide and Vt rises by 83 mV at 1e18. In a thin double
+gate the charge peaks at the center of the body (volume inversion).
+
+```math
+-\frac{\hbar^2}{2}\frac{d}{ds}\Big(\frac{1}{m_z}\frac{d\psi_k}{ds}\Big)+U\psi_k=E_k\psi_k,\qquad
+n=n_i\,e^{(\psi-\phi_n-\Lambda_n)/V_t},\qquad
+\Lambda_i=-V_t\ln\frac{\int_{V_i} n_{QM}}{n_{cl,i}V_i}
+```
+
+<p align="center">
+  <img src="docs/img/quantum_sp_1d.png" alt="Schrodinger-Poisson in 1D: density vs depth, C-V, centroid, double-gate volume inversion" width="98%">
+</p>
+
 ## 3D planar NMOS: Schottky S/D contacts ([details](docs/schottky.md))
 
 The S/D metal/semiconductor contact is modeled with thermionic emission

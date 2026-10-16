@@ -80,6 +80,8 @@ def extrude_mesh(mesh, mat, width_cm, nz, eps_r_insulator=3.9):
         edge_g=np.r_[g_in, g_v], cv_area=tile(A) * cv_scale, cv_area_semi=tile(A_semi) * cv_scale,
         Cdop=tile(mesh.Cdop), ni_arr=tile(mesh.ni_arr), is_insulator=tile(mesh.is_insulator),
         dEi_arr=tile(mesh.dEi_arr), Eg_arr=tile(mesh.Eg_arr), ec_off_arr=tile(mesh.ec_off_arr),
+        node_materials=getattr(mesh, "node_materials", None),
+        node_material_index=tile(getattr(mesh, "node_material_index", None)),
         boundary_point_index=np.concatenate([mesh.boundary_point_index + k * N for k in range(nz)]),
         boundary_bc_type=list(mesh.boundary_bc_type) * nz)
     out.width_cm = width_cm          # 3D marker: currents are totals over this width

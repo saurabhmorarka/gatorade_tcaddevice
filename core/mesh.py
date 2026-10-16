@@ -343,7 +343,7 @@ def build_mos_grid(mat: Material, dev, Cdop_substrate: float,
 
     t_si = dev.t_si if dev.t_si is not None else max(20 * L_D, 2.0e-4)  # >=2 um floor
 
-    x_ox = -np.linspace(dev.t_ox, 0.0, n_ox_points)[::-1]  # -t_ox .. 0, n_ox_points points, uniform
+    x_ox = np.linspace(-dev.t_ox, 0.0, n_ox_points)  # -t_ox .. 0, n_ox_points points, uniform
     x_si = _region_nodes(t_si, substrate_profile, mat, h_min, h_max, growth)  # 0 .. t_si
 
     if Cdop_gate is None:

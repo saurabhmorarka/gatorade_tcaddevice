@@ -33,7 +33,7 @@ def solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevi
                            Cdop_substrate, VG, psi_bulk,
                            psi_init=None, n_frozen=None, p_frozen=None,
                            damping_cap=0.5, max_iter=200, Cdop_gate=None,
-                           interfaces=None):
+                           interfaces=None, quantum_shift=None):
     """Single-gate-voltage equilibrium (or quasi-small-signal, if
     n_frozen/p_frozen given) solve. Returns dict with psi, n, p, iters.
 
@@ -93,6 +93,7 @@ def solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevi
         x, Cdop, mat, phin, phip, psi_guess,
         eps=eps_edge, ni=ni_arr, damping_cap=damping_cap, max_iter=max_iter,
         n_frozen=n_frozen, p_frozen=p_frozen, interfaces=interfaces,
+        quantum_shift=quantum_shift,
     )
     # Quasi-Fermi potentials are only meaningful where there are carriers to
     # define them for (ni_arr>0, i.e. the semiconductor) - in the oxide,

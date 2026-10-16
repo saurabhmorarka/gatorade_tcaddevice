@@ -77,6 +77,21 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 AUTO_ITERATIVE_MIN = 60000   # unknowns; 2D-sized systems stay on direct LU
+# Adaptive block-ILU level: the mean GMRES iterations of the last ILU_ADAPT_WINDOW
+# fresh factorizations above ILU_RAISE_ITS raise the level by one, up to
+# ILU_LEVELS_MAX. Measured fresh iterations at ILU(2) / ILU(4) (Vds 0.7 V walk):
+# planar 34 / 20 (ILU(4) costs 1.5x the CPU), FinFET 71 / 42 (-5%); nanosheet
+# replayed Jacobians ILU(2) 162 s, ILU(3) 107 s, ILU(4) 87 s, ILU(5) 99 s.
+ILU_RAISE_ITS = 50
+ILU_ADAPT_WINDOW = 5
+ILU_LEVELS_MAX = 4
+# A fresh block ILU-GMRES that still fails (electrons a vanishing minority
+# over a whole region: their quasi-Fermi rows nearly undetermined - the PTS
+# nanosheet at negative gate) is redone with an exact MUMPS LU preconditioner,
+# and the next LU_STICKY factorizations stay on LU before ILU is tried again.
+LU_FALLBACK = True
+LU_STICKY = 10
+LOOSE_RTOL = 1e-3            # a fresh ILU-GMRES that missed rtol but reached this is still used (_loose_ok)
 REUSE_ITS_FACTOR = 3         # a reused preconditioner may take this x the fresh one's iterations
 REUSE_ITS_MIN = 20           # ... but never fewer than this (see LinearSolver._krylov)
 
@@ -123,6 +138,14 @@ def resolve_backend(backend, n):
                           "environment.yml, or use backend='superlu'/'scipy_ilu'")
     return backend
 
+
+
+def _coarse_inverse(E):
+    """pinv of the deflation space's coarse matrix: a degenerate space must
+    not break a solve, and a non-finite one (a diverging Newton iterate)
+    drops the coarse correction - the Newton step then fails on its own
+    residual instead of on an SVD error."""
+    return np.linalg.pinv(E) if np.all(np.isfinite(E)) else np.zeros(E.T.shape)
 
 class _Pattern:
     """Cached index structure of one CSR sparsity pattern: row id of every
@@ -253,6 +276,12 @@ class LinearSolver:
         self.max_krylov = max_krylov          # with a (lagged) exact LU preconditioner
         self.max_krylov_ilu = max_krylov_ilu  # with an ILU preconditioner (needs many more)
         self.ilu_levels = ilu_levels if ilu_levels is not None else (2 if block_size else 1)
+        # block ILU without a fixed level: raised one level (up to ILU_LEVELS_MAX)
+        # whenever fresh factorizations keep needing many GMRES iterations
+        self._adapt_levels = ilu_levels is None and bool(block_size)
+        self._fresh_hist = []
+        self._lu_kept = None       # PETSc MUMPS KSP of the LU fallback (petsc_ilu backend)
+        self._lu_sticky = 0
         self.ilu_fill = ilu_fill
         self._pat = None
         self._prec = None          # backend-specific preconditioner handle
@@ -359,12 +388,31 @@ class LinearSolver:
         if self._ksp_kept is not None:
             self._ksp_kept["ksp"].destroy()
             self._ksp_kept = None
+        if self._lu_kept is not None:
+            self._lu_kept["ksp"].destroy()
+            self._lu_kept = None
+        self._lu_sticky = 0
 
     def _scaled(self, A, b, scale):
         r, c = scale
         data = A.data * r[self._pat.row_of] * c[self._pat.indices]
         As = sp.csr_matrix((data, self._pat.indices, self._pat.indptr), shape=A.shape)
         return As, r * b
+
+    def _loose_ok(self, As, bs, y):
+        """A fresh ILU-GMRES that missed a tight inexact-Newton rtol (1e-7
+        once Newton is close) but still reduced the residual by LOOSE_RTOL
+        is used: the direction is good enough for a Newton step (the next
+        iteration's own residual decides), where raising threw away whole
+        nearly converged bias points (nanosheet gate walk: the walk's step
+        halved again and again)."""
+        if not np.all(np.isfinite(y)):
+            return False
+        rel = np.linalg.norm(As @ y - bs) / max(np.linalg.norm(bs), 1e-300)
+        if rel < LOOSE_RTOL:
+            self.stats["loose"] = self.stats.get("loose", 0) + 1
+            return True
+        return False
 
     def _factor_and_solve(self, A, b, rtol):
         self._drop_prec()
@@ -382,14 +430,30 @@ class LinearSolver:
                 ilu = _TwoLevel(ilu.solve, *self._coarse_scaled(As))
             self._prec = dict(lu=ilu)
             y, ok, its = gmres_right(As, bs, ilu.solve, rtol, self.max_krylov_ilu)
-            if not ok:
+            if not ok and not self._loose_ok(As, bs, y):
                 raise RuntimeError("scipy ILU-GMRES failed on a freshly built preconditioner")
+        elif self.backend == "petsc_ilu" and self._lu_sticky > 0:
+            self._lu_sticky -= 1
+            y, its = self._lu_fallback(As, bs, rtol)
         else:
             self._prec = self._petsc_setup(As)
             y, its, ok = self._petsc_solve(As, bs, rtol, reuse=False)
-            if not ok:
-                raise RuntimeError(f"PETSc {self.backend} failed on a freshly built preconditioner")
-        self._fresh_its = its if self.backend in ("scipy_ilu", "petsc_ilu") else 0
+            if not ok and not self._loose_ok(As, bs, y):
+                if not (LU_FALLBACK and self.backend == "petsc_ilu"):
+                    raise RuntimeError(f"PETSc {self.backend} failed on a freshly built preconditioner")
+                self.stats["lu_fallbacks"] = self.stats.get("lu_fallbacks", 0) + 1
+                self._lu_sticky = LU_STICKY
+                y, its = self._lu_fallback(As, bs, rtol)
+        lu_now = bool(self._prec and self._prec.get("lu_direct"))
+        self._fresh_its = its if self.backend in ("scipy_ilu", "petsc_ilu") and not lu_now else 0
+        if self._adapt_levels and self._use_blocks() and not lu_now:
+            self._fresh_hist.append(its)
+            if (len(self._fresh_hist) >= ILU_ADAPT_WINDOW and self.ilu_levels < ILU_LEVELS_MAX
+                    and np.mean(self._fresh_hist[-ILU_ADAPT_WINDOW:]) > ILU_RAISE_ITS):
+                self.ilu_levels += 1                 # from the next factorization on
+                self._fresh_hist = []
+                self._ksp_kept = None
+                self.stats["ilu_levels"] = self.ilu_levels
         self._t_factor = time.perf_counter() - t0
         self.stats["factorizations"] += 1
         self.stats["t_factor"] += self._t_factor
@@ -403,6 +467,9 @@ class LinearSolver:
         into the 300-iteration limit cost ~1.5 s before the fallback
         refactored anyway, against 0.08 s for the refactorization."""
         As, bs = self._scaled(A, b, self._scale)
+        if self._prec.get("lu_direct"):                  # the LU fallback, reused as preconditioner
+            y, its, ok = self._lu_solve(As, bs, rtol, reuse=True, maxit=self.max_krylov)
+            return self._scale[1] * y, its, ok
         maxit = self.max_krylov if self.backend in ("superlu", "umfpack", "petsc_lu") else self.max_krylov_ilu
         if self.backend in ("scipy_ilu", "petsc_ilu"):   # (measured there; direct-LU reuse untouched)
             maxit = min(maxit, max(REUSE_ITS_MIN, REUSE_ITS_FACTOR * self._fresh_its))
@@ -510,6 +577,51 @@ class LinearSolver:
         ksp.setUp()
         return self._ksp_kept
 
+    def _lu_mat(self, As):
+        I = PETSc.IntType
+        if getattr(self._pat, "_csr_I", None) is None:
+            self._pat._csr_I = (self._pat.indptr.astype(I), self._pat.indices.astype(I))
+        return PETSc.Mat().createAIJ(size=As.shape, csr=(*self._pat._csr_I, As.data), comm=PETSc.COMM_SELF)
+
+    def _lu_fallback(self, As, bs, rtol):
+        """Solve with a fresh MUMPS LU preconditioner (its ordering and
+        symbolic phase kept while the pattern lasts) and keep it as the
+        reused preconditioner; (y, its)."""
+        kept = self._lu_kept
+        if kept is None:
+            M = self._lu_mat(As)
+            ksp = PETSc.KSP().create(comm=PETSc.COMM_SELF)
+            ksp.setOperators(M, M)
+            ksp.setType("gmres")
+            ksp.setGMRESRestart(self.max_krylov)
+            ksp.setPCSide(PETSc.PC.Side.RIGHT)
+            ksp.setNormType(PETSc.KSP.NormType.UNPRECONDITIONED)
+            pc = ksp.getPC()
+            pc.setType("lu")
+            pc.setFactorSolverType("mumps")
+            kept = self._lu_kept = dict(ksp=ksp, P=M, lu_direct=True)
+        else:
+            kept["P"].setValuesCSR(*self._pat._csr_I, As.data)
+            kept["P"].assemble()
+            kept["ksp"].setOperators(kept["P"], kept["P"])
+        kept["ksp"].setUp()
+        self._prec = kept
+        y, its, ok = self._lu_solve(As, bs, rtol, reuse=False, maxit=self.max_krylov)
+        if not ok and not self._loose_ok(As, bs, y):
+            raise RuntimeError("PETSc ILU-GMRES and the MUMPS LU fallback both failed on a fresh preconditioner")
+        return y, its
+
+    def _lu_solve(self, As, bs, rtol, reuse, maxit):
+        ksp = self._prec["ksp"]
+        ksp.setTolerances(rtol=rtol, atol=1e-50, max_it=maxit)
+        if reuse:
+            ksp.setOperators(self._lu_mat(As), self._prec["P"])
+        bv = PETSc.Vec().createWithArray(bs.copy(), comm=PETSc.COMM_SELF)
+        xv = bv.duplicate()
+        ksp.solve(bv, xv)
+        y = xv.getArray().copy()
+        return y, ksp.getIterationNumber(), ksp.getConvergedReason() > 0 and np.all(np.isfinite(y))
+
     def _petsc_two_level(self, kept, As):
         """(Re)factor the ILU inside the two-level preconditioner and refresh
         its coarse space for this factorization's matrix and scaling."""
@@ -555,7 +667,7 @@ class _TwoLevel:
 
     def set(self, Z, AZ):
         self.Z, self.AZ = Z, AZ
-        self.Einv = np.linalg.pinv(Z.T @ AZ)   # pinv: a degenerate space must not break a solve
+        self.Einv = _coarse_inverse(Z.T @ AZ)
 
     def solve(self, v):
         w = self.Einv @ (self.Z.T @ v)
@@ -577,7 +689,7 @@ class _PetscTwoLevel:
         self.ai = np.flatnonzero(np.any(AZ != 0.0, axis=1))
         self.Zt = np.ascontiguousarray(Z[self.zi].T)
         self.AZ = np.ascontiguousarray(AZ[self.ai])
-        self.Einv = np.linalg.pinv(Z.T @ AZ)   # pinv: a degenerate space must not break a solve
+        self.Einv = _coarse_inverse(Z.T @ AZ)
 
     def apply(self, pc, x, y):
         w = self.Einv @ (self.Zt @ x.getArray(readonly=True)[self.zi])

@@ -67,6 +67,12 @@ class Mesh2D:
     dEi_arr: np.ndarray = None
     Eg_arr: np.ndarray = None
     ec_off_arr: np.ndarray = None
+    # Per-node semiconductor material (only set when `mat` is passed): the
+    # distinct materials (entry 0 = the base `mat`) and each node's index -
+    # the solver's mobility reads each node's own parameters
+    # (solver2d/newton_solver_qf_2d.py::node_materials).
+    node_materials: list = None
+    node_material_index: np.ndarray = None
 
 
 def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, tri_insulator=None,
@@ -174,6 +180,7 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
 
     ni_arr = is_insulator = None
     dEi_arr = Eg_arr = ec_off_arr = None
+    mats = k = None
     if mat is not None:
         from core.materials import delta_Ei_of
         is_insulator, _ = domain.material_props_at(fv.points[:, 0], fv.points[:, 1], mat)
@@ -209,6 +216,8 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
         dEi_arr=dEi_arr,
         Eg_arr=Eg_arr,
         ec_off_arr=ec_off_arr,
+        node_materials=mats,
+        node_material_index=k,
     )
 
 

@@ -1,12 +1,53 @@
 # 3D program: handoff
 
-## COLD START: read this first (newest block: "LATEST 2026-10-13 (end of session)")
+## COLD START: read this first (newest block: "LATEST 2026-10-13 (quantum P1)")
 
 Written to resume with ZERO chat context. The later sections of this file
 are older passdowns, kept as history. DEVELOPMENT_LOG.md sections 41-54
 tell the full story with numbers.
 
-### LATEST 2026-10-13 (end of session) - START HERE
+### RESUME 2026-10-13 night (quantum P2/P3 WIP) - START HERE
+- Committed WIP on `quantum-sp`: Jallepalli comparison (quantum/compare_literature.py,
+  docs/quantum.md), solver2d `quantum=` / QuantumShift (ni', dEi' fold),
+  quantum/device.py (lines from any gate dielectric, wall-to-wall, margin,
+  lattice spacing), `fab simulate --quantum [--quantum-spacing NM] [--quantum-margin NM]`,
+  Lambda secant predictor + step_iters step control, 12 quantum tests pass.
+  Full suite NOT yet re-run after the solver2d changes.
+- Study running overnight: log at the session scratchpad study3d.log, outputs
+  out/qstudy_{classical,all,margin10,s2,s4,center}; script plans/quantum_study3d.sh.
+  Done: classical 73 s (Vt .204->.051, SS 82, DIBL 161, Ion 1729); all-columns
+  quantum 111 s (Vt .268->.072, SS 91, DIBL 206, Ion 1389). High-Vds Vt shift
+  small because the subthreshold current is subsurface (checked with J depth).
+  Open: Ion -20% may partly be the Lambda step at the gate edge (margin run).
+- NEXT (user agreed): runtime. 1) time breakdown, 2) Lambda update inside the
+  Newton iterations (drop the second solve), 3) cheaper/parallel line solves,
+  4) Schottky drain ramp 36 vs 17 s. Then FinFET/nanosheet plan review
+  (plans/finfet_nanosheet_plan.md, questions Q1-Q5).
+
+### LATEST 2026-10-13 (quantum P1) - START HERE
+**State:** roadmap item 2 (Schrodinger-Poisson) in progress on branch
+`quantum-sp` (local, NOT merged, NOT pushed). Plan `plans/quantum_plan.md`
+(approved with the recommended Q1-Q4 answers: quantum box under the gate
+with a lattice-spacing knob, Boltzmann subbands + Fermi-Dirac switch,
+inversion carrier only, off by default until 3D is validated).
+- P1 (1D) DONE: `quantum/` package, DEVELOPMENT_LOG 69, `docs/quantum.md`,
+  README section, `testsuite/test_quantum.py` (10 tests, 0.9 s). Bulk
+  1e18 tox 1.5 nm: dVt +83 mV, centroid 0.25 -> 1.07 nm, Cinv/Cox
+  0.951 -> 0.851. Double gate: volume inversion at 3 nm. 2-3 outer
+  iterations. Charge conserved on the 0.5 nm fab mesh (0.3%).
+- Also fixed shared code: `build_mos_grid` dropped the -t_ox node (1D
+  MOS-cap oxide was 1.39 nm for 1.5); mos goldens recaptured.
+- NEXT: P2 - 2D MOSFET (`solver2d/newton_solve_2d`: add
+  `quantum_shift=(Lambda_n, Lambda_p)` through `_densities`, residual,
+  Jacobian, `poisson_solve`, the cold start and the quasi-Fermi box; lines
+  down from the gate oxide; Lambda tapered at the gate edges; check that
+  a long channel matches 1D column by column and that there is no Id
+  kink). Then P3 - 3D fab planar (lines from the gate-oxide interface
+  points; lattice study center / 4 / 2 / 1 nm; re-measure the 72 s
+  reference run). Open: compare against a published SP curve (Stern
+  1972 / Schred); Fermi-Dirac default?
+
+### 2026-10-13 (end of session, before quantum P1)
 **State:** everything is on `main`, pushed (ea182bd). Working tree clean,
 no open feature branches of ours (old ones deleted local + remote). The
 next piece of work starts a NEW feature branch from `main`.
