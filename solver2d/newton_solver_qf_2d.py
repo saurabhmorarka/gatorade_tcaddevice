@@ -71,6 +71,10 @@ ETA_MAX_SCHOTTKY = 1e-7  # the cap after a damped step, with sub-grid Schottky c
 QUANTUM_TRIGGER = 1e-2
 QUAD_PREDICT_MAX = 1e-3  # V - only trust the quadratic-convergence prediction below this update
 RES_PREDICT_MAX = 1e-1   # |F|_inf sanity bound for the prediction exit (see _run_newton)
+UPD_PSI_TOL = 1e-6       # V - update-based convergence (Sentaurus-style, see _run_newton): the Newton
+UPD_DENS_TOL = 1e-4      # correction's largest psi move and largest relative density change
+UPD_DENS_MEAN = 1e-5     # (|dn|/(n + UPD_DENS_REF), p likewise), and the node mean of the latter
+UPD_DENS_REF = 1e10      # (Sentaurus: mean < 10^-Digits, Digits 5; ErrRef 1e8-1e10 cm^-3)
 QF_DENSITY_REF = 1.0     # cm^-3 - quasi-Fermi updates are weighted by n/(n+ref) in the prediction exit
 
 # One core.linsolve.LinearSolver per mesh per process, so a factorization
@@ -1133,12 +1137,15 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             r["iters_warmup"] = r["iters"]
             return r
         it_direct = r["iters"]
-        w = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
-                            phip_init=phip_init, maxiter=maxiter, cold_retry=cold_retry,
-                            velocity_saturation="efield", **kw)
-        r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=w["psi"], phin_init=w["phin"],
-                            phip_init=w["phip"], maxiter=maxiter, cold_retry=False,
-                            velocity_saturation=velocity_saturation, vsat_warmup=False, **kw)
+        try:
+            w = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=psi_init, phin_init=phin_init,
+                                phip_init=phip_init, maxiter=maxiter, cold_retry=cold_retry,
+                                velocity_saturation="efield", **kw)
+            r = newton_solve_2d(mesh, mat, bias_by_contact, psi_init=w["psi"], phin_init=w["phin"],
+                                phip_init=w["phip"], maxiter=maxiter, cold_retry=False,
+                                velocity_saturation=velocity_saturation, vsat_warmup=False, **kw)
+        except RuntimeError:          # a linear-solver breakdown: a failed point (the caller halves its step)
+            return {"converged": False, "iters": it_direct + maxiter, "iters_warmup": it_direct}
         r["iters_warmup"] = it_direct + w["iters"]
         r["iters"] = r["iters_warmup"] + r["iters"]
         return r
@@ -1386,6 +1393,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         best_U, best_res = U, res_norm
         merit_prev = None
         upd_prev = None
+        upd_last = None
         for it in range(1, maxiter + 1):
             if res_norm < f_tol:
                 break
@@ -1404,6 +1412,16 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             n_cur, p_cur = _densities(U[:N], U[N:2 * N], U[2 * N:], ni_q, Vt, dEi_q)
             max_dqf = max(np.max(np.abs(delta[N:2 * N]) * n_cur / (n_cur + QF_DENSITY_REF)),
                           np.max(np.abs(delta[2 * N:]) * p_cur / (p_cur + QF_DENSITY_REF)))
+            # Update-based convergence estimate from the FULL correction (the
+            # error of the current iterate), as Sentaurus (Digits/ErrRef) and
+            # DEVSIM test it: the potential's move and each carrier's relative
+            # density change (largest and node mean), the density floored at UPD_DENS_REF so a carrier
+            # that is essentially absent does not count.
+            en = (np.abs(delta[:N] - delta[N:2 * N]) / Vt * n_cur / (n_cur + UPD_DENS_REF))[box_free]
+            ep = (np.abs(delta[2 * N:] - delta[:N]) / Vt * p_cur / (p_cur + UPD_DENS_REF))[box_free]
+            dn_rel, dp_rel = np.max(en, initial=0.0), np.max(ep, initial=0.0)
+            upd_small = (max_dpsi < UPD_PSI_TOL and max(dn_rel, dp_rel) < UPD_DENS_TOL
+                         and max(np.mean(en) if en.size else 0.0, np.mean(ep) if ep.size else 0.0) < UPD_DENS_MEAN)
             if max_dpsi > MAX_PSI_STEP:
                 delta = delta * (MAX_PSI_STEP / max_dpsi)
                 max_dpsi = MAX_PSI_STEP
@@ -1435,7 +1453,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                 best_U, best_res = U, res_norm
             if verbose:
                 print(f"  Newton(QF,2D) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}  "
-                      f"max|dpsi|={upd:.2e}  merit={merit_try if accepted else merit:.2e}")
+                      f"max|dpsi|={upd:.2e}  merit={merit_try if accepted else merit:.2e}  "
+                      f"dn/n={dn_rel:.1e} dp/p={dp_rel:.1e}")
 
             # Update-based convergence (the usual device-simulator test):
             # once Newton is in its quadratic regime the potential update
@@ -1469,6 +1488,21 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             # and the off-state Id came out 1000x too large (8e-12 vs
             # 7.6e-15 A/um).
             converged = upd < PSI_UPDATE_TOL and accepted and res_norm < RES_ACCEPT
+            # The update test: the correction just computed already moves
+            # nothing (psi < UPD_PSI_TOL, densities < UPD_DENS_TOL / UPD_DENS_MEAN),
+            # whatever |F|_inf says. |F|_inf alone stalled the nanosheet: one
+            # electron row in a sheet at ~0.2 (raw, unscaled), the row-scaled
+            # residual at round-off, the line search crawling at steps of
+            # 1/32 - 53 of a gate step's 75 iterations changed nothing.
+            # Only once Newton has stopped converging (a damped step, or an
+            # update that shrank less than 10x): while it converges
+            # quadratically the next iteration is cheap and the residual test
+            # decides - a near-equilibrium diode current (a small difference
+            # of large drift and diffusion terms) moved 0.4% when a 1e-5
+            # density update was accepted mid-convergence there.
+            stagnant = upd_last is not None and upd_all > 0.5 * upd_last
+            converged = converged or (upd_small and (step < 1.0 or stagnant))
+            upd_last = upd_all
             if (not converged and accepted and step == 1.0 and upd_prev is not None
                     and upd_all < QUAD_PREDICT_MAX and upd_prev > upd_all and res_norm < RES_PREDICT_MAX):
                 converged = upd_all ** 3 / upd_prev ** 2 < PSI_UPDATE_TOL

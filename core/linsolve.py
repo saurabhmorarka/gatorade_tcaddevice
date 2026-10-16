@@ -77,6 +77,15 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 AUTO_ITERATIVE_MIN = 60000   # unknowns; 2D-sized systems stay on direct LU
+# Adaptive block-ILU level: the mean GMRES iterations of the last ILU_ADAPT_WINDOW
+# fresh factorizations above ILU_RAISE_ITS raise the level by one, up to
+# ILU_LEVELS_MAX. Measured fresh iterations at ILU(2) / ILU(4) (Vds 0.7 V walk):
+# planar 34 / 20 (ILU(4) costs 1.5x the CPU), FinFET 71 / 42 (-5%); nanosheet
+# replayed Jacobians ILU(2) 162 s, ILU(3) 107 s, ILU(4) 87 s, ILU(5) 99 s.
+ILU_RAISE_ITS = 50
+ILU_ADAPT_WINDOW = 5
+ILU_LEVELS_MAX = 4
+LOOSE_RTOL = 1e-3            # a fresh ILU-GMRES that missed rtol but reached this is still used (_loose_ok)
 REUSE_ITS_FACTOR = 3         # a reused preconditioner may take this x the fresh one's iterations
 REUSE_ITS_MIN = 20           # ... but never fewer than this (see LinearSolver._krylov)
 
@@ -261,6 +270,10 @@ class LinearSolver:
         self.max_krylov = max_krylov          # with a (lagged) exact LU preconditioner
         self.max_krylov_ilu = max_krylov_ilu  # with an ILU preconditioner (needs many more)
         self.ilu_levels = ilu_levels if ilu_levels is not None else (2 if block_size else 1)
+        # block ILU without a fixed level: raised one level (up to ILU_LEVELS_MAX)
+        # whenever fresh factorizations keep needing many GMRES iterations
+        self._adapt_levels = ilu_levels is None and bool(block_size)
+        self._fresh_hist = []
         self.ilu_fill = ilu_fill
         self._pat = None
         self._prec = None          # backend-specific preconditioner handle
@@ -374,6 +387,21 @@ class LinearSolver:
         As = sp.csr_matrix((data, self._pat.indices, self._pat.indptr), shape=A.shape)
         return As, r * b
 
+    def _loose_ok(self, As, bs, y):
+        """A fresh ILU-GMRES that missed a tight inexact-Newton rtol (1e-7
+        once Newton is close) but still reduced the residual by LOOSE_RTOL
+        is used: the direction is good enough for a Newton step (the next
+        iteration's own residual decides), where raising threw away whole
+        nearly converged bias points (nanosheet gate walk: the walk's step
+        halved again and again)."""
+        if not np.all(np.isfinite(y)):
+            return False
+        rel = np.linalg.norm(As @ y - bs) / max(np.linalg.norm(bs), 1e-300)
+        if rel < LOOSE_RTOL:
+            self.stats["loose"] = self.stats.get("loose", 0) + 1
+            return True
+        return False
+
     def _factor_and_solve(self, A, b, rtol):
         self._drop_prec()
         t0 = time.perf_counter()
@@ -390,14 +418,22 @@ class LinearSolver:
                 ilu = _TwoLevel(ilu.solve, *self._coarse_scaled(As))
             self._prec = dict(lu=ilu)
             y, ok, its = gmres_right(As, bs, ilu.solve, rtol, self.max_krylov_ilu)
-            if not ok:
+            if not ok and not self._loose_ok(As, bs, y):
                 raise RuntimeError("scipy ILU-GMRES failed on a freshly built preconditioner")
         else:
             self._prec = self._petsc_setup(As)
             y, its, ok = self._petsc_solve(As, bs, rtol, reuse=False)
-            if not ok:
+            if not ok and not self._loose_ok(As, bs, y):
                 raise RuntimeError(f"PETSc {self.backend} failed on a freshly built preconditioner")
         self._fresh_its = its if self.backend in ("scipy_ilu", "petsc_ilu") else 0
+        if self._adapt_levels and self._use_blocks():
+            self._fresh_hist.append(its)
+            if (len(self._fresh_hist) >= ILU_ADAPT_WINDOW and self.ilu_levels < ILU_LEVELS_MAX
+                    and np.mean(self._fresh_hist[-ILU_ADAPT_WINDOW:]) > ILU_RAISE_ITS):
+                self.ilu_levels += 1                 # from the next factorization on
+                self._fresh_hist = []
+                self._ksp_kept = None
+                self.stats["ilu_levels"] = self.ilu_levels
         self._t_factor = time.perf_counter() - t0
         self.stats["factorizations"] += 1
         self.stats["t_factor"] += self._t_factor

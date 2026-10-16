@@ -1,6 +1,6 @@
 """Structure figures of the FinFET and nanosheet templates in docs/img/.
 
-    python3 docs/make_device_figures.py              # both devices
+    python3 docs/make_device_figures.py              # all devices
     python3 docs/make_device_figures.py finfet       # one
 
 Per device (builds configs/fab_<device>.yaml into out/fab_<device>/ if
@@ -25,7 +25,8 @@ IMG = os.path.join(ROOT, "docs", "img")
 
 TITLES = {
     "finfet": "Bulk FinFET, CPP 48 nm, Lg 15 nm, fin 5 x 50 nm",
-    "nanosheet": "Nanosheet, 3 x 5 nm sheets 25 nm wide, CPP 48 nm, Lg 15 nm",
+    "nanosheet": "Nanosheet (PTS isolation), 3 x 5 nm sheets 25 nm wide, CPP 48 nm, Lg 15 nm",
+    "nanosheet_bdi": "Nanosheet (bottom dielectric isolation), 3 x 5 nm sheets 25 nm wide, CPP 48 nm, Lg 15 nm",
 }
 SEMI_NAMES = ("substrate", "sheets", "sd_epi")
 EPI_COLOR, CONTACT_COLOR = "#5a7fa8", "#c9a227"   # set apart from the substrate / gate (both Si / TiN)
@@ -157,7 +158,7 @@ def fig_cuts(dev):
 
 def main(argv):
     os.makedirs(IMG, exist_ok=True)
-    for dev in (argv or ["finfet", "nanosheet"]):
+    for dev in (argv or list(TITLES)):
         sess = _session(dev)
         fig_3d(dev, sess)
         fig_gatecut(dev, sess)

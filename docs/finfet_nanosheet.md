@@ -3,12 +3,14 @@
 [Back to the README](../README.md)
 
 Two new virtual-fab templates at 2 nm-node-class dimensions: a bulk FinFET
-and a 3-sheet nanosheet (gate-all-around). Plan:
+and a 3-sheet nanosheet (gate-all-around), the nanosheet with two ways of
+isolating the substrate under the stack. Plan:
 `plans/finfet_nanosheet_plan.md`. Numbers: DEVELOPMENT_LOG 70.
 
 ```bash
 python3 -m fab build configs/fab_finfet.yaml        # ~1 s + snapshots
-python3 -m fab build configs/fab_nanosheet.yaml     # ~3 s + snapshots
+python3 -m fab build configs/fab_nanosheet.yaml     # ~3 s + snapshots (PTS isolation)
+python3 -m fab build configs/fab_nanosheet_bdi.yaml # bottom dielectric isolation
 python3 -m tcadview out/fab_finfet/build.pvd        # scrub through the build
 python3 docs/make_device_figures.py                 # the pictures below
 ~/miniconda3/envs/tcad/bin/python -m fab simulate configs/fab_finfet.yaml --mesher octree \
@@ -27,7 +29,7 @@ The rest are typical published 3-2 nm-node values:
 | body | fin 5 x 50 nm, 24 nm fin pitch | 3 sheets 5 x 25 nm, 10 nm gaps, 46 nm stack pitch |
 | gate stack | IL + HfO2 lumped, 2 nm, EOT 0.85 nm; TiN, wf 4.40 eV | same, wrapping every sheet |
 | S/D | recessed fin, Si:P epi 7e20 (sx 2, sy 3 nm) | epi from the sheet ends, 7e20 |
-| isolation | PTS 3e18 at the fin base | PTS 1e18 under the stack (sharp) |
+| isolation | PTS 3e18 at the fin base | `pts`: PTS 1e19 under the stack (sharp, sigma 4 nm); `bdi`: 10 nm SiN under the stack + PTS 1e18 |
 | contacts | TiN trench contacts, Schottky (0.45 eV) | same |
 
 The domain is one CPP along x (the gate in the middle, half of each shared
@@ -54,10 +56,18 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
 8. ILD, CMP, TiN trench contacts recessed 5 nm into the epi
 
 **Nanosheet** (`template: nanosheet`, replacement metal gate):
-1. substrate, then the superlattice: 3 x (SiGe 10 nm, Si 5 nm)
-2. stack etch, STI, PTS, STI recess to the stack bottom
-3. dummy poly gate; outer spacer (cleared from the stack side walls)
-4. S/D recess through the stack
+1. substrate, then the superlattice: 3 x (SiGe 10 nm, Si 5 nm); with
+   `isolation: bdi` a 10 nm sacrificial (high-Ge) SiGe layer under it
+2. stack etch, STI, PTS, STI recess to the stack bottom (BDI: 2 nm short
+   of the mesa top, which the STI must cover - flush, the S/D epi beside
+   the stack touched the mesa's top edge)
+3. dummy poly gate. BDI: the sacrificial layer is removed under the whole
+   stack (the dummy gate holds it), a conformal SiN closes the cavity, and
+   a directional etch-back that stops on any other solid clears the film
+   from every surface seen from above. Outer spacer (cleared from the
+   stack side walls)
+4. S/D recess through the stack (PTS: 3 nm into the mesa; BDI: down to
+   the SiN)
 5. SiGe lateral recess (5 nm, isotropic, SiGe only), inner-spacer SiN
    fill, and a directional etch-back to the sheet ends. An isotropic
    etch-back deep enough to clear the sheet ends also hollowed the
@@ -75,6 +85,10 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
 <p align="center">
   <img src="img/finfet_cut.png" alt="FinFET mid-width cutaway, doping" width="48%">
   <img src="img/nanosheet_cut.png" alt="Nanosheet mid-width cutaway, doping" width="48%">
+</p>
+<p align="center">
+  <img src="img/nanosheet_bdi_gatecut.png" alt="Nanosheet with BDI, cut through the gate" width="48%">
+  <img src="img/nanosheet_bdi_cuts.png" alt="Nanosheet with BDI, 2D cuts" width="48%">
 </p>
 <p align="center">
   <img src="img/finfet_cuts.png" alt="FinFET 2D cuts: materials and net doping" width="49%">
@@ -95,7 +109,9 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
   metric (an anisotropic distance transform). For a box-shaped epi this is
   exactly the separable exp(-dx²/2sx²) exp(-dy²/2sy²). sx sets the
   junction under the spacer (the overlap), sy the tail below the epi.
-  Checked against the closed form in `test_fab`.
+  Checked against the closed form in `test_fab`. The tail reaches only
+  semiconductor connected to the epi: it does not cross a dielectric (the
+  BDI), however thin.
 - **Capped conformal deposit** (`to_height` with `mode: conformal`): the
   selective epi grown to a height.
 - **`HKstack`**: a 0.6 nm SiO2 interlayer plus 1.4 nm HfO2, lumped into one
@@ -108,22 +124,37 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
 
 ## Electrical results
 
-RESULTS_PLACEHOLDER
+Classical drift-diffusion (octree mesh, Schottky S/D, hybrid velocity
+saturation), Vds = 0.05 / 0.7 V, two workers. Currents per um of effective
+width; Ion at Vgs = 0.8 V.
+
+| device | Vt lin / sat (V) | SS (mV/dec) | DIBL (mV/V) | Ion (uA/um) | Ioff (A/um) | full I-V |
+|---|---|---|---|---|---|---|
+| FinFET | 0.205 / 0.162 | 62 | 66 | 1015 | 2.6e-7 | 190 s |
+| nanosheet, PTS 1e19 | 0.206 / 0.101 | 72 | 163 | 1101 | 4.6e-6 | 585 s |
+| nanosheet, BDI | 0.207 / 0.176 | 61 | 48 | 1046 | 2.1e-8 | 427 s |
+
+- BDI isolates the mesa: Ioff 220x lower, DIBL 48 instead of 163 mV/V,
+  SS 61 instead of 72 mV/dec. With only a punch-through stopper (even at
+  1e19) the S/D epi still reaches the substrate under the stack, a
+  sub-sheet leakage path the gate does not control.
+- Gate steps of 0.1 V for the nanosheet, 0.05 V for the FinFET; the
+  adaptive walk takes about the same continuation steps either way.
+- Runtime history (BDI nanosheet, both curves): 2050 s (direct LU, one
+  worker) -> 717 s (update-based convergence) -> 427 s (adaptive ILU level,
+  dielectric-light mesh, ramps in the workers): DEVELOPMENT_LOG 71.
 
 ## Known issues / next
 
-- **FinFET walk time.** About half of it goes to steps near threshold
-  where the default velocity-saturation force ("hybrid", the quasi-Fermi
-  gradient where carriers are dense) stalls GMRES. 12 of the 14 s of a
-  failed attempt are Krylov iterations. With the edge-field force the same
-  step converges in 4 iterations.
-- **Nanosheet runtime.** The stall rows are electron continuity in the
-  p-type PTS region under the stack, where electrons are a negligible
-  minority and phin is nearly undetermined. ILU-GMRES leaves them at
-  |F| ≈ 8, which blocks the |F|_inf acceptance test and shrinks the
-  line-search steps. Exact LU converges the same step in 6 iterations. A
-  density-weighted acceptance and merit for continuity rows is the likely
-  cure (shared Newton logic: robustness matrix first).
+- **Near-threshold walk steps.** At Vds = 0.05 V about 45% of the
+  nanosheet walk goes to failed gate steps between Vgs 0.15 and 0.34 V
+  (the FinFET similarly). Cause: the S/D junction tail at the drain end
+  of the channel (doping ~8e15) sits at the hybrid force's crossover
+  density (1e16), where the drive switches to the edge field - there the
+  junction's built-in field - and a small drop of n collapses the
+  mobility. A higher crossover density cures it but moves subthreshold Id
+  by -36%: not taken. The Jacobian is exact; globalization variants did
+  not help (DEVELOPMENT_LOG 71).
 - Corners of fins and sheets take the larger Lambda of their two lines (a
   first pass; 2D cross-section Schrodinger slices, quantum plan P4, would
   replace it).

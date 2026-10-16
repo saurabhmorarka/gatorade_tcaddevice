@@ -1,5 +1,7 @@
 # Nanosheet (GAA) NMOS, 2 nm-node class (fab/templates.py nanosheet): one
 # stack of 3 sheets in one contacted poly pitch, replacement metal gate.
+# Mesa isolation by a heavy punch-through stopper (isolation: pts); the
+# bottom-dielectric-isolation variant is configs/fab_nanosheet_bdi.yaml.
 # Lengths in nm unless a unit is given.
 #
 #   python3 -m fab build configs/fab_nanosheet.yaml
@@ -13,3 +15,4 @@ params:
   t_sheet: 5nm
   W_sheet: 25nm
   t_sige: 10nm
+  isolation: pts

@@ -585,10 +585,10 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
         log(f"  quantum box: {len(q.lines)} lines, carrier {q.carrier}, {len(q.extra_nodes)} interpolated nodes")
     _region_info(d)
     log(f"  mesh + equilibrium: {time.perf_counter() - t0:.0f} s")
-    # the drain ramps at Vgs = 0 (off: the gentlest place to raise Vds), once
-    ramps, _, _ = _ramp(d, vds)
-    d["base"] = ramps
-    log(f"  drain ramps: {time.perf_counter() - t0:.0f} s")
+    # The drain ramps at Vgs = 0 (off: the gentlest place to raise Vds) run in
+    # the curve workers (run_curve), each to its own Vds: the low-Vds curve
+    # then starts at once instead of waiting for the ramp to the highest
+    # Vds (nanosheet: ~80 s of serial ramps before any curve started).
     vgs = list(np.round(np.arange(vgs_step, vgs_max + 1e-9, vgs_step), 6))
     # One worker per curve. Splitting a curve into segments (each walking
     # from Vgs = 0 to its first point) cannot shorten it: a segment's walk
@@ -598,9 +598,6 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     # vs 83 s per curve; rectilinear 65 vs 56 s (DEVELOPMENT_LOG 57).
     tasks = []
     for v in vds:
-        if v not in ramps:
-            log(f"  Vds={v:g} V: drain ramp failed - curve skipped")
-            continue
         tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
                           vtk_keep=(0.0, max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
                           quantum=quantum))
@@ -615,7 +612,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     results = []
     for v in vds:
         parts = [r for r in curve_results if r["task"]["Vds"] == v]
-        if not parts:
+        if not parts or not any(r["points"] for r in parts):
+            log(f"  Vds={v:g} V: drain ramp failed - curve skipped")
             continue
         pts, entries = {}, {}
         for r in parts:

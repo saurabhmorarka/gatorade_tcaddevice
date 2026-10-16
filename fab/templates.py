@@ -381,7 +381,17 @@ NANOSHEET_DEFAULTS = {
     "voxel": [0.5, 0.5, 0.5],
     "mesh_h_fine": [1.0, 0.5, 0.5],      # sheet side walls face z (see the FinFET)
     "sub_conc": 1e15,
-    "pts_peak": 1e18, "pts_sigma": 4,       # sharp: implanted before the superlattice in a real flow
+    # Isolation of the substrate mesa under the stack (the S/D epi reaches
+    # it, a punch-through path 5-20 nm under the bottom sheet):
+    #   pts: a heavy punch-through stopper only (1e19, sharp: implanted
+    #        before the superlattice in a real flow)
+    #   bdi: bottom dielectric isolation - a sacrificial layer under the
+    #        superlattice, removed under the dummy gate and refilled with
+    #        SiN; the epi then meets only the sheet ends (light PTS 1e18)
+    "isolation": "pts",
+    "t_bdi": 10,
+    "bdi_material": "SiN",
+    "pts_peak": None, "pts_sigma": 4,       # None: 1e19 (pts) / 1e18 (bdi)
     "epi_over": 5, "epi_thickness": 18,
     "epi_peak": None, "epi_sx": 2.0, "epi_sy": 4.0,
 }
@@ -394,6 +404,7 @@ NANOSHEET_DERIVED = {
     "zs0": "(stack_pitch - W_sheet)/2",
     "zs1": "(stack_pitch + W_sheet)/2",
     "H_stack": "n_sheets*(t_sheet + t_sige)",
+    "H_sl": "H_stack + t_bdi",               # superlattice (+ the BDI layer) on the substrate
     "W": "2*n_sheets*(W_sheet + t_sheet)",   # effective width (currents per um of it)
     "gate_top": "gate_height",
     "ild_top": "gate_height + ild_cap",
@@ -404,11 +415,21 @@ def nanosheet(params):
     """Layer 2 + 3 for the nanosheet (GAA) template."""
     p, n = _merge(NANOSHEET_DEFAULTS, NANOSHEET_DERIVED, params, "nanosheet")
     p["n_sheets"] = int(p["n_sheets"])
+    bdi = p["isolation"] == "bdi"
+    if p["isolation"] not in ("pts", "bdi"):
+        raise ValueError(f"nanosheet isolation must be pts or bdi, not {p['isolation']!r}")
+    if not bdi:
+        p["t_bdi"] = 0
+    if p.get("pts_peak") is None:
+        p["pts_peak"] = 1e18 if bdi else 1e19
     gm, hk, sg = p["gate_material"], p["gate_dielectric"], p["sige_material"]
     sub_sp = "B" if n else "P"
     process = [
-        {"step": "substrate", "label": "substrate", "material": "Si", "name": "substrate", "top_height": "-H_stack"},
+        {"step": "substrate", "label": "substrate", "material": "Si", "name": "substrate", "top_height": "-H_sl"},
     ]
+    if bdi:
+        process.append({"step": "deposit", "label": "BDI sacrificial layer (high-Ge SiGe)", "mode": "fill",
+                        "material": sg, "name": "bdi_sacrificial", "to_height": "-H_stack"})
     for k in range(p["n_sheets"]):           # bottom up: SiGe, then the Si sheet on it
         top_sige = f"-H_stack + {k + 1}*t_sige + {k}*t_sheet"
         process += [
@@ -422,19 +443,39 @@ def nanosheet(params):
          "materials": ["Si", sg]},
         {"step": "pattern", "label": "stack mask", "name": "stack", "mask": {"rect": [-1, "Lx + 1", "zs0", "zs1"]}},
         {"step": "etch", "label": "stack etch", "mode": "anisotropic", "materials": ["Si", sg], "mask": "!stack",
-         "depth": "H_stack + sub_fin"},
+         "depth": "H_sl + sub_fin"},
         {"step": "deposit", "label": "STI oxide fill", "mode": "fill", "material": "SiO2", "name": "sti",
          "to_height": 5},
         {"step": "planarize", "label": "STI CMP (stop on the stack)", "to_height": 0},
         {"step": "implant", "label": "punch-through stopper", "species": sub_sp, "peak": "pts_peak",
-         "rp": "H_stack + 5", "sigma": "pts_sigma"},
+         "rp": "H_sl + 5", "sigma": "pts_sigma"},
+        # with BDI the STI stays 2 nm above the mesa top: flush, the S/D epi
+        # beside the stack would meet the mesa's top edge
         {"step": "etch", "label": "STI recess (stack reveal)", "mode": "anisotropic", "regions": ["sti"],
-         "depth": "H_stack"},
+         "depth": "H_sl - 2" if bdi else "H_sl"},
         {"step": "deposit", "label": "dummy gate (poly)", "mode": "fill", "material": "Poly", "name": "dummy_gate",
          "to_height": "gate_top"},
         {"step": "pattern", "label": "gate mask", "name": "gate", "mask": {"rect": ["xg0", "xg1", -1, "Lz + 1"]}},
         {"step": "etch", "label": "dummy gate etch", "mode": "anisotropic", "regions": ["dummy_gate"],
          "mask": "!gate"},
+    ]
+    if bdi:
+        # the sacrificial layer goes everywhere (the dummy gate holds the
+        # stack), then a conformal SiN closes the cavity and a directional
+        # etch clears the film seen from above: what is left is the SiN
+        # under the stack. Region-selective, so the isotropic reach
+        # only has to cover the layer's farthest point from a side wall.
+        process += [
+            {"step": "etch", "label": "BDI sacrificial layer removal", "mode": "isotropic",
+             "regions": ["bdi_sacrificial"], "thickness": "W_sheet/2 + Lg/2 + spacer + 2"},
+            {"step": "deposit", "label": "BDI fill (conformal SiN)", "mode": "conformal",
+             "material": p["bdi_material"], "name": "bdi", "thickness": "t_bdi/2 + 1"},
+            # stop on the top of any other solid: a column through the stack
+            # keeps the cavity fill under it
+            {"step": "etch", "label": "BDI etch back", "mode": "anisotropic", "regions": ["bdi"],
+             "stop_on": ["Si", sg, "Poly", "SiO2"]},
+        ]
+    process += [
         {"step": "deposit", "label": "outer spacer deposition", "mode": "conformal", "material": "SiN",
          "name": "spacer", "thickness": "spacer"},
         {"step": "pattern", "label": "gate + spacer footprint", "name": "gate_sp",
@@ -475,7 +516,7 @@ def nanosheet(params):
         {"step": "planarize", "label": "ILD CMP", "to_height": "ild_top"},
     ]
     process[k_cmp + 1:k_cmp + 1] = rmg
-    domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-(H_stack + sub_fin + sub_depth)",
+    domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-(H_sl + sub_fin + sub_depth)",
                                                           "ild_top + ild_overfill + top_margin"], "voxel": "voxel"}
     return {"params": p, "domain": domain, "process": process, "device": _device_layer(p)}
 

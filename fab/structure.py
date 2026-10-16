@@ -320,7 +320,10 @@ class Structure:
         metric - for a box-shaped epi exactly the separable
         exp(-dx^2/2sx^2) exp(-dy^2/2sy^2). sx (nm) sets the junction under
         the spacer (the overlap), sy the tail below the epi; sz defaults to
-        sx. Only semiconductor nodes keep it (net_doping)."""
+        sx. Only semiconductor nodes keep it (net_doping), and only those
+        connected to the epi through semiconductor: the dopant does not
+        cross a dielectric (bottom dielectric isolation under a nanosheet
+        stack, a buried oxide) however thin."""
         g = self.grid
         sz = sx if sz is None else sz
         # the epi's nodes, its own surface included - but a deposit's level
@@ -333,7 +336,11 @@ class Structure:
         if not inside.any():
             raise ValueError(f"epi_doping: no epi region among {regions}")
         d = ndimage.distance_transform_edt(~inside, sampling=(g.h[0] / sx, g.h[1] / sy, g.h[2] / sz))
-        self._add_doping(species, peak * np.exp(-0.5 * d ** 2))
+        semi = self.semiconductor_nodes()
+        comp, _ = ndimage.label(semi | inside)
+        ids = np.unique(comp[inside])
+        cut_off = semi & ~np.isin(comp, ids[ids > 0])           # semiconductor the epi does not reach
+        self._add_doping(species, np.where(cut_off, 0.0, peak * np.exp(-0.5 * d ** 2)))
 
     def dope(self, species, conc, regions=None, materials=None):
         """Uniform doping inside the given regions/materials (all if none)."""

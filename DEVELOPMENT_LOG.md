@@ -6101,3 +6101,137 @@ FinFET; Ion at the top Vgs, currents per um of effective width).
   (quantum/compare_3d.py), finfet_* / nanosheet_* (docs/make_device_figures.py).
 - Tests: test_quantum 13 (mirror test new), test_fab 31 (epi_doping,
   capped conformal, FinFET, nanosheet new). Conda quick tier 152/152.
+
+## 71. Nanosheet isolation (PTS / BDI) and the 3D runtime pass: 2050 -> 427 s
+
+Branch `quantum-sp`. The nanosheet template gets two ways of isolating the
+substrate mesa under the stack, then the user's goal: the nanosheet full
+I-V (two curves) in ~3 min, the FinFET ~1 min, with fixes that survive
+the mobility models still to come (no physics shortcuts).
+
+**Nanosheet isolation (`isolation: pts | bdi`, fab/templates.py).**
+- `pts`: a heavy punch-through stopper only, 1e19 sharp (sigma 4 nm) under
+  the stack (`configs/fab_nanosheet.yaml`).
+- `bdi`: bottom dielectric isolation - a 10 nm sacrificial high-Ge SiGe
+  layer under the superlattice, removed under the whole stack once the
+  dummy gate holds it, refilled by a conformal SiN and a directional
+  etch-back; the S/D recess stops on the SiN, the epi meets only the sheet
+  ends; light PTS 1e18 (`configs/fab_nanosheet_bdi.yaml`). The STI stays
+  2 nm above the mesa top (flush, the epi beside the stack touched the
+  mesa's top edge).
+- Figures `docs/img/nanosheet_bdi_*`; tests in test_fab (both builds,
+  the SiN under the stack, no epi/mesa contact with BDI).
+
+**Where the time went (measured first).** Profile of the nanosheet
+Vds = 0.7 V walk: 90% in the linear solves (GMRES internals 384 s,
+preconditioner applications 181 s of 628 s), assembly ~6%: Rust assembly
+would not pay. The full I-V needed 8-10 Newton iterations per point, at
+2.8-4.8 s each (0.4 s on the planar device). The Vds = 0.05 V curve also
+loses ~45% of its walk to failed steps near threshold (below).
+
+**Kept.**
+1. Update-based convergence (solver2d/newton_solver_qf_2d.py,
+   UPD_PSI_TOL / UPD_DENS_TOL / UPD_DENS_MEAN / UPD_DENS_REF): converged
+   when the Newton correction moves psi < 1e-6 V and every carrier's
+   density by < 1e-4 relative (node mean < 1e-5; density floored at
+   1e10), Sentaurus/DEVSIM-style - but only once Newton has stopped
+   converging (a damped step, or an update that shrank < 2x). |F|_inf alone
+   stalled the nanosheet (one electron row at ~0.2, the line search
+   crawling at 1/32: 53 of a gate step's 75 iterations changed nothing):
+   gate walk 0 -> 0.4 V 720 -> 308 s. Accepting it mid-convergence moved
+   the 2D diode's +-0.1 V current 0.1-0.4% (a small difference of large
+   drift and diffusion terms): hence the stagnation condition (diode
+   golden unchanged).
+2. `LOOSE_RTOL = 1e-3` (core/linsolve.py): a fresh ILU-GMRES that missed a
+   tight rtol (1e-7) but reduced the residual 1e3x is used instead of
+   raising (the walk halved its step again and again on these).
+3. A linear-solver breakdown inside the vsat fallback path returns a
+   failed point (the caller halves) instead of crashing the I-V.
+4. Adaptive block-ILU level (core/linsolve.py, ILU_RAISE_ITS 50,
+   ILU_ADAPT_WINDOW 5, ILU_LEVELS_MAX 4): start at ILU(2), raise by one when
+   the last 5 fresh factorizations averaged > 50 GMRES iterations. Replayed
+   nanosheet Jacobians (40 captured systems, Vds 0.7): ILU(2) 162 s,
+   ILU(3) 107, ILU(4) 87, ILU(5) 99, ILU(6) 117; orderings RCM (kept) <
+   natural < ND < QMD; GMRES restart 40 and BiCGStab no better. Planar stays
+   at ILU(2) (fresh median 34 its; ILU(4) cost it 1.5x the CPU), FinFET and
+   nanosheet climb to 4 (FinFET Vds 0.7 walk 233 -> 178 iterations, CPU -22%).
+5. Mesh priority (the user's rule: semiconductor first, dielectric only
+   for capacitance, metal nothing), mesh3d/octree.py `target_spacing`:
+   inside insulators the spacing grows 2x per nm (growth_insulator 2.0) to
+   16 nm (h_max_insulator) - fine at the silicon interface, coarse fast;
+   and the 0.5 nm interface spacing only on silicon doped below 1e19
+   (fine_max_doping) - the channel, not a degenerate S/D's dielectric
+   surfaces. Junctions and metal contacts keep it (a sub-grid Schottky
+   contact's current moved 1.9% without, planar_tiny). Layer thicknesses
+   stay exact (the tree splits at every label change). BDI nanosheet
+   142.7k -> 123.0k nodes. The 2:1 balance and the face matching at
+   silicon and metal surfaces set a floor: even with no grading inside the
+   dielectrics, 55.7k dielectric nodes remain (half of them within 2 nm of
+   silicon).
+6. Two octree mesher fixes found by 5 (both made the quality gate fail on
+   the trimmed nanosheet):
+   - a facet lying exactly ON a metal surface was labelled by each cell
+     sampling a different side of that plane (metal from one, the epi from
+     the other); the metal-labelled side was dropped before pairing, so
+     the facet was "seen from one side only". Facets are now paired on
+     their geometric area, and a side that saw only metal takes the other
+     side's parts.
+   - `split_for_stray` finding no split within 3 voxels of a stray node
+     now searches up to 6 and, failing that, halves the nearest
+     metal-facing leaves (the repair loop always progresses).
+7. fab simulate: the drain ramps run in the curve workers, each to its
+   own Vds (the low-Vds curve no longer waits ~80 s for the high-Vds ramp).
+
+**Tried and dropped (all on the FinFET/nanosheet walk; numbers in the
+session notes).**
+- Per-node vector quasi-Fermi driving force (Sentaurus/Genius element
+  style, least-squares nodal gradient, full Jacobian - checked against
+  finite differences): 1.7x the nonzeros, ILU-GMRES broke down; 493 s and no
+  point converged (hybrid: ~60 s).
+- Frozen-mobility Jacobian (d mu/d phi dropped, residual exact): 8 min to
+  Vgs 0.2 V.
+- Lagged (Picard) mobility: the outer loop contracts only 1.5-2x per pass
+  near threshold, ~40x slower.
+- Quasi-Fermi box margin, frozen merit row scaling, per-node log-density
+  step limits, step-size memory in the gate walk: no fewer failed steps.
+- Coarser drain-ramp first steps: 64 s default vs 98-224 s.
+- Gate step 0.1 V instead of 0.05 V (the user agreed to it): the adaptive
+  walk takes about the same steps either way - 182 vs 176 iterations.
+
+**The near-threshold stall (not fixed, a physics question).** The failing
+gate steps (Vgs 0.15-0.34 V at Vds 0.05 V) were traced to 64 nodes in the
+S/D junction tail at the drain end of the sheets (doping ~8e15): the
+Jacobian is exact (FD to 4e-5), the Newton direction descends, but Newton
+asks for 20-190x density changes there and the quasi-Fermi box clips them.
+That doping is the hybrid force's crossover density (VSAT_REF_DENSITY
+1e16), where the drive switches to the edge field - there the junction's
+built-in ~1e6 V/cm - so a small drop of n collapses the mobility. Moving
+the crossover (1e18) cut the FinFET walk 169 -> 56 iterations but moved
+subthreshold Id -36%: rejected by the user. Left as is.
+
+**Results** (octree, Schottky S/D, vsat hybrid, 2 workers; nanosheet
+Vgs step 0.1 V, FinFET / planar 0.05 V; Vds 0.05 / 0.7 V).
+
+| device | nodes | before (this branch's start) | now | Vt lin / sat | SS | DIBL | Ion (uA/um) | Ioff (A/um) |
+|---|---|---|---|---|---|---|---|---|
+| nanosheet BDI | 142.7k -> 123.0k | 2050 s (direct LU, 1 worker) / 717 s | 427 s | 0.207 / 0.176 | 61 | 48 | 1046 | 2.1e-8 |
+| nanosheet PTS | 110.3k | - | 585 s | 0.206 / 0.101 | 72 | 163 | 1101 | 4.6e-6 |
+| FinFET | 60.9k | 240 s | 190 s (169 s on a quieter run) | 0.205 / 0.162 | 62 | 66 | 1015 | 2.6e-7 |
+| planar | 73.5k -> 63.3k | 62 s | 59-67 s | 0.200 / 0.096 | 80 | 159 | 915 | 3.4e-7 |
+
+- Currents vs the start of the work: BDI nanosheet within 0.5% at every
+  point (mesh); FinFET up to +2.5% in subthreshold (mesh, ~0.7 mV of Vt),
+  < 0.4% above threshold; planar < 0.4%.
+- Planar: the dielectric-light mesh (-13% nodes) takes more Newton
+  iterations on the Vds = 0.7 V walk (78 -> 90), time neutral (48 -> 46 s).
+- The PTS nanosheet's Vds = 0.7 V curve (339 iterations) is the slowest
+  now: a leaky punch-through device, not looked at yet.
+- Target was ~3 min for the nanosheet; ~360 s was accepted for now; 427 s
+  committed at the user's call (the remaining lever is the hybrid-force
+  physics above, rejected; or a stronger preconditioner).
+
+The machine slept during part of the session (lid closed): only runs
+with the user present, or compared on iteration counts / CPU time, are
+quoted.
+
+Tests: venv 155 (1 skipped) and conda quick tier 155 pass; planar_tiny golden recaptured (nodes 15602 -> 14570, currents within 0.08%).

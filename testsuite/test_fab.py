@@ -190,6 +190,20 @@ class TestOps(unittest.TestCase):
         self.assertAlmostEqual(N(5, -4) / 1e20, np.exp(-0.5 * (4 / 4) ** 2), places=6)     # dy = 4 below the substrate top
         self.assertAlmostEqual(N(12, -2) / 1e20, np.exp(-0.5 * ((2 / 2) ** 2 + (2 / 4) ** 2)), places=6)
 
+    def test_epi_doping_stops_at_dielectric(self):
+        """The tail does not cross a dielectric, however thin (a buried /
+        bottom-dielectric layer between the epi and the substrate)."""
+        st = self.st
+        st.deposit("SiN", "bdi", "fill", to_height=3)
+        st.deposit("Si", "sd_epi", "fill", to_height=8, mask={"rect": [0, 10, 0, 40]})
+        st.epi_doping("P", 1e20, sx=2.0, sy=4.0, regions=["sd_epi"])
+        g = st.grid
+        i, k = int(np.argmin(np.abs(g.axes[0] - 5))), int(np.argmin(np.abs(g.axes[2] - 20)))
+        nd, na, net = st.net_doping()
+        j_epi = int(np.argmin(np.abs(g.axes[1] + 6)))
+        self.assertAlmostEqual(nd[i, j_epi, k] / 1e20, 1.0)
+        self.assertEqual(nd[:, g.axes[1] > 0.25, :].max(), 0.0)                  # substrate: none
+
     def test_conformal_cap(self):
         """A conformal deposit with to_height stops there (capped epitaxy)."""
         self.block(10.0)
@@ -487,6 +501,39 @@ class TestNanosheet(unittest.TestCase):
         k = int(np.argmin(np.abs(g.axes[2] - p["stack_pitch"] / 2)))
         self.assertEqual(names[lab[i, j, k]], "inner_spacer")
 
+
+
+class TestNanosheetBDI(unittest.TestCase):
+    """isolation: bdi - a SiN layer under the whole stack (gate and S/D), so
+    the S/D epi meets only the sheet ends and none of its doping reaches the
+    substrate."""
+
+    @classmethod
+    def setUpClass(cls):
+        from fab import flow
+        cfg = flow.load(os.path.join(TCAD1D_ROOT, "configs", "fab_nanosheet_bdi.yaml"))
+        cls.st, _ = flow.build(cfg, log=lambda *a: None)
+        cls.p = flow.resolve_params(flow.expand(cfg)["params"])
+
+    def test_bdi_under_stack(self):
+        st, p = self.st, self.p
+        g = st.grid
+        lab = st.node_labels()
+        names = [r.name for r in st.regions]
+        self.assertNotIn("bdi_sacrificial", names)
+        j = int(np.argmin(np.abs(g.axes[1] - (p["H_stack"] + p["t_bdi"] / 2))))
+        k = int(np.argmin(np.abs(g.axes[2] - p["stack_pitch"] / 2)))
+        for x in (p["cpp"] / 2, 3.0, p["cpp"] - 3.0):                         # gate centre, source, drain
+            i = int(np.argmin(np.abs(g.axes[0] - x)))
+            self.assertEqual(names[lab[i, j, k]], "bdi")
+
+    def test_no_epi_doping_in_substrate(self):
+        st = self.st
+        lab = st.cell_labels()
+        names = [r.name for r in st.regions]
+        nd, na, net = st.net_doping()
+        sub = st.node_labels() == names.index("substrate")
+        self.assertEqual(nd[sub].max(), 0.0)
 
 if __name__ == "__main__":
     unittest.main()

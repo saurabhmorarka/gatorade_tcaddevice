@@ -72,7 +72,8 @@ class OctreeMesh(SimpleNamespace):
 
 
 # --- sizing ---------------------------------------------------------------------------
-def target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growth):
+def target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growth,
+                   growth_insulator=None, h_max_insulator=None, fine_max_doping=None):
     """Per-axis target leaf size (units) at every voxel.
 
     label      int array (nx, ny, nz), -1 = gas, else index into kinds
@@ -83,7 +84,18 @@ def target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growt
     h_fine_other  spacing at the other device interfaces (insulator /
                insulator, insulator / conductor)
     The spacing grows as h_fine + (growth - 1) * distance, capped at h_max;
-    gas and conductor voxels only need what their labels force."""
+    gas and conductor voxels only need what their labels force.
+    growth_insulator, h_max_insulator (default growth, h_max): the same
+    inside insulators, which only carry the electrostatics (capacitance):
+    fine at the semiconductor interface like the silicon side, coarsening
+    much faster away from it. Layer thicknesses stay exact either way (the
+    tree splits at every label change).
+    fine_max_doping (cm^-3, default None = everywhere): a semiconductor
+    surface takes h_fine only where the semiconductor is doped below this -
+    the channel and lightly doped body, not a degenerate S/D's dielectric
+    surfaces (no inversion layer to resolve), which take h_fine_other.
+    Junctions and metal contacts keep h_fine (a sub-grid Schottky contact's
+    current moved 1.9% without it, planar_tiny)."""
     h = np.asarray(h, float)
     kind = np.array(list(kinds) + [GAS])[label]
     semi = kind == SEMI
@@ -101,6 +113,9 @@ def target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growt
     # it; an isotropic distance would put 0.5 nm y-spacing down the whole
     # sidewall (the rectilinear mesher's per-axis lines do this right).
     s = np.sign(cell_net) * semi
+    ins = kind == INSULATOR
+    g_ins = growth if growth_insulator is None else growth_insulator
+    hmax_ins = h_max if h_max_insulator is None else h_max_insulator
     tgt = np.empty((3,) + label.shape)
     for a in range(3):
         sl0 = [slice(None)] * 3
@@ -108,15 +123,20 @@ def target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growt
         sl0[a], sl1[a] = slice(0, -1), slice(1, None)
         sl0, sl1 = tuple(sl0), tuple(sl1)
         seed_s = np.zeros(label.shape, bool)
-        hit = (semi[sl0] != semi[sl1]) | ((s[sl0] * s[sl1]) < 0)
+        hit = semi[sl0] != semi[sl1]
+        if fine_max_doping is not None:          # (a metal contact keeps h_fine: Schottky contacts)
+            keep = (semi & (np.abs(cell_net) < fine_max_doping)) | (kind == CONDUCTOR)
+            hit &= keep[sl0] | keep[sl1]
+        hit |= (s[sl0] * s[sl1]) < 0
         seed_s[sl0] |= hit
         seed_s[sl1] |= hit
         seed_o = np.zeros(label.shape, bool)
         hit = (label[sl0] != label[sl1]) & (dev[sl0] | dev[sl1])
         seed_o[sl0] |= hit
         seed_o[sl1] |= hit
-        t = np.minimum(h_fine[a] + (growth - 1.0) * dist(seed_s), h_fine_other[a] + (growth - 1.0) * dist(seed_o))
-        t = np.minimum(t, h_max[a])
+        g = np.where(ins, g_ins, growth) - 1.0
+        t = np.minimum(h_fine[a] + g * dist(seed_s), h_fine_other[a] + g * dist(seed_o))
+        t = np.minimum(t, np.where(ins, hmax_ins[a], h_max[a]))
         tgt[a] = np.where(dev, t, big) / h[a]
     return np.maximum(tgt, 1.0)
 
@@ -220,7 +240,8 @@ class BoxTree:
         n_split = 0
         sh = self.shape
         for q in np.asarray(nodes, dtype=np.int64):
-            for ring in (1, 2, 3):
+            made = 0
+            for ring in (1, 2, 3, 4, 6):
                 lo = np.maximum(q - ring, 0)
                 hi = np.minimum(q + ring, sh)
                 cand = np.unique(self.owner[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]])
@@ -243,6 +264,25 @@ class BoxTree:
                 if made:
                     n_split += made
                     break
+            if not made:
+                # every nearby conductor-facing leaf already has a plane at q:
+                # halve the nearest ones along their tangential axes instead
+                # (refines the metal surface there, so the next pass differs)
+                lo = np.maximum(q - 2, 0)
+                hi = np.minimum(q + 2, sh)
+                for i in np.unique(self.owner[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]):
+                    lab = self.label[tuple(self.lo[i])]
+                    if not self.alive[i] or lab < 0 or is_conductor[lab]:
+                        continue
+                    for a in range(3):
+                        faces = [self.face_ids(i, a, side) for side in (-1, 1)]
+                        if not any(f is not None and is_conductor[f[1]].any() for f in faces):
+                            continue
+                        for b in range(3):
+                            if b != a and self.hi[i][b] - self.lo[i][b] >= 2:
+                                i = self.split(i, b, int((self.lo[i][b] + self.hi[i][b]) // 2))[0]
+                                n_split += 1
+                        break
         return n_split
 
     def leaves(self):
@@ -461,7 +501,8 @@ def voronoi_cell(p, nbrs, lo, hi):
 # --- the mesh -------------------------------------------------------------------------
 def build_octree_mesh(label, materials, h_nm, node_net, mat, origin_nm=(0.0, 0.0, 0.0), face_contacts=None,
                       cell_net=None, h_fine=(2.0, 0.5, 2.0), h_fine_other=(2.0, 2.0, 2.0),
-                      h_max=(8.0, 8.0, 8.0), growth=1.35, root=None, log=print):
+                      h_max=(8.0, 8.0, 8.0), growth=1.35, growth_insulator=2.0, h_max_insulator=(16.0, 16.0, 16.0),
+                      fine_max_doping=1e19, root=None, log=print):
     """Box-FV mesh (the attribute set solver2d/newton_solver_qf_2d.py reads)
     on an adaptive box tree over a voxel label array.
 
@@ -479,7 +520,8 @@ def build_octree_mesh(label, materials, h_nm, node_net, mat, origin_nm=(0.0, 0.0
         n = node_net
         cell_net = sum(n[i:n.shape[0] - 1 + i, j:n.shape[1] - 1 + j, k:n.shape[2] - 1 + k]
                        for i in (0, 1) for j in (0, 1) for k in (0, 1)) / 8.0
-    tgt = target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growth)
+    tgt = target_spacing(label, kinds, cell_net, h, h_fine, h_fine_other, h_max, growth,
+                         growth_insulator, h_max_insulator, fine_max_doping)
     if root is None:
         root = [max(1, int(round(2 * h_max[a] / h[a]))) for a in range(3)]
     # face match across semiconductor interfaces (carrier facets must join
@@ -732,6 +774,15 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
     touch = {k: np.unique(np.concatenate(v)) for k, v in touch.items()}
 
     FN, FJ, FL, FA = dual["facet"]
+    # Geometric area of every facet from each side, whatever material it is
+    # labelled with: a facet lying exactly ON a metal surface is labelled by
+    # sampling one side of that plane, and the two cells can sample
+    # different sides (one says metal, the other the epi under it). Such a
+    # side then takes the other side's device parts below.
+    g_ok = FJ >= 0
+    g_key = (np.minimum(FN, FJ) * N + np.maximum(FN, FJ))[g_ok] * 2 + (FN > FJ)[g_ok]
+    g_u, g_inv = np.unique(g_key, return_inverse=True)
+    g_area = np.bincount(g_inv, weights=FA[g_ok])
     kf = kinds[FL]
     d = np.isin(kf, (SEMI, INSULATOR)) & (FJ >= 0)
     FN, FJ, FL, FA, kf = FN[d], FJ[d], FL[d], FA[d], kf[d]
@@ -748,6 +799,16 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
     S2 = np.full((len(upair), 2), np.nan)
     G2 = np.full((len(upair), 2), np.nan)
     A2[pinv, sd], S2[pinv, sd], G2[pinv, sd] = sA, sS, sG
+    T2 = np.full((len(upair), 2), np.nan)                     # geometric area per side (all labels)
+    for sd_ in (0, 1):
+        k_ = np.searchsorted(g_u, upair * 2 + sd_)
+        k_ = np.minimum(k_, len(g_u) - 1)
+        hit = g_u[k_] == upair * 2 + sd_
+        T2[hit, sd_] = g_area[k_[hit]]
+    for sd_ in (0, 1):                                        # a side that saw only metal: mirror the other
+        miss = np.isnan(A2[:, sd_]) & ~np.isnan(A2[:, 1 - sd_]) & ~np.isnan(T2).any(axis=1)
+        miss &= np.abs(T2[:, 0] - T2[:, 1]) <= 1e-6 * np.maximum(T2.max(axis=1), 1e-30)
+        A2[miss, sd_], S2[miss, sd_], G2[miss, sd_] = A2[miss, 1 - sd_], S2[miss, 1 - sd_], G2[miss, 1 - sd_]
     both = ~np.isnan(A2).any(axis=1)
     one_sided = int((~both).sum())
     asym = float(np.max(np.abs(A2[both, 0] - A2[both, 1]) / np.maximum(A2[both].max(axis=1), 1e-30))) \
