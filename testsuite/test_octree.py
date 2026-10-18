@@ -67,6 +67,22 @@ class TestOctreeMesh(unittest.TestCase):
             O.check_octree_mesh(bad, self.lab, self.mats, np.array([1.0, 0.5, 1.0]), log=lambda *a: None)
 
 
+class TestOctreeMetalStaircase(unittest.TestCase):
+    """A contact plug's round bottom staircases the metal surface; where a
+    step lies on a facet's plane, one half of that facet is on the metal
+    surface and the two nodes sampled different sides of it (one saw metal,
+    the other epi): the gate failed (facet asymmetry 0.5) on the PMOS
+    nanosheet. Built from that device."""
+
+    def test_plug_contact_mesh_passes_gate(self):
+        from fab import flow
+        from fab.simulate import build_device
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        d = build_device(flow.load(os.path.join(root, "configs", "fab_nanosheet_pmos.yaml")), mesher="octree",
+                         log=lambda *a: None)
+        self.assertLess(d["mesh"].quality["facet_asymmetry"], 1e-6)
+
+
 @unittest.skipUnless(HAVE_NATIVE, "Rust kernels not built")
 class TestOctreeNative(unittest.TestCase):
     def setUp(self):

@@ -23,7 +23,8 @@ from fab.templates import TEMPLATES
 
 # step arguments that are numbers/expressions
 NUMERIC = {"thickness", "to_height", "depth", "rp", "sigma", "peak", "dose", "lateral_sigma", "top_height", "conc",
-           "sx", "sy", "sz"}
+           "sx", "sy", "sz", "lateral", "facet_angle", "floor_height", "shell",
+           "lattice"}
 
 
 def load(path):
@@ -98,6 +99,12 @@ def run_step(st, step, p):
     elif op == "deposit":
         st.deposit(a["material"], a["name"], a["mode"], thickness=a.get("thickness"), to_height=a.get("to_height"),
                    on=a.get("on"), mask=a.get("mask"))
+    elif op == "epitaxy":
+        st.epitaxy(a["material"], a["name"], a["on"], a["to_height"], shape=a.get("shape", "facet"),
+                   lateral=a.get("lateral", 5.0), mask=a.get("mask"), facet_angle=a.get("facet_angle", 54.7356),
+                   lattice=a.get("lattice"))
+    elif op == "contact_plug":
+        st.contact_plug(a["regions"], a["mask"], a["floor_height"], a["depth"], a["shell"])
     elif op == "etch":
         st.etch(a["mode"], materials=a.get("materials"), depth=a.get("depth"), stop_on=a.get("stop_on"),
                 mask=a.get("mask"), thickness=a.get("thickness"), regions=a.get("regions"))

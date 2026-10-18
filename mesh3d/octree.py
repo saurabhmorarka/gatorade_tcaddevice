@@ -810,10 +810,32 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
         miss = np.isnan(A2[:, sd_]) & ~np.isnan(A2[:, 1 - sd_]) & ~np.isnan(T2).any(axis=1)
         miss &= np.abs(T2[:, 0] - T2[:, 1]) <= 1e-6 * np.maximum(T2.max(axis=1), 1e-30)
         A2[miss, sd_], S2[miss, sd_], G2[miss, sd_] = A2[miss, 1 - sd_], S2[miss, 1 - sd_], G2[miss, 1 - sd_]
+    # ... and a side that saw PART of the facet as metal (a staircased metal
+    # surface - a contact plug's round bottom - with a step on the facet's
+    # plane: one half of the facet on the metal surface, the other in the
+    # epi): the geometry agrees from both sides, the device areas differ by
+    # what one side sampled as metal. That side takes the other's device
+    # parts. Only beyond the gate's tolerance: a mesh that passed before is
+    # unchanged bit for bit, and a real asymmetry (the geometric areas
+    # differ) still fails the gate.
+    tA = 1e-6 * np.maximum(T2.max(axis=1), 1e-30)
+    for sd_ in (0, 1):
+        o = 1 - sd_
+        with np.errstate(invalid="ignore"):
+            part = ~np.isnan(A2).any(axis=1) & ~np.isnan(T2).any(axis=1) & (np.abs(T2[:, 0] - T2[:, 1]) <= tA)
+            part &= A2[:, o] - A2[:, sd_] > tA                                  # this side saw less device ...
+            part &= T2[:, sd_] - A2[:, sd_] >= A2[:, o] - A2[:, sd_] - tA       # ... and that much as metal
+        A2[part, sd_], S2[part, sd_], G2[part, sd_] = A2[part, o], S2[part, o], G2[part, o]
     both = ~np.isnan(A2).any(axis=1)
     one_sided = int((~both).sum())
-    asym = float(np.max(np.abs(A2[both, 0] - A2[both, 1]) / np.maximum(A2[both].max(axis=1), 1e-30))) \
-        if both.any() else 0.0
+    asym, asym_at = 0.0, None
+    if both.any():
+        rel = np.abs(A2[both, 0] - A2[both, 1]) / np.maximum(A2[both].max(axis=1), 1e-30)
+        w = int(np.argmax(rel))
+        asym = float(rel[w])
+        pw = upair[both][w]                                   # the worst edge's end points (nm), for the gate
+        asym_at = (tuple(np.round(P[pw // N] + origin, 3)), tuple(np.round(P[pw % N] + origin, 3)),
+                   tuple(float(v) for v in A2[both][w]))
     A, As, G = np.nanmean(A2, axis=1), np.nanmean(S2, axis=1), np.nanmean(G2, axis=1)
     e = np.stack([upair // N, upair % N], axis=1)
     L = np.linalg.norm(P[e[:, 1]] - P[e[:, 0]], axis=1)
@@ -898,7 +920,7 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
         boundary_point_index=b_idx, boundary_bc_type=b_type, boundary_edges=set(),
         domain=SimpleNamespace(contacts=contacts), h_min_cm=float(L.min() * cm) if len(L) else 0.0,
         grid_index=node_idx[dev], node_id=new_id, dim=3,
-        quality=dict(facet_asymmetry=asym, one_sided_facets=one_sided, stray_metal_volume=stray_vol,
+        quality=dict(facet_asymmetry=asym, facet_asymmetry_at=asym_at, one_sided_facets=one_sided, stray_metal_volume=stray_vol,
                      stray_metal_nodes=stray_nodes),
         label_volume=label_vol, n_clipped=dual["n_clipped"])
 
@@ -920,7 +942,9 @@ def check_octree_mesh(m, label, materials, h, log=print, vol_rtol=1e-9, facet_rt
         if abs(got - want) > vol_rtol * max(want, 1.0) + 1e-6:
             errs.append(f"material {m_['name']!r}: dual volume {got:.6g} nm^3 != voxel volume {want:.6g}")
     if m.quality["facet_asymmetry"] > facet_rtol:
-        errs.append(f"facet area differs between the two sides by {m.quality['facet_asymmetry']:.2e} (relative)")
+        errs.append(f"facet area differs between the two sides by {m.quality['facet_asymmetry']:.2e} (relative): "
+                    f"edge {m.quality['facet_asymmetry_at'][0]} - {m.quality['facet_asymmetry_at'][1]} nm, "
+                    f"areas {m.quality['facet_asymmetry_at'][2]}")
     if m.quality["one_sided_facets"]:
         errs.append(f"{m.quality['one_sided_facets']} facet(s) seen from one side only")
     # conformity: semiconductor facet area only between semiconductor nodes

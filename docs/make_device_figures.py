@@ -11,6 +11,14 @@ needed):
   <device>_cut.png      mid-width cutaway, silicon coloured by net doping
   <device>_cuts.png     2D cuts (gate cross-section, along the channel):
                         materials and net doping
+and, for all six NMOS/PMOS FinFET/nanosheet configs together,
+  sd_epi_cuts.png       S/D cross-sections (y-z) through the contact (the
+                        plug into the epi) and between the contact and the
+                        spacer (the epi shapes), the neighbouring cells'
+                        epi (mirrored) faded; net doping
+
+    python3 docs/make_device_figures.py sdcut        # that figure only
+
 The quantum vs classical figures come from quantum/compare_3d.py.
 """
 import os
@@ -156,8 +164,73 @@ def fig_cuts(dev):
     plt.close(fig)
 
 
+SD_DEVICES = [("finfet", "FinFET NMOS (Si:P blob)"), ("finfet_pmos", "FinFET PMOS (SiGe diamond, merged)"),
+              ("nanosheet", "nanosheet PTS NMOS"), ("nanosheet_pmos", "nanosheet PTS PMOS"),
+              ("nanosheet_bdi", "nanosheet BDI NMOS"), ("nanosheet_bdi_pmos", "nanosheet BDI PMOS")]
+
+
+def fig_sd_cuts(x_cuts=(4.0, 10.0)):
+    """S/D cross-sections of the six FinFET / nanosheet configs: materials
+    at each x of x_cuts (through the contact, then between the contact and
+    the outer spacer), the mirrored neighbouring cells faded (the side walls
+    are symmetry planes), and the net doping at the last one."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Patch
+    from fab import flow
+    from tcadview.model import MATERIAL_COLORS
+    nr = len(x_cuts) + 1
+    fig, axs = plt.subplots(nr, len(SD_DEVICES), figsize=(4.0 * len(SD_DEVICES), 5 * nr), squeeze=False)
+    legend = {}
+    for j, (dev, title) in enumerate(SD_DEVICES):
+        st, _ = flow.build(flow.load(os.path.join(ROOT, "configs", f"fab_{dev}.yaml")), log=lambda *a: None)
+        lab = st.cell_labels()
+        x, y, z = st.grid.axes
+        names = [r.name for r in st.regions]
+        cols = ["#ffffff"] + [EPI_COLOR if n == "sd_epi" else CONTACT_COLOR if n.endswith("contact")
+                              else MATERIAL_COLORS.get(r.material, "#cccccc") for n, r in zip(names, st.regions)]
+        cmap = ListedColormap(cols)
+        for r, x_cut in enumerate(x_cuts):
+            ix = int(np.argmin(np.abs(x - x_cut)))
+            L = lab[min(ix, lab.shape[0] - 1)]                            # (y, z) cells
+            a = axs[r, j]
+            for zz, LL, alpha in ((2 * z[0] - z[::-1], L[:, ::-1], 0.4), (z, L, 1.0),
+                                  (2 * z[-1] - z[::-1], L[:, ::-1], 0.4)):
+                a.pcolormesh(zz, -y, LL + 1, cmap=cmap, vmin=-0.5, vmax=len(cols) - 0.5, shading="flat", alpha=alpha)
+            for w in (z[0], z[-1]):
+                a.axvline(w, color="k", lw=0.6, ls=":")
+            a.set(aspect="equal", xlabel="z (nm)", ylabel="height (nm)" if j == 0 else None,
+                  title=(f"{title}\n" if r == 0 else "") + f"S/D cut at x = {x[ix]:g} nm"
+                  + (" (contact)" if r == 0 else ""))
+            for k in set(np.unique(L)) - {-1}:
+                legend.setdefault(f"{names[k]} ({st.regions[k].material})", cols[k + 1])
+        nd, na, net = st.net_doping()
+        semi = st.semiconductor_nodes()
+        val = np.where(semi[ix], np.sign(net[ix]) * np.clip(np.log10(np.maximum(np.abs(net[ix]), 1.0)) - 15, 0, 6),
+                       np.nan)
+        im = axs[-1, j].pcolormesh(z, -y, val, cmap="RdBu_r", vmin=-6, vmax=6, shading="nearest")
+        axs[-1, j].set(aspect="equal", xlabel="z (nm)", ylabel="height (nm)" if j == 0 else None,
+                       title=f"net doping, x = {x[ix]:g} nm")
+    cb = fig.colorbar(im, ax=axs[-1, :], shrink=0.6, location="bottom", pad=0.08)
+    cb.set_ticks(range(-6, 7, 2))
+    cb.set_ticklabels(["-1e21", "-1e19", "-1e17", "<1e15", "1e17", "1e19", "1e21"])
+    cb.set_label("net doping (cm$^{-3}$): red donors, blue acceptors")
+    fig.legend(handles=[Patch(color=c, label=n) for n, c in legend.items()], loc="upper center",
+               ncol=min(len(legend), 7), fontsize=9, bbox_to_anchor=(0.5, 1.0))
+    fig.suptitle("S/D epitaxy: NMOS Si:P blob, PMOS Si0.5Ge0.5:B {111} diamond (merged only where the pitch "
+                 "forces it); contact plug into the epi", y=1.03)
+    fig.savefig(os.path.join(IMG, "sd_epi_cuts.png"), dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main(argv):
     os.makedirs(IMG, exist_ok=True)
+    if argv == ["sdcut"]:
+        fig_sd_cuts()
+        print("wrote sd_epi_cuts")
+        return
     for dev in (argv or list(TITLES)):
         sess = _session(dev)
         fig_3d(dev, sess)
@@ -165,6 +238,9 @@ def main(argv):
         fig_doping_cut(dev, sess)
         fig_cuts(dev)
         print("wrote", dev)
+    if not argv:
+        fig_sd_cuts()
+        print("wrote sd_epi_cuts")
 
 
 if __name__ == "__main__":
