@@ -51,9 +51,11 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
    gate + spacer footprint
 6. S/D fin recess, stopping 5 nm above the STI, so the epi stays above the
    PTS (the sub-fin under the gate was the off-state leakage path)
-7. selective epi from the exposed Si, capped 5 nm above the fin top, with
+7. selective epi from the exposed Si, capped 5 nm above the fin top: an
+   NMOS blob or a PMOS {111} diamond ([S/D epi shapes](sd_epi.md)), with
    its analytic in-situ doping (below)
-8. ILD, CMP, TiN trench contacts recessed 5 nm into the epi
+8. ILD, CMP, TiN trench contacts: a flat trench floor at the fin top and
+   a round-bottomed plug into the epi
 
 **Nanosheet** (`template: nanosheet`, replacement metal gate):
 1. substrate, then the superlattice: 3 x (SiGe 10 nm, Si 5 nm); with
@@ -72,7 +74,8 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
    fill, and a directional etch-back to the sheet ends. An isotropic
    etch-back deep enough to clear the sheet ends also hollowed the
    pockets, because the deposit's surface dips at every gap mouth.
-6. S/D epi from the sheet ends and the mesa
+6. S/D epi from the sheet ends and the mesa (blob / diamond, unmerged:
+   [S/D epi shapes](sd_epi.md))
 7. ILD + CMP to open the dummy gate; dummy-gate pull; channel release
    (all SiGe removed)
 8. gate dielectric wrapping every sheet; TiN fill between the sheets;
@@ -197,8 +200,8 @@ btbt/local3d.py).
   strained on Si: its own band gap, ni and permittivity per node) run.
   Mobility is per node by material (DEVELOPMENT_LOG 73), but the SiGe
   parameters are still silicon's: no verified Masetti-type set for
-  heavily doped SiGe:B yet. The S/D epi is a boxy, merged block (no
-  {111} facets yet).
+  heavily doped SiGe:B yet. The S/D epi now has its {111} facets
+  ([S/D epi shapes](sd_epi.md)).
 - **One-sheet option** (`n_sheets` is a template parameter, the user's
   choice; the default stays 3): `configs/fab_nanosheet_quick.yaml` is the
   BDI nanosheet with one sheet, 70k nodes vs 123k, full I-V ~220 s vs

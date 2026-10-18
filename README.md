@@ -22,6 +22,15 @@ N = N_{peak}\,\exp\!\Big(-\tfrac{1}{2}\big(\tfrac{d_x}{s_x}\big)^2-\tfrac{1}{2}\
   <img src="docs/img/nanosheet_gatecut.png" alt="Nanosheet cut through the gate" width="48%">
 </p>
 
+### S/D epitaxy shapes ([details](docs/sd_epi.md))
+
+The S/D epi grows as an elliptical Si:P blob for NMOS and a
+{111}-faceted SiGe diamond for PMOS. It merges with the neighbours only
+where the pitch forces it, which happens for the PMOS FinFET but never on
+the nanosheets. The contact is etched into the epi as a round-bottomed
+plug, so a narrow epi keeps its contact area. Compared with the old
+flat-topped block, Ion rises about 3% and Vt, SS and DIBL are unchanged.
+
 ## Schrodinger-Poisson channel charge in 3D ([details](docs/quantum.md))
 
 The Schrodinger lines now run in 3D devices: down from the planar gate

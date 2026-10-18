@@ -6495,6 +6495,9 @@ three PMOS devices pass the mesh gate and equilibrium (2-3 Newton its).
 
 Figure: docs/img/sd_epi_cuts.png (`python3 docs/make_device_figures.py
 sdcut`): S/D cuts of all six devices, through the contact and beside it.
+Docs: docs/sd_epi.md (shapes, parameters, plugs, results, limits), a README
+subsection under the FinFET / nanosheet section, docs/finfet_nanosheet.md
+flow steps updated.
 
 Tests: test_fab TestEpitaxy (+5: facet angles / widths, blob, merge by
 pitch, sliver rejected, contact plug), FinFET epi shapes + PMOS merge,
