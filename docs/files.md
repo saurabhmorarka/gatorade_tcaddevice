@@ -25,7 +25,7 @@
 | `quantum/device.py` | The 2D/3D quantum box: Schrodinger lines from every gate-dielectric interface (wall to wall in fins and sheets, mirrored at a symmetry plane), Lambda on every node, the corrector called inside Newton |
 | `quantum/compare_3d.py` | Classical vs Schrodinger-Poisson figure from two `fab simulate` runs (Id-Vg, density profile at the solver nodes, sections, Lambda) |
 | `quantum/compare_literature.py` | The 1D Vt shift against Jallepalli et al. (docs/quantum.md) |
-| `configs/fab_finfet.yaml`, `configs/fab_nanosheet.yaml` | **Edit these** for the FinFET / nanosheet (fab/templates.py `finfet`, `nanosheet`; docs/finfet_nanosheet.md) |
+| `configs/fab_finfet.yaml`, `configs/fab_nanosheet.yaml` | **Edit these** for the FinFET / nanosheet (fab/templates.py `finfet`, `nanosheet`; docs/finfet_nanosheet.md, S/D epi shapes docs/sd_epi.md) |
 | `docs/make_device_figures.py` | Structure figures of the FinFET and nanosheet (3D, gate cut, doping cutaway, 2D cuts) |
 | `core/solver.py` | Diode equilibrium solve + bias sweep (dispatches to either solver below) |
 | `core/newton_solver.py` | Diode's fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |

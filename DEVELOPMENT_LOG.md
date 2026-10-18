@@ -6390,3 +6390,116 @@ Checks:
 Tests: testsuite/test_mobility.py +4 (per-node pick, same-parameter path
 bit-identical, per-edge vsat, mobility block). venv 162 (1 skipped) and
 conda quick tier 162 pass.
+
+## 74. Shaped S/D epitaxy (NMOS blob, PMOS {111} diamond), contact plugs, octree metal-staircase fix
+
+Branch `epi-shapes`. The FinFET / nanosheet S/D epi was a conformal 18 nm
+growth capped flat: a box filling the whole cell width (merged with the
+neighbours), NMOS and PMOS alike. Now it has a crystal shape across the
+width (y-z), extruded along x over the S/D opening
+(`fab/structure.py` `epitaxy`, step `epitaxy`):
+
+- Seeds: the exposed silicon in the opening (recessed fin, fin / sheet ends
+  under the spacer, recess floor; on the surface up to the EPS tie-break,
+  diagonal contact with the trench included). Seeds overlapping in z form
+  one group (a fin, a sheet stack); each grows one shape from its floor
+  (the deepest of its lowest seed and the solid under it: recessed fin
+  base, recess floor, BDI) to the cap (`epi_over` above the top, as before).
+- `facet` (PMOS Si0.5Ge0.5:B): {111} facets at 54.74 deg rising from the
+  floor corners and falling from the cap at the seed edges, a vertical side
+  `lateral` beyond the seed edge (or a diamond), a (100) top as wide as the
+  fin / stack.
+- `ellipse` (NMOS Si:P): a blob `lateral` beyond the seed edge at its
+  widest, taller than wide, meeting the floor half way out (a foot on the
+  STI, not a sliver down the fin side), holding the seed's top corners.
+- The seed envelope down to the floor is always filled; nothing grows below
+  the floor (an ellipse slipped down beside the BDI's edge).
+- Side walls are symmetry planes: each shape's mirror images grow too, so
+  epi merges where the pitch forces it. A merge or gap < 2 voxels raises.
+- `lattice` (1 nm default in the templates): the outer shape is drawn in
+  1 nm blocks of the cross-section (anchored on the seed edge and the
+  floor), the seed envelope / cap / floor stay exact. At the 0.5 nm voxel
+  the curved skin was half the mesh the shape added (octree leaves are
+  single-material: every step is a 0.5 nm leaf).
+
+Template defaults (`epi_shape` None -> ellipse NMOS / facet PMOS; `box` =
+the old conformal block, bit-identical to main): FinFET lateral 5 (NMOS,
+15 nm wide, 9 nm from the neighbours at the 24 nm pitch) / 12 (PMOS, merges:
+V-groove on top, ILD void under the merge); nanosheet 5 / 7 (35 / 39 nm wide
+on 25 nm sheets, unmerged at the 46 nm stack pitch, PMOS gap 7 nm - the
+user chose to keep the 46 nm pitch).
+
+**Contacts.** The ILD-only contact etch with an unlimited depth cleared the
+ILD beside a shaped epi down to the STI (a wrap-around contact). Now the
+trench takes ILD and epi together to a flat floor `contact_recess` below the
+cap (the fin top; identical to before for the box epi). On the flat floor
+the FinFET blob lost 35% of Ion (1015 -> 657 uA/um: the Schottky contact on
+a 10 nm wide top instead of the 24 nm merged box). The user: a narrow epi
+gets its contact etched into it, a bullet with a blunt head. New step
+`contact_plug` (`fab/structure.py`): below the trench floor the epi is
+removed in a bullet across the width - straight sides `contact_plug_shell`
+(2 nm) inside the epi's edges, a half-circle bottom, the tip
+`contact_plug_depth` (12 nm) below the floor (a half-ellipse when the plug
+is wider than deep: the 35-39 nm nanosheet epi gets a round-bottomed bowl).
+Shaped epi only.
+
+**Results** (NMOS, `fab simulate --mesher octree`, Vds 0.05 / 0.7, Vgs to
+0.8 V, FinFET step 0.05, nanosheet 0.1):
+
+| device | epi | Vt lin / sat | SS | DIBL | Ion (uA/um) | Ioff (A/um) | nodes |
+|---|---|---|---|---|---|---|---|
+| FinFET | box (= main) | 0.205 / 0.162 | 62 | 66 | 1015 | 2.6e-7 | 60.9k |
+| FinFET | blob, flat contact | 0.208 / 0.167 | 62 | 63 | 657 | 2.0e-7 | - |
+| FinFET | blob + plug, 0.5 nm | 0.206 / 0.165 | 62 | 63 | 1048 | 2.0e-7 | 75.7k |
+| FinFET | blob + plug, 1 nm lattice | - | - | - | 1042 | 2.0e-7 | 65.2k |
+| nanosheet PTS | box (= main) | 0.207 / 0.176 | 61 | 48 | 1082 | 2.2e-8 | 104.7k |
+| nanosheet PTS | blob + plug, 0.5 nm | 0.208 / 0.177 | 61 | 48 | 1114 | 2.1e-8 | 128.6k |
+| nanosheet PTS | blob + plug, 1 nm lattice | - | - | - | 1128 | 2.2e-8 | 121.2k |
+| nanosheet BDI | box (= main) | 0.207 / 0.176 | 61 | 48 | 1046 | 2.1e-8 | 123.0k |
+| nanosheet BDI | blob + plug, 0.5 nm | 0.207 / 0.176 | 61 | 48 | 1083 | 2.1e-8 | 135.2k |
+| nanosheet BDI | blob + plug, 1 nm lattice | 0.208 / 0.177 | 61 | 48 | 1076 | 2.1e-8 | 124.4k |
+
+1 nm lattice vs 0.5 nm, Id point by point: FinFET within 1.5% (-0.5% at
+Ion), BDI within 1.6%, PTS nanosheet +4.2% in subthreshold (~1 mV of Vt at
+61 mV/dec) to +1.2% at Ion.
+
+**Runtime.** Parallel `fab simulate` runs drifted badly today (the box
+nanosheet 530 s vs 454 s last session; one FinFET run 321 s, rerun 226 s),
+so the cost is measured single-process (`fab.profile_iv`, Vds 0.05 walk):
+FinFET 139 -> 162 s (+16%, 0.5 nm), nanosheet PTS 267 -> 296 s (+10%):
+nodes +16-24%, Newton iterations and LU fallbacks the same or fewer. Clean
+`fab simulate` reruns: FinFET box 194 s, blob 0.5 nm 226 s, 1 nm lattice
+179 s. Nanosheet `fab simulate` (single runs, after the box run each time):
+PTS 530 / 782 / 759 s, BDI 406 / 584 / 526 s (box / 0.5 nm / 1 nm) - not
+reproduced by the single-process profile; to be rechecked on a cool machine.
+
+**Octree gate fix (mesh3d/octree.py).** The PMOS PTS nanosheet's plug failed
+the gate (facet asymmetry 0.5): the bowl's metal staircase put a step on a
+facet's plane, half the facet on the metal surface, and the two nodes
+sampled different sides (one metal, one epi). The existing rule covered a
+side that saw only metal; extended to a side that saw part of the facet as
+metal (geometric areas agree from both sides, the deficit is metal-labelled):
+it takes the other side's device parts. Only beyond the gate tolerance
+(1e-6): planar, FinFET and BDI nanosheet meshes are bit-identical to main.
+The gate now reports the worst edge's location. (A 2 nm lattice still fails
+the conformity check on one device - not used.)
+
+Structure check: the shaped epi leaves one-voxel tips at real acute corners
+(ILD under a diamond's lower facet at the STI, the facet against the fin
+base, the epi's curved top under the flat contact floor) and single
+staircase cells where the curved surface meets the spacer face; no
+fragments, voids or seams. Tests filter those (`_non_wedge`).
+
+PMOS: on-state I-V is not supported yet (the sweep is NMOS-oriented); all
+three PMOS devices pass the mesh gate and equilibrium (2-3 Newton its).
+
+Figure: docs/img/sd_epi_cuts.png (`python3 docs/make_device_figures.py
+sdcut`): S/D cuts of all six devices, through the contact and beside it.
+Docs: docs/sd_epi.md (shapes, parameters, plugs, results, limits), a README
+subsection under the FinFET / nanosheet section, docs/finfet_nanosheet.md
+flow steps updated.
+
+Tests: test_fab TestEpitaxy (+5: facet angles / widths, blob, merge by
+pitch, sliver rejected, contact plug), FinFET epi shapes + PMOS merge,
+nanosheet unmerged widths; test_octree metal-staircase regression (fails
+without the fix).

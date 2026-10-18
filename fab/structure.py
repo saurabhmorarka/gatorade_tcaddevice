@@ -230,6 +230,161 @@ class Structure:
             phi = np.maximum(phi, self._column(self.mask2d(mask)))
         self._add(name, material, phi)
 
+    def epitaxy(self, material, name, on, to_height, shape="facet", lateral=5.0, mask=None,
+                facet_angle=54.7356, lattice=None):
+        """Selective S/D epitaxy with a crystal shape in the cross-section
+        across the width (y-z), extruded along x over the open area of
+        `mask`, capped at `to_height` (a flat (100) top).
+
+        Seeds: nodes of the `on` materials touching gas in the open area
+        (the recessed fin, the fin/sheet ends under the spacer, a recess
+        floor). Seeds overlapping in z form one group - a fin or a sheet
+        stack - and each group grows one shape spanning its seeds in height,
+        from its floor (the deepest of its lowest seed and the solid under
+        it in the open area - a recessed fin's base, a recess floor, the
+        bottom dielectric: the epi fills the trench bottom-up) to the cap:
+          facet:   PMOS SiGe. {111} facets (facet_angle from the horizontal)
+                   rise from the floor corners and fall from the cap at the
+                   seed edges; at most `lateral` (nm) beyond the seed edge a
+                   vertical side joins them (or they meet: a diamond).
+          ellipse: NMOS Si:P blob. An ellipse `lateral` beyond the seed edge
+                   at its widest, meeting the floor halfway out (a foot on
+                   the STI, not a sliver along the fin's side), holding the
+                   top corners and reaching the cap (taller than wide for a
+                   fin or stack).
+        The side walls of the domain in z are symmetry planes: each group's
+        mirror images across them grow too, so epi from neighbouring fins
+        merges when the pitch is tight. A merge or gap narrower than two
+        voxels is an error (a sliver the mesh cannot resolve).
+
+        lattice (nm, a multiple of the voxel in y and z; None = the voxel):
+        the outer shape is drawn in lattice-sized blocks of the cross-section.
+        A curved or slanted surface staircases at the voxel, and the device
+        mesh (single-material boxes) must resolve every step: at 0.5 nm the
+        epi's skin was half the added mesh. The seed envelope (where the epi
+        meets the fin / sheets), the cap and the floor stay exact."""
+        g = self.grid
+        if shape not in ("facet", "ellipse"):
+            raise ValueError(f"epitaxy shape must be facet or ellipse, not {shape!r}")
+        hz = g.h[2]
+        on_phi = self.phi_union(self.regions_of(materials=on))
+        solid = self.solid()
+        open2d = self.mask2d(mask) < 0 if mask is not None else np.ones((g.shape[0], g.shape[2]), bool)
+        gas, _ = ndimage.label(solid > 0)                               # the ambient: gas open to the top
+        gas = np.isin(gas, np.setdiff1d(np.unique(gas[:, 0, :]), [0])) & open2d[:, None, :]
+        # on the surface up to the tie-break (a recess floor's corner node is
+        # +EPS silicon, -EPS of the STI beside it), touching gas diagonally
+        # included (that corner meets the trench only across the diagonal)
+        seed = (on_phi <= EPS) & ndimage.binary_dilation(gas, structure=np.ones((3, 3, 3), bool))
+        if not seed.any():
+            raise ValueError(f"epitaxy {name!r}: no exposed {on} in the open area")
+        y, z = g.axes[1], g.axes[2]
+        y_cap = -to_height
+        top = levelset.column_top(solid, y)                             # (x, z)
+        zcols = seed.any(axis=(0, 1))
+        lab, n = ndimage.label(zcols)
+        groups = []
+        for k in range(1, n + 1):
+            iz = np.flatnonzero(lab == k)
+            s = seed[:, :, iz[0]:iz[-1] + 1]
+            jy = np.flatnonzero(s.any(axis=(0, 2)))
+            floor = top[:, iz[0]:iz[-1] + 1][open2d[:, iz[0]:iz[-1] + 1]]
+            floor = floor[np.isfinite(floor)]
+            y_bot = max(y[jy[-1]], floor.max() if len(floor) else -np.inf)
+            groups.append((z[iz[0]], z[iz[-1]], y[jy[0]], y_bot))
+        t = np.tan(np.radians(facet_angle))
+        polys, boxes = [], []
+        for z0, z1, y_top, y_bot in groups:
+            zc, hw = 0.5 * (z0 + z1), 0.5 * (z1 - z0)
+            if y_bot <= y_cap:
+                raise ValueError(f"epitaxy {name!r}: cap at height {to_height:g} is below the seed floor")
+            if shape == "facet":
+                L = min(lateral, (y_bot - y_cap) / (2 * t))           # facets meet before `lateral`: a diamond
+                half = [(hw, y_bot), (hw + L, y_bot - L * t), (hw + L, y_cap + L * t), (hw, y_cap)]
+                ext = hw + L
+            else:
+                a = hw + lateral
+                kf = np.sqrt(1.0 - ((hw + 0.5 * lateral) / a) ** 2)  # the foot on the floor
+                kt = np.sqrt(1.0 - (hw / a) ** 2)                     # the seed's top corners
+                b = max((y_bot - y_top) / (kf + kt), (y_bot - y_cap) / (1 + kf))
+                yc = y_bot - b * kf
+                th = np.linspace(-np.pi / 2, np.pi / 2, 65)
+                half = [(a * np.cos(q), yc + b * np.sin(q)) for q in th[::-1]]   # bottom to top
+                ext = a
+            right = [(zc + u, yy) for u, yy in half]
+            left = [(zc - u, yy) for u, yy in reversed(half)]
+            poly = right + left
+            # the seed envelope down to the floor is always filled (the space
+            # the S/D recess opened): a curved side through the floor's corner
+            # leaves a one-voxel slot there
+            box = [(z0, y_bot), (z1, y_bot), (z1, y_top), (z0, y_top)]
+            for wall in (g.lo[2], g.hi[2]):
+                gap = 2 * abs(wall - zc) - 2 * ext
+                if abs(gap) < 2 * hz:
+                    raise ValueError(f"epitaxy {name!r}: the epi and its mirror image across the side wall "
+                                     f"z = {wall:g} {'overlap' if gap < 0 else 'are apart'} by only "
+                                     f"{abs(gap):.2g} nm (< 2 voxels): change `lateral` or the pitch")
+            for pp, out in ((poly, polys), (box, boxes)):
+                out.append((pp, y_bot, z0))                            # (lattice anchored on the seed
+                for wall in (g.lo[2], g.hi[2]):                          #  edge and the floor)
+                    out.append(([(2 * wall - pz, py) for pz, py in pp], y_bot, 2 * wall - z1))
+
+        def field(pts_y, pts_z, item):
+            # nothing grows below its floor (an ellipse's lower arc would slip
+            # down beside a bottom dielectric's edge)
+            pp, yb, _ = item
+            return np.maximum(levelset.polygon_sdf(pts_z, pts_y, pp), pts_y - yb)
+
+        Y, Z = np.meshgrid(y, z, indexing="ij")
+        if lattice:
+            shapes = [_on_lattice(field, it, g, lattice, (it[1], it[2])) for it in polys]
+        else:
+            shapes = [field(Y, Z, it) for it in polys]
+        f2 = np.min(shapes + [field(Y, Z, it) for it in boxes], axis=0)  # (y, z)
+        phi = np.broadcast_to(f2[None, :, :], g.shape)
+        phi = np.maximum(phi, -to_height - g.y)
+        if mask is not None:
+            # one voxel past the mask edge: the opening ends at a solid face
+            # (the spacer), which clips the epi itself; a mask edge on the
+            # face makes the cells there depend on two nearly equal fields
+            phi = np.maximum(phi, self._column(self.mask2d(mask)) - g.h[0])
+        self._add(name, material, phi)
+
+    def contact_plug(self, regions, mask, floor_height, depth, shell):
+        """Contact etch into a narrow S/D epi: below a contact trench whose
+        floor is at `floor_height`, remove the `regions` (the epi) in a
+        bullet across the width (y-z) - straight sides `shell` (nm) inside
+        the epi's edges at the floor, a half-circle bottom (the blunt head),
+        the tip `depth` below the floor - over the open area of `mask`. The
+        contact fill then wraps metal down the epi's inside: a contact area
+        of the plug's sides and bottom, not the epi top alone. One plug per
+        piece of epi in z (a fin, a sheet stack)."""
+        g = self.grid
+        targets = self.regions_of(names=regions)
+        phi_t = self.phi_union(targets)
+        open2d = self.mask2d(mask) < 0
+        y, z = g.axes[1], g.axes[2]
+        j = int(np.argmin(np.abs(y - (-floor_height + g.h[1]))))        # the node row just below the floor
+        row = (phi_t[:, j, :] < 0) & open2d
+        lab, n = ndimage.label(row.any(axis=0))
+        f2 = np.full((g.shape[1], g.shape[2]), levelset.BIG)
+        Y, Z = np.meshgrid(y, z, indexing="ij")
+        y_floor = -floor_height
+        for k in range(1, n + 1):
+            iz = np.flatnonzero(lab == k)
+            zc = 0.5 * (z[iz[0]] + z[iz[-1]])
+            r = 0.5 * (z[iz[-1]] - z[iz[0]]) - shell
+            if r <= 0:
+                continue
+            yc = y_floor + max(depth - r, 0.0)                          # centre of the head
+            ry = min(r, depth)                                          # a shallow plug: a half-ellipse
+            th = np.linspace(0.0, np.pi, 33)
+            head = [(zc + r * np.cos(t), yc + ry * np.sin(t)) for t in th]       # right -> bottom -> left
+            poly = head + [(zc - r, g.lo[1] - 1.0), (zc + r, g.lo[1] - 1.0)]     # sides up out of the epi
+            f2 = np.minimum(f2, levelset.polygon_sdf(Z, Y, poly))
+        phi_e = np.maximum(np.broadcast_to(f2[None], g.shape), self._column(self.mask2d(mask)))
+        self._remove(phi_e, targets)
+
     def etch(self, mode, materials=None, depth=None, stop_on=None, mask=None, thickness=None, regions=None):
         """mode anisotropic: in each open column, remove the target materials
         above a front at `depth` below the column's top surface, never below
@@ -446,6 +601,32 @@ class Structure:
         """Region volume (nm^3) from its cell count (voxel accurate)."""
         k = self.region_index(name)
         return float((self.cell_labels() == k).sum() * np.prod(self.grid.h))
+
+
+def _on_lattice(field, item, g, q, anchor):
+    """A 2D (y, z) shape drawn in q x q blocks: the blocks of a lattice
+    through `anchor` (y, z; a node), inside where field() is negative at
+    their centres, returned as the signed distance (nm) on the voxel nodes
+    to that union of blocks - zero on its faces, which lie on nodes (as for
+    any flat face)."""
+    r = [int(round(q / g.h[a])) for a in (1, 2)]
+    if any(abs(r[i] * g.h[a] - q) > 1e-9 for i, a in enumerate((1, 2))):
+        raise ValueError(f"epitaxy lattice {q:g} nm is not a multiple of the voxel {tuple(g.h[1:])}")
+    ny, nz = g.shape[1] - 1, g.shape[2] - 1                         # voxel cells
+    # each voxel cell -> its block (index along the lattice through the anchor)
+    jy = np.floor((g.axes[1][:-1] + 0.5 * g.h[1] - anchor[0]) / q).astype(int)
+    kz = np.floor((g.axes[2][:-1] + 0.5 * g.h[2] - anchor[1]) / q).astype(int)
+    by, bz = np.unique(jy), np.unique(kz)
+    CY, CZ = np.meshgrid(anchor[0] + q * (by + 0.5), anchor[1] + q * (bz + 0.5), indexing="ij")
+    block = field(CY, CZ, item) < 0
+    cell = block[np.searchsorted(by, jy)][:, np.searchsorted(bz, kz)]
+    c = np.pad(cell, 1, mode="edge")                                 # (the domain edges continue the shape)
+    n_in = c[:-1, :-1].astype(int) + c[1:, :-1] + c[:-1, 1:] + c[1:, 1:]   # inside cells around each node
+    inside, face = n_in == 4, (n_in > 0) & (n_in < 4)
+    if not face.any():
+        return np.where(inside, -levelset.BIG, levelset.BIG)
+    d = ndimage.distance_transform_edt(~face, sampling=g.h[1:])
+    return np.where(inside, -d, d)
 
 
 def _despeckle(lab, max_pass=4):

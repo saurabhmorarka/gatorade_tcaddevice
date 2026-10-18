@@ -25,6 +25,16 @@ def line_crossing(f, coords):
     return coords[i] + (coords[i + 1] - coords[i]) * f[i] / (f[i] - f[i + 1])
 
 
+def _non_wedge(warnings):
+    """Structure-check warnings other than one-voxel-thick cells of the epi,
+    the ILD or the contacts: a shaped epi has real acute corners (the ILD
+    under a diamond's lower facet at the STI, a facet against the fin side,
+    the epi's curved top under the flat contact floor) whose tips staircase
+    to one voxel."""
+    return [w for w in warnings if not (("epi'" in w or "'ild'" in w or "_contact'" in w)
+                                        and "one voxel thick" in w)]
+
+
 def top_height(st, x, z, regions=None):
     """Height (up, nm) of the top of the solid (or of `regions`) at (x, z)."""
     g = st.grid
@@ -217,6 +227,93 @@ class TestOps(unittest.TestCase):
         col = st.acceptors[2, :, 2]
         dose = np.trapezoid(col, st.grid.axes[1] * 1e-7)
         self.assertAlmostEqual(dose / 1e13, 1.0, delta=1e-3)
+
+
+class TestEpitaxy(unittest.TestCase):
+    """Shaped S/D epitaxy (Structure.epitaxy): one 5 nm fin, 28 nm above a
+    2 nm oxide, in a 40 nm wide cell with mirror side walls; the epi capped
+    at 35 nm."""
+
+    def build(self, shape, lateral, Lz=40.0, fin_top=30.0):
+        st = Structure(Grid(lo=(0, -40, 0), hi=(3, 10, Lz), h=(0.5, 0.5, 0.5)))
+        st.substrate("Si", "substrate")
+        c = Lz / 2
+        st.deposit("Si", "fin", "fill", to_height=fin_top, mask={"rect": [-1, 4, c - 2.5, c + 2.5]})
+        st.deposit("SiO2", "sti", "fill", to_height=2.0)
+        st.epitaxy("SiGe", "epi", on=["Si"], to_height=35.0, shape=shape, lateral=lateral)
+        return st
+
+    @staticmethod
+    def width(st, height):
+        """Epi extent across z (nm, the sub-voxel surface crossings) at
+        `height` (on a node row), mid x."""
+        g = st.grid
+        j = int(np.argmin(np.abs(g.axes[1] + height)))
+        f = st.regions[st.region_index("epi")].phi[2, j, :]
+        if not (f < 0).any():
+            return 0.0
+        z = g.axes[2]
+        if (f < 0).all():
+            return z[-1] - z[0]
+        return line_crossing(f[::-1], z[::-1]) - line_crossing(f, z)
+
+    def test_facet_diamond(self):
+        st = self.build("facet", 6.0)
+        # lower {111} facets from the fin's base corners: 1/tan(54.74 deg)
+        # = 0.707 nm wider per nm of height, on both sides
+        for h in (4.0, 8.0):                    # (lower, the wedge is thinner than a voxel)
+            self.assertAlmostEqual(self.width(st, h), 5.0 + 2 * (h - 2.0) * 0.7071, delta=0.01, msg=f"h={h}")
+        self.assertAlmostEqual(self.width(st, 18.0), 5.0 + 2 * 6.0, delta=0.01)       # the vertical sides
+        self.assertAlmostEqual(self.width(st, 34.5), 5.0 + 2 * 0.5 * 0.7071, delta=0.01)   # (100) top: fin wide
+        self.assertAlmostEqual(self.width(st, 33.0), 5.0 + 2 * 2.0 * 0.7071, delta=0.01)
+        self.assertEqual(self.width(st, 36.0), 0.0)
+        self.assertEqual(_non_wedge(st.check()), [])
+
+    def test_ellipse_blob(self):
+        st = self.build("ellipse", 5.0)
+        widths = [self.width(st, h) for h in np.arange(2.5, 35.0, 0.5)]
+        self.assertAlmostEqual(max(widths), 5.0 + 2 * 5.0, delta=0.02)                # lateral beyond the fin
+        w = self.width(st, 2.5)                                                       # the foot: half way out
+        self.assertTrue(10.0 < w < 10.5, w)
+        self.assertGreater(33.0, 2 * max(widths))                                     # taller than wide
+        self.assertEqual(self.width(st, 36.0), 0.0)
+
+    def test_merge_follows_pitch(self):
+        # 24 nm pitch: 6 nm beyond the fin leaves 7 nm to the mirrored
+        # neighbour, 11 nm overlaps it by 3 nm
+        self.assertAlmostEqual(self.width(self.build("facet", 6.0, Lz=24.0), 18.0), 17.0, delta=0.01)
+        st = self.build("facet", 11.0, Lz=24.0)
+        lab = st.node_labels()
+        j = int(np.argmin(np.abs(st.grid.axes[1] + 18.0)))
+        self.assertTrue(np.isin(lab[2, j, :], [st.region_index("epi"), st.region_index("fin")]).all())
+        self.assertEqual(lab[2, j, 0], st.region_index("epi"))                       # merged with the mirror
+        # the void under the merge: no epi at the wall just above the oxide
+        j = int(np.argmin(np.abs(st.grid.axes[1] + 4.0)))
+        self.assertNotEqual(lab[2, j, 0], st.region_index("epi"))
+
+    def test_contact_plug(self):
+        """A bullet into the epi: straight sides `shell` inside its edges at
+        the trench floor, a round bottom `depth` below the floor."""
+        st = self.build("ellipse", 5.0, fin_top=8.0)                        # a recessed fin
+        w0 = self.width(st, 30.0)                                           # the epi at the floor
+        st.contact_plug(["epi"], {"rect": [-1, 4, -1, 41]}, floor_height=30.0, depth=12.0, shell=2.0)
+        g = st.grid
+        f = st.regions[st.region_index("epi")].phi[2]
+        z = g.axes[2]
+        c = 20.0
+        k = int(np.argmin(np.abs(z - c)))
+        col = f[:, k]
+        # down the plug's axis: no epi from the floor to the tip, epi below it
+        self.assertAlmostEqual(-line_crossing(col, g.axes[1]), 30.0 - 12.0, delta=0.02)
+        r = 0.5 * round((w0 - 4.0) / g.h[2]) * g.h[2]                       # (the epi edge in nodes)
+        j = int(np.argmin(np.abs(g.axes[1] + 25.0)))                       # straight part of the plug
+        inner = line_crossing(f[j, k:], z[k:])
+        self.assertAlmostEqual(inner - c, r, delta=0.3)
+        self.assertGreater(self.width(st, 25.0), 2 * r)                    # the epi shell is still there
+
+    def test_sliver_merge_rejected(self):
+        with self.assertRaisesRegex(ValueError, "mirror image"):
+            self.build("facet", 9.7, Lz=24.0)                                         # 0.4 nm overlap
 
 
 class TestDespeckle(unittest.TestCase):
@@ -427,7 +524,7 @@ class TestFinFET(unittest.TestCase):
         cls.p = flow.resolve_params(flow.expand(cls.cfg)["params"])
 
     def test_structure_check(self):
-        self.assertEqual(self.st.check(), [])
+        self.assertEqual(_non_wedge(self.st.check()), [])
 
     def test_fin_and_gate_wrap(self):
         st, p = self.st, self.p
@@ -452,12 +549,31 @@ class TestFinFET(unittest.TestCase):
         nd, na, net = st.net_doping()
         g = st.grid
         k = int(np.argmin(np.abs(g.axes[2] - p["fin_pitch"] / 2)))
-        j = int(np.argmin(np.abs(g.axes[1] + (-10))))
+        j = int(np.argmin(np.abs(g.axes[1] + (-20))))                      # (below the contact plug)
         self.assertGreater(net[int(np.argmin(np.abs(g.axes[0] - 5))), j, k], 5e20)          # in the epi
         self.assertLess(net[int(np.argmin(np.abs(g.axes[0] - p["cpp"] / 2))), j, k], 0)     # channel p
         # the epi stops above the punch-through stopper: none below the STI top
         epi = st.phi_union(st.regions_of(names=["sd_epi"])) < -1e-3
         self.assertFalse(epi[:, g.axes[1] > p["H_fin"] - 1e-6, :].any())
+
+    def test_epi_shapes(self):
+        """NMOS: an elliptical blob 5 nm beyond the fin, apart from the
+        neighbouring fins' epi; PMOS: a {111} diamond that merges with them
+        at the 24 nm fin pitch."""
+        from fab import flow
+        p = self.p
+        k = self.st.region_index("sd_epi")
+        lab = self.st.node_labels()
+        g = self.st.grid
+        i = int(np.argmin(np.abs(g.axes[0] - 10.0)))                     # S/D, outside the contact
+        rows = [(lab[i, j, :] == k).sum() * g.h[2] for j in range(g.shape[1])]
+        self.assertAlmostEqual(max(rows), p["W_fin"] + 2 * 5.0, delta=1.0)
+        cfg = flow.load(os.path.join(TCAD1D_ROOT, "configs", "fab_finfet_pmos.yaml"))
+        st, _ = flow.build(cfg, log=lambda *a: None)
+        self.assertEqual(_non_wedge(st.check()), [])
+        lab = st.node_labels()
+        merged = (lab[i] == st.region_index("sd_epi")).all(axis=1)       # rows across the whole cell
+        self.assertTrue(merged.any())
 
 
 class TestNanosheet(unittest.TestCase):
@@ -501,6 +617,23 @@ class TestNanosheet(unittest.TestCase):
         k = int(np.argmin(np.abs(g.axes[2] - p["stack_pitch"] / 2)))
         self.assertEqual(names[lab[i, j, k]], "inner_spacer")
 
+
+
+    def test_epi_unmerged(self):
+        """The 35 nm NMOS blob and the 39 nm PMOS diamond leave the 46 nm
+        stack pitch unmerged."""
+        from fab import flow
+        p = self.p
+        for dev, width in (("nanosheet", p["W_sheet"] + 10), ("nanosheet_pmos", p["W_sheet"] + 14)):
+            st = self.st if dev == "nanosheet" else flow.build(
+                flow.load(os.path.join(TCAD1D_ROOT, "configs", f"fab_{dev}.yaml")), log=lambda *a: None)[0]
+            g = st.grid
+            lab = st.node_labels()
+            i = int(np.argmin(np.abs(g.axes[0] - 10.0)))
+            epi = lab[i] == st.region_index("sd_epi")
+            self.assertFalse(epi[:, 0].any() or epi[:, -1].any(), dev)              # off the side walls
+            z = g.axes[2][epi.any(axis=0)]
+            self.assertAlmostEqual(z.max() - z.min(), width, delta=1.0, msg=dev)
 
 
 class TestNanosheetBDI(unittest.TestCase):

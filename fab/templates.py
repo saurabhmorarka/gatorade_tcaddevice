@@ -217,6 +217,21 @@ FINFET_DEFAULTS = {
     # sy in depth
     "epi_over": 5, "epi_thickness": 18,
     "epi_peak": None, "epi_sx": 2.0, "epi_sy": 3.0,
+    # S/D epi shape across the fin (fab/structure.py epitaxy): None ->
+    # "ellipse" (NMOS Si:P, a blob taller than wide) / "facet" (PMOS SiGe,
+    # {111} diamond); "box" = conformal epi_thickness growth (the merged,
+    # flat-topped block of the first flows). epi_lateral: widest reach beyond
+    # the fin side wall (nm); None -> 5 (NMOS, unmerged at 24 nm pitch) /
+    # 12 (PMOS: merges with the neighbouring fins' epi)
+    "epi_shape": None, "epi_lateral": None, "epi_lateral_n": 5, "epi_lateral_p": 12,
+    # contact plug into a shaped epi (fab/structure.py contact_plug): the
+    # contact etch goes on into the narrow epi as a bullet - straight sides
+    # contact_plug_shell inside the epi's edges, a round bottom
+    # contact_plug_depth below the trench floor; 0 = a flat trench floor
+    "contact_plug_depth": 12, "contact_plug_shell": 2,
+    # the epi's outer shape on a 1 nm lattice (fab/structure.py epitaxy): its
+    # staircase at the 0.5 nm voxel was half the mesh the shape added
+    "epi_lattice": 1.0,
 }
 
 FINFET_DERIVED = {
@@ -240,9 +255,17 @@ def _sd_epi_and_contacts(p, process, n, x_open_l, x_open_r):
     epi_mat = "Si" if n else "SiGe"
     sd_sp = "P" if n else "B"
     cmat, ild = p["contact_material"], p["ild_material"]
+    if p["epi_shape"] == "box":
+        epi = {"step": "deposit", "label": "S/D epitaxy", "mode": "conformal", "material": epi_mat, "name": "sd_epi",
+               "on": ["Si"], "thickness": "epi_thickness", "to_height": "epi_over", "mask": "!gate_sp"}
+    else:
+        epi = {"step": "epitaxy", "label": f"S/D epitaxy ({p['epi_shape']})", "material": epi_mat, "name": "sd_epi",
+               "on": ["Si"], "shape": p["epi_shape"], "lateral": "epi_lateral", "to_height": "epi_over",
+               "mask": "!gate_sp"}
+        if p.get("epi_lattice"):
+            epi["lattice"] = "epi_lattice"
     process += [
-        {"step": "deposit", "label": "S/D epitaxy", "mode": "conformal", "material": epi_mat, "name": "sd_epi",
-         "on": ["Si"], "thickness": "epi_thickness", "to_height": "epi_over", "mask": "!gate_sp"},
+        epi,
         {"step": "epi_doping", "label": "S/D epi in-situ doping", "species": sd_sp, "peak": "epi_peak",
          "sx": "epi_sx", "sy": "epi_sy", "regions": ["sd_epi"]},
         {"step": "deposit", "label": "ILD deposition", "mode": "fill", "material": ild, "name": "ild",
@@ -252,13 +275,21 @@ def _sd_epi_and_contacts(p, process, n, x_open_l, x_open_r):
          "mask": {"rect": [-1, f"{x_open_l} - contact_inset", -1, "Lz + 1"]}},
         {"step": "pattern", "label": "contact masks", "name": "drain_ct",
          "mask": {"rect": [f"{x_open_r} + contact_inset", "Lx + 1", -1, "Lz + 1"]}},
-        {"step": "etch", "label": "source contact etch", "mode": "anisotropic", "regions": ["ild"], "mask": "source_ct"},
-        {"step": "etch", "label": "drain contact etch", "mode": "anisotropic", "regions": ["ild"], "mask": "drain_ct"},
     ]
+    # the contact trench: ILD and the epi top together, to a flat floor
+    # contact_recess below the epi cap. A shaped epi does not fill the cell:
+    # an ILD etch to the epi top would clear the ILD beside it down to the
+    # STI (a wrap-around contact), and a recess measured from the epi
+    # surface would follow its facets down
     for side in ("source", "drain"):
-        if p["contact_recess"]:
-            process.append({"step": "etch", "label": f"{side} contact recess (into the epi)", "mode": "anisotropic",
-                            "regions": ["sd_epi"], "mask": f"{side}_ct", "depth": "contact_recess"})
+        process.append({"step": "etch", "label": f"{side} contact etch (into the epi)", "mode": "anisotropic",
+                        "regions": ["ild", "sd_epi"], "mask": f"{side}_ct",
+                        "depth": "ild_top - epi_over + contact_recess"})
+        if p["epi_shape"] != "box" and p["contact_plug_depth"]:
+            process.append({"step": "contact_plug", "label": f"{side} contact plug (bullet into the epi)",
+                            "regions": ["sd_epi"], "mask": f"{side}_ct",
+                            "floor_height": "epi_over - contact_recess", "depth": "contact_plug_depth",
+                            "shell": "contact_plug_shell"})
     process += [
         {"step": "deposit", "label": "source contact fill", "mode": "fill", "material": cmat, "name": "source_contact",
          "to_height": "ild_top", "mask": "source_ct"},
@@ -289,6 +320,13 @@ def _merge(defaults, derived, params, kind):
         p["gate_wf"] = 4.40 if n else 4.80
     if p.get("epi_peak") is None:
         p["epi_peak"] = 7e20 if n else 5e20
+    if "epi_shape" in p:
+        if p["epi_shape"] is None:
+            p["epi_shape"] = "ellipse" if n else "facet"
+        if p["epi_shape"] not in ("ellipse", "facet", "box"):
+            raise ValueError(f"epi_shape must be ellipse, facet or box, not {p['epi_shape']!r}")
+        if p.get("epi_lateral") is None:
+            p["epi_lateral"] = p["epi_lateral_n"] if n else p["epi_lateral_p"]
     return p, n
 
 
@@ -401,6 +439,11 @@ NANOSHEET_DEFAULTS = {
     "pts_depths": None,
     "epi_over": 5, "epi_thickness": 18,
     "epi_peak": None, "epi_sx": 2.0, "epi_sy": 4.0,
+    # S/D epi shape (see the FinFET): 25 nm sheets -> NMOS 35 nm, PMOS
+    # 39 nm wide; neither merges at the 46 nm stack pitch (7 nm gap for PMOS)
+    "epi_shape": None, "epi_lateral": None, "epi_lateral_n": 5, "epi_lateral_p": 7,
+    "contact_plug_depth": 12, "contact_plug_shell": 2,      # (see the FinFET)
+    "epi_lattice": 1.0,
 }
 
 NANOSHEET_DERIVED = {
