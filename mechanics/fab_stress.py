@@ -13,8 +13,11 @@ nothing.
 
 Stressors, from the fab's region names (rough defaults; --set overrides):
   sd_epi (SiGe)     lattice mismatch, x = epi_x (0.5: the PMOS Si0.5Ge0.5 S/D)
-  sige  (SiGe)      nanosheet superlattice, x = sige_sl_x (0.30), released at
-                    channel release
+  sige  (SiGe)      nanosheet superlattice, x = sige_sl_x (0.30): grown
+                    pseudomorphic on the Si lattice, so the SiGe is born
+                    compressed (mismatch eps*); relaxes sideways at the stack
+                    etch, released at channel release. sige_sl_strain=0 grows
+                    it stress-free instead (what-if, for teaching)
   gate (metal)      intrinsic stress gate_GPa (-1.0, TiN)
   *_contact         intrinsic stress contact_GPa (-1.0, TiN fill; W would be +1)
   sti               sti_GPa (0 = off; e.g. -0.3 HDP oxide)
@@ -38,7 +41,8 @@ from mechanics import elastic as el
 from mechanics.fe3d import Grid3D, StressHistory3D
 from mechanics.piezo import mobility_change
 
-DEFAULTS = dict(epi_x=0.5, sige_sl_x=0.30, gate_GPa=-1.0, contact_GPa=-1.0, sti_GPa=0.0, spacer_GPa=0.0)
+DEFAULTS = dict(epi_x=0.5, sige_sl_x=0.30, sige_sl_strain=1.0, gate_GPa=-1.0, contact_GPa=-1.0, sti_GPa=0.0,
+                spacer_GPa=0.0)
 SI_LIKE = {"Si"}
 
 
@@ -103,6 +107,8 @@ def _materials(regions, par):
 def _stressor_of(name, mat, par, m):
     """(stressor name, eps*) for voxels of region `name`, or None."""
     if mat == "SiGe":
+        if name == "sige" and not par["sige_sl_strain"]:
+            return None
         x = par["sige_sl_x"] if name == "sige" else par["epi_x"]
         f = el.sige_mismatch(x)
         return ("SiGe superlattice" if name == "sige" else "SiGe S/D", np.array([f, f, f, 0, 0, 0]))

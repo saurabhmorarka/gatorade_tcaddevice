@@ -162,7 +162,7 @@ final stress, because elastic removals commute until the next birth:
 | region | input |
 |---|---|
 | S/D SiGe epi | mismatch at x = 0.5 (1.97%) |
-| nanosheet SiGe superlattice | mismatch at x = 0.30; born strained, removed at channel release |
+| nanosheet SiGe superlattice | mismatch at x = 0.30; born strained (pseudomorphic), removed at channel release; `sige_sl_strain=0` grows it stress-free |
 | TiN gate | −1.0 GPa |
 | TiN contacts | −1.0 GPa |
 | STI, spacers | optional (`sti_GPa`, `spacer_GPa`) |
@@ -209,6 +209,36 @@ Per sheet at the end: σxx −1726, −1733 and −1743 MPa, from top to bottom
 (linear piezo +115 to +124%). The channel release is the largest single
 step. The compressed SiGe layers were holding the sheets in tension. Once
 they are gone, the S/D epi pushes on free-standing sheets.
+
+**What the superlattice strain does.** The sacrificial SiGe grows
+pseudomorphic on the Si lattice, so it is born compressed. With
+`--set sige_sl_strain=0` it grows stress-free instead (a what-if). The
+same flow then gives:
+
+| step | σxx, strained SL (default) | σxx, stress-free SL |
+|---|---|---|
+| S/D recess | +867 | 0 |
+| SiGe S/D epi | −322 | −1118 |
+| dummy gate pull | −756 | −1599 |
+| channel release | −1883 | −2166 |
+| final (channel) | −1637 | −1915 |
+| final, sheets top / mid / bottom | −1726 / −1733 / −1743 | −1891 / −2094 / −2104 |
+
+So the strained superlattice costs the final channel about 280 MPa
+(+278 MPa in the per-stressor split). Before the release it holds the
+sheets in tension:
+- the stack etch lets the compressed SiGe expand sideways, which stretches the Si sheets;
+- cutting the stack at the S/D recess turns that into +867 MPa along the channel.
+
+Most of it leaves with the SiGe at the channel release. The part that
+stays is the stretch the sheet ends kept under the spacers and inner
+spacers.
+
+**FinFET vs nanosheet.** Both have the same 48 nm CPP, 15 nm Lg and
+5 nm spacer, so the S/D opening along the channel is identical. The SiGe
+S/D gives almost exactly the same channel stress in both: −2090 MPa
+(FinFET) and −2088 (nanosheet). The difference in the totals is the
+superlattice term above, which the FinFET does not have.
 
 <p align="center"><img src="img/stress3d_nanosheet_pmos.png" width="100%"></p>
 

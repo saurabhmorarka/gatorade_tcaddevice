@@ -6623,3 +6623,10 @@ The HK on the trench walls leaves 11 nm of metal in a 15 nm trench. Lg stays the
 - Vt, DIBL and Ion agree between modes from Vgs 0.15 V up.
 - Subthreshold current with either force is 4-8x below no-vsat at Vds 0.05: the velocity cap at the barrier top.
 - The exact mode's cost is intrinsic: the near-solution full step did not change its iterations (1097 vs 1098).
+
+**Follow-up (user questions):**
+- *Why is the FinFET channel stress higher?* The SiGe S/D term is the same in both (FinFET -2090, nanosheet -2088 MPa); both have the same CPP 48, Lg 15 and spacer 5, so the same S/D opening along x. The total differs by the nanosheet's strained-superlattice term (+278 MPa).
+- *Why +867 MPa at the nanosheet S/D recess?* The pseudomorphic SiGe superlattice is born compressed. The stack etch lets it expand sideways and stretch the sheets (+821 in z), and cutting the stack turns that into channel tension.
+  - With the superlattice grown stress-free (`sige_sl_strain=0`): recess 0, epi -1118, pull -1599, release -2166, final -1915 (sheets -1891 / -2094 / -2104 MPa).
+  - The user first asked to drop the superlattice stress, then to keep it if it is the physical case. It stays ON by default (pseudomorphic growth on Si is compressive); `sige_sl_strain=0` is the what-if.
+- Lg: the user keeps the gate-last 11 nm of metal in the 15 nm trench. The 1 nm stress grid is accepted.
