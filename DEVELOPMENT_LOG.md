@@ -6850,3 +6850,119 @@ channel), so they move more; their goldens were re-captured:
 **Lesson.** A continuation whose step halves to nothing at a fixed bias is a
 fold, not a step-size problem: look at WHERE the residual sits (one row
 here) before touching the step control.
+
+## 82. Stress -> mobility: piezoresistance in the device solver; PMOS on-state I-V
+
+Branch `piezo-mobility`, together with `nmos-stress` (81) the "stress fully
+done" item. The user's plan (option B in the passdown) was:
+- a per-edge factor from the full tensor;
+- the stress sampled on the device mesh;
+- linear and saturating modes from the literature;
+- 2D first, then the FinFET and the nanosheet;
+- runtime measured;
+- OFF by default.
+
+**Literature (read first).**
+- Smith 1954: the bulk pi11/pi12/pi44.
+- Thompson et al., TED 53, 1010 (2006): the (001)/<110> table. Their abstract
+  puts the maximum Si inversion-layer hole enhancement for uniaxial stress
+  on (001) at ~4x (6-band k.p).
+- Ungersboeck's thesis (TU Wien 2007, ch. 6, read online): the electron
+  enhancement saturates near 1% strain, and in thin bodies confinement
+  takes over the valley splitting.
+- Kanda 1982: the doping factor.
+- Richter et al., JAP 104, 023715 (2008), open access, read in full: Kanda
+  under-reads p-Si at high doping. Their Eq. 20 fit (Table IV) is used for
+  holes.
+
+The user away, these defaults were chosen and stated:
+- the saturating mode;
+- f_max 4 for holes (Thompson), 1.8 for electrons (the repopulation limit);
+- f_min 0.5 for both;
+- the doping factor on.
+
+**Model** (docs/piezo_mobility.md).
+- `x = -P(N) t.(Pi:sigma).t` per silicon edge, with Pi rotated from crystal
+  axes by the same frame as the stiffness.
+- `f = 1 + x` (linear), or a tanh approach to f_max / f_min with Smith's
+  slope at zero stress.
+- At the coordinator's request the low-field mobility is now ONE function,
+  `low_field_mobility`, in the Sentaurus order:
+  1. doping mobility;
+  2. (surface terms, later);
+  3. the edge mean;
+  4. the stress factor, a separate step (`_apply_edge_factors`);
+  5. (ballistic, later).
+  Velocity saturation then acts on its result.
+- The factors are static per-edge arrays, attached with
+  `set_edge_mobility_factor` (named, multiplied together). They cost 0.2 s
+  per mesh, and a Newton iteration costs the same.
+- Without them `edge_mu0_factor` is None and nothing is touched. Measured:
+  FinFET NMOS I-V on this branch against main, max |dId/Id| 1.2e-8.
+
+**Stress on the mesh** (`mechanics/stress_field.py`).
+- A masked multilinear interpolation over silicon voxels only, so an
+  interface edge takes the silicon side.
+- A frame check on every use: every silicon midpoint inside the grid, and
+  on a silicon stress voxel within one voxel.
+  - The first version demanded an exact voxel hit (2% limit). The NMOS
+    FinFET failed it at 2.4%: the 1 nm majority-coarsened stress voxels move
+    the curved blob epi's surface by one voxel (spacer/ILD voxels, all
+    exactly one voxel from Si).
+  - It now allows one voxel and fails above 0.5%.
+  - A test moves the 2D field 25 nm and expects the error.
+- 3D: `fab simulate --stress` runs `mechanics.fab_stress --fast` and saves
+  `stress_field.npz`, with the fab parameters it was built from (checked on
+  load). `--stress <npz>` reuses it; `--piezo linear`, `--piezo-doping off`
+  and `--stress-set` are the options.
+- 2D: a `stress:` block in a `main2d_mosfet_sweep` config.
+  - New 30 nm NMOS / PMOS configs sit on the `planar_flow` cell, aligned on
+    the gate centre, gate lengths checked.
+  - The stress is solved once in the parent process and loaded by the
+    workers.
+  - `--no-stress` gives the reference run.
+
+**PMOS on-state I-V (the open item).** It was never wired, not broken.
+`fab simulate --vds -0.05 -0.7 --vgs-min -0.8 --vgs-max 0` converges at
+every point on the FinFET and the nanosheet PMOS. The metrics are now
+mirrored (`mosfet_metrics_signed`: Vt negative, magnitudes otherwise).
+
+The first FinFET PMOS curve had Idlin flat at 15 uA/um. A Vds-drop trace
+(phip along x, Vgs -0.8 V, Vds -0.05 V) showed 20 mV lost at EACH contact
+and 8 mV in the channel. The cause: the sub-grid Schottky table was built
+with the BASE material (Si) for every contact. A p+ SiGe contact got the
+hole barrier Eg(Si) - 0.45 = 0.67 eV, against the template's intent of
+Eg(SiGe) - 0.45 = 0.30 eV, with silicon's Nc/Nv.
+- `contacts/subgrid.py::contact_material` now tabulates each contact with
+  the semiconductor its nodes carry.
+- A contact on the base material keeps the base object, so the NMOS table
+  cache key and results are identical.
+- FinFET PMOS Ion 242 -> 537 uA/um.
+
+The PMOS is still series-resistance limited (Idlin 74 uA/um, NMOS 147).
+That is a calibration question for the user (contact barrier, SiGe hole
+mobility), not changed here.
+
+**Results** (saturating; load average 3-11 from another agent's jobs, so
+iterations are the cost measure):
+- 2D, 30 nm devices:
+  - PMOS gate-last, -2.72 GPa: mu_p x2.32, Idlin +57%, Ion +24%.
+  - NMOS SMT, +0.70 GPa: mu_n x1.34, Idlin +14%, Ion +4.6%.
+  - 3.5-5 s per run, with or without stress.
+- 3D Ion:
+  - FinFET PMOS +8.2%, FinFET PMOS with ohmic S/D +9.5% (Idlin +29%);
+  - nanosheet PMOS +8.1%;
+  - FinFET NMOS -0.3%, nanosheet NMOS +1.0% (their main-branch flows carry
+    only +0.2..0.4 GPa).
+- Every curve is complete. The stressed curves take 0-28% more Newton
+  iterations.
+
+The 3D PMOS gains are far below the literature's +50-100%, for three reasons:
+1. series resistance;
+2. a low-field factor under velocity saturation at Lg 15 nm;
+3. no quasi-ballistic link.
+These are stated in the docs, not tuned away.
+
+**Lesson.** Before reading a small stress gain as physics, find where the
+drain voltage drops. Here 85% of Vds sat in the two contacts, and a
+material-lookup bug sat in the contact table.

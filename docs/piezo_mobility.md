@@ -131,7 +131,48 @@ stress:
 
 ## Results
 
-RESULTS_TABLE
+Saturating mode with the doping factor and the fast (hybrid) velocity
+saturation. "Channel sigma" is the `fab_stress` / `planar_flow` channel
+mean (xx along the channel, yy vertical, zz width). Ion is at the highest
+|Vgs| and |Vds|; Idlin is at |Vds| 0.05 V and the same |Vgs|. Every curve
+has every point. These runs were taken while another agent's jobs loaded
+the machine (load average 3-11), so compare Newton iterations, not seconds.
+
+**2D, 30 nm planar devices on the planar_flow cell** (`configs/input_mosfet_2d_stress_*.yaml`, |Vds| 1.0 V, |Vgs| 1.0 V):
+
+| device / flow | channel sigma xx/yy/zz (MPa) | mobility factor (channel) | Idlin | Ion (uA/um) | run (s) off / on |
+|---|---|---|---|---|---|
+| NMOS, nmos_smt (SMT + dislocations + liner) | +702 / -328 / -75 | mu_n x 1.34 (linear 1.37) | +14% (+25% at Vgs 0.4) | 1727 -> 1807 (+4.6%) | 3.6 / 3.5 |
+| PMOS, pmos_gate_last (SiGe S/D + liner + RMG) | -2719 / -137 / -219 | mu_p x 2.32 (linear 2.42) | +57% (linear +60%) | 974 -> 1210 (+24%; linear +25%) | 4.4 / 5.0 |
+
+The planar_flow stress solve takes 9-10 s, once per run (`main2d_mosfet_sweep` saves it and the workers load it).
+
+**3D, octree, fast vsat, |Vds| 0.05 / 0.7 V, |Vgs| 0.8 V** (`fab simulate --stress`):
+
+| device | channel sigma xx/yy/zz (MPa) | Idlin | Ion (uA/um) off -> on | Newton its off / on | total (s) off / on |
+|---|---|---|---|---|---|
+| FinFET NMOS | +189 / +88 / -235 | -0.7% | 1005 -> 1002 (-0.3%) | 333 / 353 | 176 / 175 (+31 s stress solve) |
+| FinFET PMOS | -1500 / +611 / -254 | +5% (+18% at -0.4 V) | 537 -> 580 (+8.2%) | 213 / 224 | 132 / 129 (+48 s stress solve) |
+| FinFET PMOS, ohmic S/D what-if | same | +29% | 782 -> 856 (+9.5%) | 193 / 197 | 103 / 98 (+46 s) |
+| nanosheet NMOS | +442 / +17 / +101 | +1.0% | 1109 -> 1120 (+1.0%) | 362 / 397 | 671 / 457 (+138 s) |
+| nanosheet PMOS | -1040 / -80 / -28 | +2.5% (+9.5% at -0.4 V) | 393 -> 425 (+8.1%) | 204 / 261 | 404 / 666 (+166 s) |
+
+**Cost.**
+- The factors take 0.2 s per mesh.
+- An iteration costs the same with and without them: FinFET NMOS 0.90 s per iteration in both runs.
+- What changes is the iteration count. The stressed curves take 0-28% more Newton iterations, because the stress changes the solution, not the cost of a step.
+- The 3D stress solve (`mechanics.fab_stress --fast`) is the real extra cost: 31-48 s for a FinFET, 140-170 s for a nanosheet. It runs once, and `--stress <npz>` reuses it.
+
+**Reading the numbers.**
+- **The channel factors are as large as expected.** Under the gate the mobility rises:
+  - FinFET PMOS, holes x1.68;
+  - 2D gate-last PMOS, x2.32;
+  - 2D SMT NMOS, electrons x1.34.
+- **The 3D PMOS Ion gains (+8%) are far below the literature's +50-100%.** Three things dilute them:
+  1. **Series resistance.** Both 3D PMOS are limited by series resistance. Idlin is nearly flat in Vgs (FinFET PMOS 74 uA/um at -0.8 V, against 147 for the NMOS). With ohmic contacts the FinFET PMOS Idlin gain rises to +29%.
+  2. **Velocity saturation.** The factor acts on the low-field mobility. At Lg 15 nm and 0.7 V the channel is near velocity saturation, which does not change with stress. Even the 2D PMOS, x2.3 in the channel, gains only +24% in Ion.
+  3. **No ballistic link.** There is no quasi-ballistic (backscattering) model to tie Ion to the mobility. That is the planned ballistic work.
+- **The FinFET and nanosheet NMOS on main carry little stress.** There is no SMT or dislocation stressor in their 3D flows (that is the `nmos-stress` branch). Their factors are close to 1 and Ion moves by about 1%.
 
 ## Known simplifications
 
