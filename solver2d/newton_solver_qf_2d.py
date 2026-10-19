@@ -393,11 +393,16 @@ def _edge_vsat(mesh, mat):
     return _mesh_cached(mesh, ("vsat_edge",) + tuple(vs), build)
 
 
-VSAT_FORCES = ("efield", "hybrid", "gradqf")
+VSAT_FORCES = ("efield", "hybrid", "gradqf", "mqf")
 # Carrier density (cm^-3) where the hybrid driving force is half quasi-Fermi
 # gradient, half field - the avalanche solver's value
 # (avalanche/newton_solver_avalanche.py, DEFAULT_REF_DENSITY_CM3).
 VSAT_REF_DENSITY = 1.0e16
+# Reference density n0 (cm^-3) of the "mqf" force: the gradient of the
+# modified quasi-Fermi potential phi~ = psi - Vt ln((n + n0)/Nc) (Sentaurus
+# Device UG, "Interpolation of the GradQuasiFermi Driving Force", eq. 359;
+# RefDens_eGradQuasiFermi_ElectricField_HFS, used at 1e8-1e12 <= ni).
+VSAT_MQF_DENSITY = 1.0e10
 # Newton iterations allowed to a quasi-Fermi-force solve from the given start
 # before falling back to the edge-field warm-up (newton_solve_2d).
 VSAT_DIRECT_MAXITER = 15
@@ -441,6 +446,19 @@ def _edge_force(force, dpsi, dphi, c_i, c_j, L, Vt, sign):
     if force == "gradqf":
         dG = G / Ga / L
         return Ga, (z, z, -dG, dG)
+    if force == "mqf":
+        # d(phi~) = dphi - sign*Vt*[ln(1 + n0/c_j) - ln(1 + n0/c_i)]: the
+        # quasi-Fermi gradient where c >> n0, the field where c << n0, smooth
+        # in psi, phi and c on the edge (no |.| blend, no density weight).
+        c0 = VSAT_MQF_DENSITY
+        ci = np.maximum(c_i, 1e-100)      # not 1e-300: n0/c must not overflow (n = 0 on oxide nodes)
+        cj = np.maximum(c_j, 1e-100)
+        D = dphi - sign * Vt * (np.log1p(c0 / cj) - np.log1p(c0 / ci))
+        G = D / L
+        Ga = np.sqrt(G ** 2 + E_SMOOTH ** 2)
+        dG = G / Ga / L
+        ai, aj = c0 / (ci + c0), c0 / (cj + c0)
+        return Ga, (-dG * ai, dG * aj, -dG * (1.0 - ai), dG * (1.0 - aj))
     c = 0.5 * (c_i + c_j)
     w = 1.0 / (1.0 + (VSAT_REF_DENSITY / np.maximum(c, 1e-300)) ** 2)
     dw_dc = 2.0 * w * (1.0 - w) / np.maximum(c, 1e-300)
@@ -1037,6 +1055,13 @@ def poisson_solve(mesh, mat, psi, phin, phip, is_contact, psi_bc, poisson_scale,
     return psi, it
 
 
+# Near-solution full Newton step (see the line search in _run_newton).
+NEAR_FULL_STEP = True
+NEAR_PSI = 1e-5          # V: the correction's largest psi move
+NEAR_DENS = 1e-2         # its largest relative density change
+NEAR_GROW = 1e3          # largest merit rise a near-solution full step may cause
+
+
 def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50, verbose=False,
                      psi_init=None, phin_init=None, phip_init=None,
                      psi_bc_override=None, phin_bc_override=None, phip_bc_override=None,
@@ -1161,7 +1186,7 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     band shift. The solve is converged only when Newton is converged and the
     last corrector changed Lambda by less than quantum_tol. One Newton solve
     per bias point instead of an outer loop of solves."""
-    if vsat_warmup and vsat_force(velocity_saturation) in ("hybrid", "gradqf"):
+    if vsat_warmup and vsat_force(velocity_saturation) in ("hybrid", "gradqf", "mqf"):
         # A quasi-Fermi force can derail Newton from a poor start: a new
         # contact bias enters as a jump of phin/phip across the first edge
         # at the contact (0.05 V over 0.5 nm ~ 1e6 V/cm), the force reads
@@ -1491,12 +1516,25 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             # n+ node and a depleted channel node alike.
             step = 1.0
             accepted = False
+            # Near the solution (the correction already moves psi < NEAR_PSI
+            # and every density < NEAR_DENS relative) the full Newton step is
+            # taken unless the merit grows more than NEAR_GROW x - Sentaurus'
+            # default (undamped Newton, divergence only on a large residual
+            # rise). The monotone line search cut such steps to 1/16-1/32:
+            # the row-scaled merit rises on the O(delta^2) error of a few
+            # degenerate rows while the update is already 1e-9 V, and the
+            # walk's near-threshold steps crawled to the 15-iteration cap
+            # (FinFET / nanosheet, DEVELOPMENT_LOG 75).
+            near = NEAR_FULL_STEP and max_dpsi < NEAR_PSI and max(dn_rel, dp_rel) < NEAR_DENS
             for _ in range(20):
                 U_try = _project(U + step * delta)
                 F_try = _residual(U_try, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
                                    poisson_scale, cont_scale, edge_mask, velocity_saturation, generation, qs=qs)
                 merit_try = np.linalg.norm(row_scale * F_try)
                 if np.isfinite(merit_try) and merit_try < merit * (1 - 1e-4 * step):
+                    accepted = True
+                    break
+                if near and step == 1.0 and np.isfinite(merit_try) and merit_try < NEAR_GROW * merit:
                     accepted = True
                     break
                 step *= 0.5
