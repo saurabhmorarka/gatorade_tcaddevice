@@ -153,10 +153,22 @@ the whole comparison batch is `scripts/realistic_profile/all_runs.sh`.
 Nanosheet sheet lengths become 25 / 26 / 27-28 nm, top to bottom. NMOS,
 octree, hybrid vsat, Vds 0.05 / 0.7 V (DEVELOPMENT_LOG 79):
 
-FINFET_NS_TABLE
+| | FinFET ideal | FinFET realistic | nanosheet ideal | nanosheet realistic |
+|---|---|---|---|---|
+| Vt lin -> sat (V) | 0.202 -> 0.150 | 0.205 -> 0.150 | 0.209 -> 0.177 | 0.218 -> 0.187 |
+| DIBL (mV/V) | 79 | 85 | 49 | 47 |
+| Ion at Vgs 0.8 V (uA/um) | 1005 | 999 | 1109 | 1048 |
+| Ioff (A/um) | 3.7e-7 | 5.5e-7 | 2.1e-8 | 1.3e-8 |
+| Newton its (Vds 0.05 + 0.7) | 158 + 176 | 151 + 184 | 159 + 204 | 184 + 174 |
+| full I-V | 160 s | 466 s | 512 s | 424 s |
 
-The FinFET history costs more with the 0.25 nm z voxel; the I-V cost is the
-same order. SS is the fast-vsat value (DEVELOPMENT_LOG 75).
+- FinFET: the wider fin base raises Ioff by 50% and DIBL by 6 mV/V; Ion is
+  within 1%. The 0.25 nm z voxel makes the mesh larger (120k nodes) and each
+  Newton iteration about 3x more expensive, so the I-V costs 466 s.
+- Nanosheet: the longer bottom sheet raises Vt by 10 mV and cuts Ioff by 37%
+  and Ion by 5%.
+- The realistic FinFET could not converge at Vds 0.7 V past Vgs 0.765 V
+  until the contact-edge velocity-saturation fix (DEVELOPMENT_LOG 80).
 
 ## Electrical results
 

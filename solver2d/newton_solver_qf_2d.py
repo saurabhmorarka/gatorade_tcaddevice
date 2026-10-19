@@ -38,6 +38,7 @@ convention that doesn't generalize to an arbitrary edge count without
 being rebuilt anyway, so heterojunction-in-2D support is left as future
 work rather than force-fitting MaterialField here.
 """
+import os
 import warnings
 import weakref
 
@@ -406,6 +407,17 @@ VSAT_MQF_DENSITY = 1.0e10
 # Newton iterations allowed to a quasi-Fermi-force solve from the given start
 # before falling back to the edge-field warm-up (newton_solve_2d).
 VSAT_DIRECT_MAXITER = 15
+# Edges with a contact node at either end (ohmic or Schottky) take the edge
+# field as the driving force, whatever force is chosen - the Sentaurus
+# default ("at contact elements the field replaces grad phi", DEVELOPMENT_LOG
+# 75). With a quasi-Fermi force, an edge feeding a contact node that depletes
+# (a Schottky node inside its barrier) saturates on its own phi drop: its
+# current ~ q n vsat E/|grad phi| FALLS as the drop grows, and once the
+# contact sink asks more than that maximum there is no solution - the
+# realistic FinFET's Vds = 0.7 V walk stopped dead at Vgs 0.7654 V
+# (DEVELOPMENT_LOG 80). The field does not depend on phi, so the supply is
+# monotone. TCAD_VSAT_CONTACT_FIELD=0 turns it off (A/B runs).
+VSAT_CONTACT_FIELD = os.environ.get("TCAD_VSAT_CONTACT_FIELD", "1") != "0"
 
 
 def vsat_force(velocity_saturation):
@@ -469,6 +481,19 @@ def _edge_force(force, dpsi, dphi, c_i, c_j, L, Vt, sign):
     return F, (-dE + sign * k * c_i, dE + sign * k * c_j, -dG - sign * k * c_i, dG - sign * k * c_j)
 
 
+def _contact_edges(mesh):
+    """(E,) mask: edges with a contact-boundary node (any contact, ohmic or
+    Schottky) at either end."""
+    def build():
+        is_c = np.zeros(len(mesh.points), bool)
+        if getattr(mesh, "boundary_bc_type", None) is None or not len(mesh.boundary_bc_type):
+            return np.zeros(len(mesh.edges), bool)
+        bc = np.array(mesh.boundary_bc_type)
+        is_c[np.asarray(mesh.boundary_point_index)[np.char.startswith(bc.astype(str), "contact:")]] = True
+        return is_c[mesh.edges[:, 0]] | is_c[mesh.edges[:, 1]]
+    return _mesh_cached(mesh, "contact_edges", build)
+
+
 def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phin=None, phip=None):
     """Per-edge (mu_n_e, mu_p_e, dmu_n, dmu_p); dmu_* is None without
     velocity saturation, else the 4 partials (d/dpsi_i, d/dpsi_j,
@@ -511,6 +536,13 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
         phin = phip = np.zeros_like(psi)
     Fn, dFn = _edge_force(force, dpsi, phin[jj] - phin[ii], n[ii], n[jj], L, mat.Vt, +1.0)
     Fp, dFp = _edge_force(force, dpsi, phip[jj] - phip[ii], p[ii], p[jj], L, mat.Vt, -1.0)
+    ce = _contact_edges(mesh) if force != "efield" and VSAT_CONTACT_FIELD else None
+    if ce is not None and ce.any():
+        # the edge field on edges touching a contact node (VSAT_CONTACT_FIELD)
+        Ea, dEa = _edge_force("efield", dpsi, dpsi, None, None, L, mat.Vt, 1.0)
+        Fn, Fp = np.where(ce, Ea, Fn), np.where(ce, Ea, Fp)
+        dFn = tuple(np.where(ce, a, b) for a, b in zip(dEa, dFn))
+        dFp = tuple(np.where(ce, a, b) for a, b in zip(dEa, dFp))
     vsat_n, vsat_p = _edge_vsat(mesh, mat)
     mu_n, dmu_n_dF = mobility_field(Fn, mu_n0, vsat_n, mat.beta_n)
     mu_p, dmu_p_dF = mobility_field(Fp, mu_p0, vsat_p, mat.beta_p)

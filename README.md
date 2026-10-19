@@ -42,6 +42,13 @@ force. It gives the same Ion, Vt and DIBL as the fast default, but different
 near-threshold and deep-off currents (measured in the details), at 2.5-3x the
 run time.
 
+Edges into a contact now use the edge field as the velocity-saturation
+force (the Sentaurus default). With the quasi-Fermi force, a depleted Schottky node at the drain
+corner had no solution past Vgs 0.765 V: the realistic FinFET at Vds 0.7 V
+stopped there. It now converges at every point (466 s instead of 1857 s), and
+the FinFET/nanosheet Id moves by at most 0.1% (the tiny contact-dominated
+test devices by up to 10% in the linear region).
+
 ## FinFET and nanosheet flows, 2 nm-node class ([details](docs/finfet_nanosheet.md))
 
 Two new virtual-fab templates at a 48 nm contacted poly pitch and a 15 nm

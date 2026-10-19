@@ -62,6 +62,30 @@ residual rises a lot. The fix follows it: once the correction is small
 more than 1000x. The convergence tests are unchanged, so the converged
 answer is the same: the currents match to 6e-7.
 
+## Edges into a contact use the edge field (both modes)
+
+On an edge with a contact node at either end (ohmic or Schottky), the
+driving force is the edge field |Δψ|/L, whatever force is chosen
+(`VSAT_CONTACT_FIELD`, DEVELOPMENT_LOG 80). This is the Sentaurus default
+("at contact elements the field replaces grad φ").
+
+Why: the realistic FinFET at Vds 0.7 V stopped dead at Vgs 0.7654 V; halving
+the gate step to 1e-5 V did not help. The residual sat on one Schottky node
+at the drain contact's corner nearest the gate. That node lies inside the
+contact's depletion (n 4e15 in a 7e20 epi), so the edges feeding it carry a
+large φn drop (0.15 V over 0.25 nm) and saturate on it. With a quasi-Fermi
+force, such an edge's current is about q·n·vsat·E/|∇φ|: it *falls* as the
+drop grows. Once the contact sink asks for more than that maximum, there is
+no solution: a fold, not a step-size problem. The edge field does not depend
+on φ, so the supply is monotone and the contact always balances.
+
+Effect: the failing step converges in 5 iterations. Full I-V, Id change
+against the old runs: FinFET ideal ≤ 0.03%, nanosheet ideal ≤ 0.008%,
+nanosheet realistic ≤ 0.04%, FinFET realistic ≤ 0.1%, and the realistic FinFET
+now has its Vgs 0.8 V point (466 s instead of 1857 s). The tiny test devices,
+whose contacts sit a few nm from the channel, move more: 3D planar tiny
+Id_lin -3.5% / Id_off -7.5%, tiny Schottky device Id lin -10% / sat -0.3%.
+
 ## What else was tried (rejected)
 
 - **Newton updates applied to the densities** (Genius/DEVSIM style), instead of to the quasi-Fermi levels.

@@ -275,7 +275,7 @@ class TestSchottky3D(unittest.TestCase):
     # Golden drain currents (A, full device) with Schottky contacts - captured
     # 2026-10-12 with the recessed, implanted contacts, after checking them
     # against the ohmic device (lin 0.43x, sat 0.75x: DEVELOPMENT_LOG 63).
-    GOLDEN = {"lin": 6.055e-06, "sat": 2.656e-05}
+    GOLDEN = {"lin": 5.439e-06, "sat": 2.649e-05}     # contact edges take the field (DEVELOPMENT_LOG 80): lin -10%, sat -0.3%
     RTOL = 5e-3             # linear-solver backend drift (venv SuperLU vs conda PETSc)
 
     @classmethod
