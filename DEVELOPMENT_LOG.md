@@ -6569,3 +6569,57 @@ Tests: 13.
 - 3D on the octree;
 - piezo mobility.
 - Runtime: the 2D target is < 2 s (AMG / reuse of the factorization between steps with unchanged labels).
+
+## 77. Process stress in 3D through the fab flows; FinFET gate-last (RMG)
+
+Branch `stress-3d` (from `stress-2d`). The user asked for:
+- 3D stress on the FinFET and nanosheet;
+- every major stress step solved;
+- the stress solve as fast as possible (later: layouts with several transistors);
+- the FinFET flow fixed to poly / dummy-gate pull / RMG. The pull is where the channel takes the most stress, and the metal gate keeps it.
+
+**FinFET gate-last** (`fab/templates.py`):
+- `gate_process: "last"` (default) or `"first"`;
+- dummy poly fill and etch, then the shared `_replacement_gate` after the ILD: CMP to the gate, poly pull, conformal HK (it lines the trench and wraps the fin), TiN fill, gate CMP, ILD cap, ILD CMP;
+- the nanosheet uses the same helper, with its channel release.
+- The structure check relabels 6 one-voxel flakes where the trench-wall HK meets the fin-edge HK. The labels the mesh sees are clean, as in planar; the FinFET tests accept flakes, at most 12. test_fab 41 OK.
+
+Electrical, NMOS (octree, fast vsat):
+
+| | gate-first | gate-last |
+|---|---|---|
+| Vt lin / sat | 0.206 / 0.165 V | 0.202 / 0.150 V |
+| DIBL | 63 mV/V | 79 mV/V |
+| Ion | 1042 | 1009 uA/um |
+| Ioff | 2.0e-7 | 3.6e-7 A/um |
+
+The HK on the trench walls leaves 11 nm of metal in a 15 nm trench. Lg stays the trench width; an option for a 15 nm metal gate is offered to the user.
+
+**3D solver** (`mechanics/fe3d.py`):
+- Q1 hex per voxel, 2x2x2 Gauss, the same history rules as 2D;
+- void voxels are not unknowns, so deposit-then-strip returns to exactly 0 (1e-15);
+- the stiffness is assembled in 3x3 node blocks from the per-material element tables (unique pair keys + bincount);
+- PETSc CG + GAMG with coordinates (rigid-body modes): 13-15 iterations at any size;
+- 0.19M unknowns 2.4 s, 0.74M (4 devices) 9.6 s: linear;
+- lazy solves: forces are queued and solved before a birth into an unsettled structure, before an anneal, and at the end of a step (or only when forced, `--fast`).
+
+**Fab driver** (`mechanics/fab_stress.py`):
+- snapshots every fab step (on_step) and coarsens 0.5 -> 1 nm. A cell is solid if at least half its children are solid, labelled by the commonest solid region, ties to the older region. Plain majority with void flickered: 4 SiGe / 4 void read as void, then as SiGe after the ILD filled the void, a false SiGe birth;
+- stressors by region name (SiGe S/D x 0.5, superlattice x 0.30, TiN gate and contacts -1 GPa, STI and spacer optional);
+- channel = Si within 1.5 nm of the final gate dielectric under the gate, per sheet.
+
+**Results** (sxx, MPa):
+- FinFET PMOS gate-last: epi -1313, poly pull -2104, TiN fill -1896, final -1903 (gate-first -819). SiGe -2090, gate +211; piezo +121%. 12 solves, 99 s (`--fast` 6 solves, 49 s).
+- Nanosheet PMOS: stack etch sets the sheets +821 in z, S/D recess +867, epi -322, pull -756, channel release -1883, TiN -1693, final -1637 (sheets -1726/-1733/-1743, piezo +115..+124%). 24 solves, 335 s (`--fast` 14 solves, 179 s, identical final).
+
+**Tests** (testsuite/test_mechanics.py, 17):
+- 3D film closed form and exact strip;
+- SiGe biaxial;
+- lazy == stepwise;
+- a z-uniform 3D slab equals the 2D plane-strain solve (2e-6, the 2D soft void).
+
+**Also this session:**
+- The FinFET SS question: fast (hybrid) vsat SS 62 is an artifact. No-vsat and exact both give ~74 mV/dec. The hybrid switches force at 1e16 inside the off-state channel, and the kink makes the steepest segment 62.
+- Vt, DIBL and Ion agree between modes from Vgs 0.15 V up.
+- Subthreshold current with either force is 4-8x below no-vsat at Vds 0.05: the velocity cap at the barrier top.
+- The exact mode's cost is intrinsic: the near-solution full step did not change its iterations (1097 vs 1098).

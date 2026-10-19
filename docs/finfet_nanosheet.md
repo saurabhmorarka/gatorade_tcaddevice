@@ -40,13 +40,14 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
 
 ## The flows
 
-**FinFET** (`template: finfet`, bulk, gate-first):
+**FinFET** (`template: finfet`, bulk, replacement metal gate by default;
+`gate_process: first` gives the old gate-first flow, DEVELOPMENT_LOG 77):
 1. substrate; fin etch 70 nm (50 nm fin + 20 nm in the STI)
 2. STI fill and CMP; punch-through stopper implanted through the STI,
    peaked at the fin base
 3. fin reveal: STI recess by 50 nm
-4. gate dielectric (conformal), TiN fill, gate etch, dielectric strip
-   (everything exposed, the fin side walls included)
+4. dummy poly gate: fill, gate etch (gate-first: gate dielectric, TiN fill,
+   gate etch, dielectric strip)
 5. SiN spacer; spacer etch that clears the fin side walls outside the
    gate + spacer footprint
 6. S/D fin recess, stopping 5 nm above the STI, so the epi stays above the
@@ -54,8 +55,20 @@ effective width (2 H_fin + W_fin = 105 nm per fin; 2 x 3 x (25 + 5) =
 7. selective epi from the exposed Si, capped 5 nm above the fin top: an
    NMOS blob or a PMOS {111} diamond ([S/D epi shapes](sd_epi.md)), with
    its analytic in-situ doping (below)
-8. ILD, CMP, TiN trench contacts: a flat trench floor at the fin top and
-   a round-bottomed plug into the epi
+8. ILD, CMP to the dummy gate, poly pull, HK lining the trench and
+   wrapping the fin, TiN fill, gate CMP, ILD cap
+9. TiN trench contacts: a flat trench floor at the fin top and a
+   round-bottomed plug into the epi
+
+With the HK lining the 15 nm trench, the metal over the fin is 11 nm long.
+Gate-last NMOS vs the old gate-first (octree, fast vsat):
+
+| | gate-first | gate-last |
+|---|---|---|
+| Vt lin / sat | 0.206 / 0.165 V | 0.202 / 0.150 V |
+| DIBL | 63 mV/V | 79 mV/V |
+| Ion | 1042 uA/um | 1009 uA/um |
+| Ioff | 2.0e-7 A/um | 3.6e-7 A/um |
 
 **Nanosheet** (`template: nanosheet`, replacement metal gate):
 1. substrate, then the superlattice: 3 x (SiGe 10 nm, Si 5 nm); with

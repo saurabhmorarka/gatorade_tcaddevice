@@ -191,5 +191,91 @@ class TestPiezo(unittest.TestCase):
         self.assertLess(mobility_change([0.1, 0, 0, 0, 0, 0], "p"), 0)
 
 
+class TestHistory3D(unittest.TestCase):
+    """mechanics/fe3d.py (direct solves here: the .venv has no PETSc)."""
+
+    def _film(self, film_mat, f, R=el.FRAME_001_110):
+        from mechanics.fe3d import Grid3D, StressHistory3D
+        g = Grid3D((4, 24, 3), 1.0, (0, -6, 0))
+        sh = StressHistory3D(g, {1: el.material("Si", R), 2: film_mat})
+        X, Y, Z = g.centres()
+        lab = np.where(Y > 0, 1, 0)
+        sh.step("sub", lab)
+        lab2 = np.where((Y < 0) & (Y > -4), 2, lab)
+        sh.step("film", lab2, stressors={"f": (lab2 == 2, [f, f, f, 0, 0, 0])})
+        return sh.element_stress().reshape(g.shape + (6,)), sh, lab
+
+    def test_film_closed_form(self):
+        E, nu, e = 70.0, 0.17, 0.01
+        s, sh, lab = self._film(el.material("SiO2"), e)
+        film = s[:, 2:6]
+        np.testing.assert_allclose(film[..., 0], -E * e / (1 - nu), rtol=1e-9)
+        np.testing.assert_allclose(film[..., 2], -E * e / (1 - nu), rtol=1e-9)
+        self.assertLess(np.abs(s[:, 6:]).max(), 1e-9)
+        sh.step("strip", lab)                       # no void stiffness in 3D: back to exactly 0
+        self.assertLess(np.abs(sh.element_stress()).max(), 1e-12)
+
+    def test_sige_biaxial(self):
+        x = 0.3
+        f = el.sige_mismatch(x)
+        c11, c12 = [(1 - x) * a + x * b for a, b in ((165.7, 128.5), (63.9, 48.3))]
+        s, _, _ = self._film(el.material("SiGe", x_ge=x), f)
+        np.testing.assert_allclose(s[:, 2:6, :, 0], -(c11 + c12 - 2 * c12 ** 2 / c11) * f, rtol=1e-9)
+
+    def _patterned(self, flush):
+        from mechanics.fe3d import Grid3D, StressHistory3D
+        g = Grid3D((16, 20, 4), 1.0, (0, -6, 0))
+        sh = StressHistory3D(g, {1: el.material("Si"), 2: el.material("SiGe", x_ge=0.5), 3: el.material("Poly")})
+        X, Y, Z = g.centres()
+        lab = np.where(Y > 0, 1, 0)
+        sh.step("sub", lab, flush=flush)
+        lab = lab.copy()
+        lab[(Y < 0) & (Y > -5) & (np.abs(X - 8) < 3)] = 3                    # a "gate"
+        sh.step("gate", lab, flush=flush)
+        lab[(Y > 0) & (Y < 5) & (np.abs(X - 8) > 4)] = 0
+        sh.step("recess", lab, flush=flush)
+        f = el.sige_mismatch(0.5)
+        lab[(Y > -2) & (Y < 5) & (np.abs(X - 8) > 4)] = 2
+        sh.step("epi", lab, stressors={"sige": (lab == 2, [f, f, f, 0, 0, 0])}, flush=flush)
+        lab[lab == 3] = 0
+        sh.step("gate pull", lab, flush=flush)
+        lab[(Y < -3)] = 0
+        sh.step("top cut", lab, flush=flush)
+        sh.flush()
+        return sh, g, X, Y
+
+    def test_lazy_equals_stepwise(self):
+        """Solving only where needed (flush=False) gives the same final
+        stress as solving after every step."""
+        a, g, X, Y = self._patterned(True)
+        b, *_ = self._patterned(False)
+        np.testing.assert_allclose(a.element_stress(), b.element_stress(), atol=1e-10)
+        self.assertLess(b.n_solves, a.n_solves)
+        ch = ((np.abs(X - 8) < 2) & (Y > 0) & (Y < 2))
+        self.assertLess(a.probe(ch)[0][0], -0.5)                            # SiGe S/D compress the channel
+
+    def test_z_uniform_slab_matches_2d(self):
+        """With rollers on both z walls and a z-uniform structure the 3D
+        solution is plane strain: it must equal the 2D solver's."""
+        from mechanics.fe3d import Grid3D, StressHistory3D
+        mats = {1: el.material("Si"), 2: el.material("SiGe", x_ge=0.5)}
+        f = el.sige_mismatch(0.5)
+        g2 = Grid2D(16, 20, 1.0, y0=-4.0)
+        X2, Y2 = g2.coords()
+        g3 = Grid3D((16, 20, 2), 1.0, (0, -4, 0))
+        X3, Y3, Z3 = g3.centres()
+        out = []
+        for X, Y, sh in ((X2, Y2, StressHistory2D(g2, mats)), (X3, Y3, StressHistory3D(g3, mats))):
+            lab = np.where(Y > 0, 1, 0)
+            sh.step("sub", lab)
+            lab = lab.copy()
+            lab[(Y > -2) & (Y < 6) & (np.abs(X - 8) > 4)] = 2
+            sh.step("epi", lab, stressors={"s": (lab == 2, [f, f, f, 0, 0, 0])})
+            m = (np.abs(X - 8) < 2) & (Y > 0) & (Y < 3)
+            out.append(sh.probe(m)[0])
+        # 2e-6: the 2D solver's void pixels carry 1e-7 x Si stiffness; 3D has no void unknowns
+        np.testing.assert_allclose(out[1], out[0], rtol=1e-5, atol=1e-9)
+
+
 if __name__ == "__main__":
     unittest.main()

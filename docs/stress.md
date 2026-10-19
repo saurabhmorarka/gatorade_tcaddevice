@@ -1,4 +1,4 @@
-# Process stress, 2D (phase 1)
+# Process stress (2D and 3D)
 
 [Back to the README](../README.md)
 
@@ -125,10 +125,98 @@ Phase 4 will put the full tensor into the device solver.
 - Two stressors switched on together equal the sum of each alone.
 - The memorization sequence (cap, anneal, strip) leaves a stress of the opposite sign to the one under the cap.
 
+## 3D: FinFET and nanosheet through their real fab flows
+
+```bash
+python3 -m mechanics.fab_stress configs/fab_finfet_pmos.yaml configs/fab_nanosheet_pmos.yaml
+python3 -m mechanics.fab_stress configs/fab_nanosheet_pmos.yaml --fast      # same final stress, fewer solves
+```
+
+`mechanics/fab_stress.py` snapshots every step of the fab flow
+(`fab.flow.build`). It coarsens each snapshot to 1 nm and runs the 3D
+history solver `mechanics/fe3d.py` on those voxels:
+- one hex element per voxel, with the same birth, death and anneal rules and the same per-stressor split as 2D;
+- side walls are symmetry planes, i.e. an infinite array of identical devices.
+
+Void voxels are not in the system at all. The solve is conjugate gradients
+with PETSc's algebraic multigrid (rigid-body modes from the node
+coordinates), which converges in 13-15 iterations whatever the size.
+
+**Speed.** A solve takes 2.4 s at 0.19M unknowns and 9.6 s for a row of
+four devices at 0.74M, so cost is linear in size. A step costs nothing
+unless it changes the stress:
+- a stressor is born, or stressed material is removed;
+- masks, doping and unstressed depositions are free.
+
+`--fast` solves only when the physics forces it: before material is born
+into a structure with unsolved forces, and at the end. It gives the same
+final stress, because elastic removals commute until the next birth:
+
+| | teaching (every stress-changing step) | `--fast` |
+|---|---|---|
+| FinFET PMOS (0.56M unknowns, 34 steps) | 12 solves, 99 s | 6 solves, 49 s |
+| nanosheet PMOS (1.0M unknowns, 45 steps) | 24 solves, 335 s | 14 solves, 179 s |
+
+**Stressors**, from the fab's region names (`--set` overrides):
+
+| region | input |
+|---|---|
+| S/D SiGe epi | mismatch at x = 0.5 (1.97%) |
+| nanosheet SiGe superlattice | mismatch at x = 0.30; born strained, removed at channel release |
+| TiN gate | −1.0 GPa |
+| TiN contacts | −1.0 GPa |
+| STI, spacers | optional (`sti_GPa`, `spacer_GPa`) |
+
+**Channel.** The silicon within 1.5 nm of the final gate dielectric, under
+the gate, reported per sheet for the nanosheet.
+
+### FinFET PMOS (gate-last), channel σxx
+
+| step | σxx (MPa) |
+|---|---|
+| SiGe S/D epi, poly dummy gate holding the fin | −1313 |
+| **dummy poly pull** (nothing holds the fin) | **−2104** |
+| HK + TiN fill | −1896 (the TiN takes back about 200) |
+| final (contacts) | −1903 |
+
+The gate-first flow (`gate_process: first`), where the TiN gate is there
+from the start, ends at −819 MPa: gate-last more than doubles the channel
+compression. By stressor at the end:
+
+| stressor | σxx (MPa) | dμ/μ (linear piezo) |
+|---|---|---|
+| SiGe S/D | −2090 | +150% |
+| gate metal | +211 | −31% |
+| contacts | −24 | +2% |
+| total | −1903 | +121% |
+
+<p align="center"><img src="img/stress3d_finfet_pmos.png" width="100%"></p>
+
+### Nanosheet PMOS: the superlattice and the channel release
+
+| step | σxx | σyy | σzz |
+|---|---|---|---|
+| superlattice grown (Si sheets on the Si lattice) | 0 | 0 | 0 |
+| stack etch: the SiGe relaxes sideways | +34 | −48 | **+821** |
+| S/D recess: the stack is cut | +867 | +22 | +815 |
+| SiGe S/D epi | −322 | +899 | +935 |
+| dummy gate pull | −756 | +618 | +733 |
+| **channel release** (the SiGe layers removed) | **−1883** | −3 | +79 |
+| TiN fill | −1693 | −47 | +2 |
+| final | −1637 | −65 | −11 |
+
+Per sheet at the end: σxx −1726, −1733 and −1743 MPa, from top to bottom
+(linear piezo +115 to +124%). The channel release is the largest single
+step. The compressed SiGe layers were holding the sheets in tension. Once
+they are gone, the S/D epi pushes on free-standing sheets.
+
+<p align="center"><img src="img/stress3d_nanosheet_pmos.png" width="100%"></p>
+
 ## Known limits and next phases
 
-- 2D plane strain only. FinFET and nanosheet cross-sections are 3D problems, which are phase 3 (octree hexes).
-- The geometry here is drawn by `mechanics/planar_flow.py`, not yet taken from `fab/` step snapshots. Hooking `fab/flow.py`'s `run_step` is next.
+- 3D runs on a uniform 1 nm voxel grid. An interface-refined octree, as for the device mesh, would cut unknowns for big layouts. 1 nm vs 0.5 nm convergence is not checked yet.
+- The superlattice Ge fraction (0.30) and the film stresses are rough defaults.
+- The 2D planar flows are drawn by `mechanics/planar_flow.py`. The planar fab template is still gate-first, with no SiGe S/D.
 - Dislocations are pure edge, with the line along the width, and the cut is
   vertical. Inclined {111} cuts work in the code (any `cut_dir`) but are not
   in the flow yet. The core position is a user input; there is no
