@@ -55,7 +55,8 @@ Channel stress is the mean over the top 4 nm of the channel, in MPa (+ tensile):
 |---|---|---|---|
 | PMOS SiGe, gate-first | −897 | +1180 | +371 |
 | PMOS SiGe, gate-last (RMG) | −2674 | −106 | −205 |
-| NMOS SMT (poly gate) | +113 | −209 | −69 |
+| NMOS SMT (poly gate), cap only | +113 | −209 | −69 |
+| NMOS SMT + edge dislocations | +706 | −343 | −80 |
 
 **The poly pull.** In the gate-last flow, channel compression reaches −1455 MPa
 after ILD CMP. Pulling the dummy poly takes it to −2895 MPa: the poly had
@@ -71,6 +72,21 @@ With the gate pulled, the channel surface is free and σyy drops to about 0.
 capped with a +1.5 GPa nitride. The anneal lets them recrystallize
 stress-free in their capped shape, and the cap is then stripped. The
 channel keeps +203 MPa of tension from the cap alone, after the cap is gone.
+
+**SMT dislocations.** During that anneal, an edge dislocation forms in each
+S/D at its gate-side edge. Each one is modelled as a Volterra cut
+(`mechanics/dislocation.py`):
+- b = a/2<110> = 0.384 nm, along the channel;
+- a half plane is missing between the core (20 nm deep) and the surface.
+
+The two dislocations add +594 MPa of channel tension, the largest single
+term, for a +706 MPa total. This is the big NMOS boost of SMT. The same
+tension in a PMOS would cancel its compressive gain. Turn them off with
+`--set smt_disl=0`, or move the core with `--set disl_depth=...`.
+
+The Volterra field is checked against the analytic edge dislocation (Hirth &
+Lothe), with σyy and σxy within 20% at 10-20 nm from the core. σxx is offset
+by the held side walls, about E·b/L.
 
 <p align="center"><img src="img/stress_nmos_smt.png" width="100%"></p>
 
@@ -90,6 +106,9 @@ channel keeps +203 MPa of tension from the cap alone, after the cap is gone.
 
 - 2D plane strain only. FinFET and nanosheet cross-sections are 3D problems, which are phase 3 (octree hexes).
 - The geometry here is drawn by `mechanics/planar_flow.py`, not yet taken from `fab/` step snapshots. Hooking `fab/flow.py`'s `run_step` is next.
-- A dislocation stressor (SMT edge dislocations), as a Volterra cut, is phase 2.
+- Dislocations are pure edge, with the line along the width, and the cut is
+  vertical. Inclined {111} cuts work in the code (any `cut_dir`) but are not
+  in the flow yet. The core position is a user input; there is no
+  nucleation model.
 - Piezoresistive mobility (phase 4) and the per-edge Δμ/μ = −Π:σ will use these stress fields.
 - The magnitudes are high: a dense array, 50% Ge, plane strain, and liner and film values that are rough. The trends and their sign by direction are the teaching point.

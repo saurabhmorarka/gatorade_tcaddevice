@@ -147,5 +147,37 @@ class TestHistory(unittest.TestCase):
         self.assertLess(np.sign(kept) * np.sign(under_cap), 0)
 
 
+class TestDislocation(unittest.TestCase):
+    def test_edge_dislocation_matches_volterra_field(self):
+        """Volterra cut vs the analytic infinite-medium edge dislocation
+        (Hirth & Lothe), isotropic, 10-20 nm from the core. sigma_yy and
+        sigma_xy only: the side walls are held, which adds a near-uniform
+        sigma_xx (inserting b into a constrained box), ~E b / L."""
+        from mechanics.dislocation import edge_dislocation, edge_dislocation_infinite
+        E, nu, b, L = 100.0, 0.25, 0.4, 200.0
+        n = int(L)
+        g = Grid2D(n, n, 1.0, -L / 2, -L / 2)
+        sh = StressHistory2D(g, {1: el.ElasticMaterial("iso", el.isotropic_C(E, nu))})
+        lab = np.ones((n, n), np.int32)
+        sh.step("bulk", lab)
+        mask, eps = edge_dislocation(g, (0.0, 0.0), (0.0, -1.0), (b, 0.0), labels=lab)
+        sh.step("disl", lab, stressors={"d": (mask, eps)})
+        s = sh.total().reshape(n, n, 6)
+        X, Y = g.coords()
+        for x, y in [(15.5, 0.5), (0.5, 15.5), (12.5, -7.5), (-11.5, -7.5), (8.5, 3.5)]:
+            j, i = int(y + L / 2), int(x + L / 2)
+            ax, ay, axy = edge_dislocation_infinite(X[j, i], -Y[j, i], b, E, nu)   # textbook y is up
+            for fe, an in ((s[j, i, 1], ay), (s[j, i, 5], -axy)):
+                if abs(an) > 0.05:
+                    self.assertLess(abs(fe - an), 0.2 * abs(an))
+
+    def test_smt_dislocation_tension(self):
+        """Missing half planes at the S/D edges put the NMOS channel in
+        tension (the SMT dislocation boost)."""
+        from mechanics.planar_flow import DEFAULTS, run_flow
+        with_d = run_flow("nmos_smt", par=dict(DEFAULTS, smt_disl=1.0)).rows[-1][2]
+        self.assertGreater(with_d["dislocations"][0], 200.0)    # MPa
+
+
 if __name__ == "__main__":
     unittest.main()

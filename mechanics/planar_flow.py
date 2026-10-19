@@ -22,6 +22,10 @@ be changed with --set NAME=VALUE):
   gate_GPa     -1.0    TiN metal gate
   contact_GPa  +1.0    W contact fill
   cap_GPa      +1.5    SMT cap nitride (NMOS)
+  smt_disl      1      SMT edge dislocations (0 = none): one per S/D at the
+                       gate-side edge, b = a/2<110> = 0.384 nm, a half plane
+                       missing above the core (mechanics/dislocation.py)
+  disl_depth   20      core depth (nm)
 Isotropic films get eps* from their stress (mechanics.elastic.film_eigenstrain);
 SiGe gets the lattice mismatch; Si/SiGe are anisotropic, (001) wafer,
 <110> channel.
@@ -42,7 +46,7 @@ from mechanics.fe2d import Grid2D, StressHistory2D
 GEOM = dict(h=1.0, Lg=30, tox=2, gate_h=40, spacer=8, sd=44, sti=20, sti_depth=80,
             recess=40, raise_=6, liner=10, contact_w=16, hk=2, y_top=-80, y_bot=160, smt_depth=25)
 DEFAULTS = dict(sige_x=0.5, sti_GPa=-0.3, liner_pmos_GPa=-2.5, liner_nmos_GPa=1.5,
-                gate_GPa=-1.0, contact_GPa=1.0, cap_GPa=1.5)
+                gate_GPa=-1.0, contact_GPa=1.0, cap_GPa=1.5, smt_disl=1.0, disl_depth=20.0)
 
 MATS = {1: "Si", 2: "SiGe", 3: "SiO2", 4: "SiO2", 5: "Poly", 6: "Si3N4", 7: "Si3N4",
         8: "SiO2", 9: "HfO2", 10: "TiN", 11: "W", 12: "Si3N4"}
@@ -142,6 +146,20 @@ def run_flow(flow, geom=GEOM, par=DEFAULTS):
         cap = b.conformal(12, p["liner"] + 10)
         b.step("SMT nitride cap", {"SMT cap": (12, b.film(12, v["cap_GPa"]))})
         b.step("anneal: S/D + poly recrystallize", relax=(amorph, 1.0))
+        if v["smt_disl"]:
+            # SMT edge dislocations: one per S/D at the gate-side edge, core at
+            # disl_depth, a half plane (a/2<110>) missing between core and surface
+            from mechanics.dislocation import B_SI, edge_dislocation
+            msk = np.zeros(b.lab.shape, bool)
+            eps = np.zeros((b.lab.size, 6))
+            for side in (-1, 1):
+                x_d = b.xc + side * (p["Lg"] / 2 + p["spacer"]) + side * 0.5 * p["h"]
+                m, e = edge_dislocation(b.g, (x_d, v["disl_depth"]), (0.0, -1.0), (-B_SI, 0.0),
+                                        solid=(b.lab == 1))
+                msk |= m
+                eps += e
+            b.step(f"SMT dislocations (b = a/2<110>, core {v['disl_depth']:.0f} nm)",
+                   {"dislocations": (msk, eps)})
         b.lab[cap] = 0
         b.step("SMT cap strip")
     sig_l = v["liner_pmos_GPa"] if pmos else v["liner_nmos_GPa"]
