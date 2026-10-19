@@ -19,7 +19,7 @@ In 3D the FinFET and nanosheet run through their real fab flows, voxel for voxel
 - **Nanosheet:** the channel release takes it from −0.76 to −1.88 GPa. Each sheet ends at about −1.73 GPa.
 - **Bilayer PMOS epi (default):** a 5 nm Si0.8Ge0.2 seed under the 50% fill gives −1.50 GPa (FinFET) and −1.04 GPa (nanosheet); an opt-in realistic etch profile (tapered fin, slanted recess) is in [docs/finfet_nanosheet.md](docs/finfet_nanosheet.md).
 
-- **NMOS stressors (DEVELOPMENT_LOG 81):** literature-checked SMT edge dislocations, a gate-last SMT flow, tensile Si:P S/D epi, and dislocations in 3D as Volterra cuts. A planar NMOS reaches +0.65 GPa (poly gate) and +1.2 GPa (gate-last) with SMT dislocations and a tensile CESL. The dislocations are the largest term, in line with the ~0.6 to >1 GPa reported. TBDREADME
+- **NMOS stressors (DEVELOPMENT_LOG 81):** literature-checked SMT edge dislocations, a gate-last SMT flow, tensile Si:P S/D epi, and dislocations in 3D as Volterra cuts. A planar NMOS reaches +0.65 GPa (poly gate) and +1.2 GPa (gate-last) with SMT dislocations and a tensile CESL. The dislocations are the largest term, in line with the ~0.6 to >1 GPa reported. In 3D, a tensile Si:P S/D (−0.4% lattice strain, on by default) gives the NMOS FinFET +0.56 GPa and the nanosheet +0.87 GPa. Opt-in S/D dislocations (`--set sd_disl=1`) push these past 2 GPa, more than anything measured, so they are a what-if.
 
 Multigrid CG solves are linear in size. A full FinFET history takes 49 s with `--fast`.
 

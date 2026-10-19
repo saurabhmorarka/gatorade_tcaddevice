@@ -321,6 +321,12 @@ def report(res, name):
     for label, pr in rows:
         t = pr["channel"][0] * 1e3
         out.append(f"{label[:46]:46s} {t[0]:7.0f} {t[1]:7.0f} {t[2]:7.0f}")
+    names = list(rows[-1][1]["channel"][1])
+    if names:                   # the same steps, sigma_xx split by stressor (superposition)
+        out.append(f"{'sigma_xx by stressor':46s} " + " ".join(f"{s[:12]:>12s}" for s in names))
+        for label, pr in rows:
+            per = pr["channel"][1]
+            out.append(f"{label[:46]:46s} " + " ".join(f"{per[s][0] * 1e3 if s in per else 0.0:12.0f}" for s in names))
     pr = rows[-1][1]
     out.append(f"final, by stressor (channel){'':12s} {'sxx':>7s} {'syy':>7s} {'szz':>7s}   dmu/mu ({carrier}, linear piezo)")
     tot, per = pr["channel"]

@@ -412,8 +412,11 @@ x, and on a toy device (placement, sign, superposition).
 | S/D epitaxy (Si:P born strained) | +219 | +219 | – | – | – |
 | S/D dislocations (1/side, core 25 nm) | +1342 | +219 | +1123 | – | – |
 | **dummy poly pull** | **+2304** | +370 | +1934 | – | – |
-| TiN gate fill | +2507 | +365 | +1937 | +205 | – |
-| contacts (final) | **+2432** | +365 | +1878 | +205 | −16 |
+| TiN gate fill | +2507 | +370 | +1934 | +203 | – |
+| contact etch + plug (epi removed) | +2448 | +365 | +1878 | +205 | – |
+| contact fill (final) | **+2432** | +365 | +1878 | +205 | −16 |
+
+The report now prints this per-step, per-stressor σxx table for every run.
 
 The final σyy is +172 and σzz −225. Without the dislocations (the default
 run, `sd_disl=0`) the final is **+555 MPa** (σyy −4, σzz −233; linear piezo
