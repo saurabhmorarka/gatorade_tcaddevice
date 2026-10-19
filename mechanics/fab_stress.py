@@ -63,16 +63,25 @@ def snapshots(config, factor=2, log=print, fab_set=None):
             gid = names.setdefault(r.name, (len(names) + 1, r.material))[0]
             ids[lab == k] = gid
         ids = _coarsen(ids, _factors(st.grid.h, factor))
-        # a step that only relabels material born in the step before (the
-        # bilayer epi's seed carved out of the just-grown epi) is part of
-        # that birth: fold it into the previous snapshot
+        # a step that only carves a layer out of a region born in the step
+        # before (the bilayer epi's seed out of the just-grown epi: parent ->
+        # child relabels, the solid unchanged) is part of that birth: fold
+        # it into the previous snapshot
         if len(snaps) >= 2:
             prev, before = snaps[-1][1], snaps[-2][1]
             changed = ids != prev
-            if changed.any() and ((ids != 0) == (prev != 0)).all() and (before[changed] == 0).all():
-                snaps[-1] = (f"{snaps[-1][0]} + {label}", ids)
-                snapshots.grid = st.grid
-                return
+            pairs = {names[r.name][0]: names[r.parent][0] for r in st.regions
+                     if r.parent is not None and r.parent in names}
+            if changed.any() and pairs and ((ids != 0) == (prev != 0)).all():
+                fold = True
+                for child, parent in pairs.items():
+                    m = changed & (ids == child)
+                    fold &= bool((prev[m] == parent).all() and (before[m] != parent).all())
+                fold &= bool(np.isin(ids[changed], list(pairs)).all())
+                if fold:
+                    snaps[-1] = (f"{snaps[-1][0]} + {label}", ids)
+                    snapshots.grid = st.grid
+                    return
         snaps.append((label, ids))
         snapshots.grid = st.grid
 

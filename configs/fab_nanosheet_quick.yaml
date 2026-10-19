@@ -16,5 +16,5 @@ params:
   n_sheets: 1
   t_sheet: 5nm
   W_sheet: 25nm
-  t_sige: 10nm
+  t_sige: 9nm
   isolation: bdi
