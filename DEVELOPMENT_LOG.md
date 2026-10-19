@@ -6503,3 +6503,58 @@ Tests: test_fab TestEpitaxy (+5: facet angles / widths, blob, merge by
 pitch, sliver rejected, contact plug), FinFET epi shapes + PMOS merge,
 nanosheet unmerged widths; test_octree metal-staircase regression (fails
 without the fix).
+
+## 76. Process stress in 2D: elastic solver with process history (phase 1)
+
+Branch `stress-2d` (from `main` at 4f2bb5a). The user's scope:
+- fully elastic;
+- input strain or stress per stressor;
+- E and ν for every material, anisotropic tensors for Si/SiGe;
+- stressors: SiGe epi, liners, STI, metal gate, contacts;
+- stress tracked through the process steps, including the poly pull and stress memorization;
+- later: dislocations, then piezoresistive mobility.
+
+The user asked for rough literature inputs and all elastic data in the material database.
+
+**New:**
+- `core/materials.py` / `core/material_db.py`:
+  - E, ν, C11/C12/C44, lattice constant and a typical intrinsic film stress;
+  - entries for Si, Ge, SiO2, Si3N4, HfO2, Al2O3, SiON, Poly, Ti, TiN, TaN, NiSi, TiSi2, Al, W, Cu, Co;
+  - `FAB_ALIASES` from fab names (Si, SiN, HKstack, Metal);
+  - AlloyMaterial mixes the new fields.
+- `mechanics/elastic.py`:
+  - Voigt tensors, the Bond-matrix rotation (default (001)/<110> frame);
+  - isotropic and cubic C, SiGe via Vegard;
+  - Dismukes lattice constant and mismatch (x = 0.5: 1.97%);
+  - eps* = -S sigma0 and the film eigenstrain eps0 = -sigma0(1-nu)/E.
+- `mechanics/fe2d.py`:
+  - plane-strain Q1 pixels, 2x2 Gauss, stress stored at the Gauss points;
+  - sides rollers, bottom held, top free;
+  - `StressHistory2D.step(labels, stressors, relax)` handles birth (stress-free in the current shape, plus eps*), death (releases exactly its internal force), and anneal relax;
+  - one stress field per stressor (exact superposition, one LU per step, multi-RHS).
+- `mechanics/planar_flow.py`: three teaching flows with step tables, per-stressor curves and a sigma_xx map.
+
+**Results** (Lg 30, MPa, channel top 4 nm):
+
+| flow | sxx | syy | szz |
+|---|---|---|---|
+| PMOS SiGe gate-first | -897 | +1180 | +371 |
+| PMOS SiGe gate-last | -2674 | -106 | -205 |
+| NMOS SMT | +113 | -209 | -69 |
+
+The poly pull goes -1455 -> -2895 MPa; the SMT cap alone leaves +203 MPa after the strip. Each flow takes 6-8 s on 174 x 240 pixels (splu per step).
+
+**Tests:** `testsuite/test_mechanics.py` (10):
+- tensor rotation;
+- closed-form film and SiGe biaxial ((001), both <110> and <100>);
+- mesh convergence;
+- deposit then strip;
+- superposition;
+- memorization sign.
+
+**Next:**
+- take the geometry from `fab/` step snapshots;
+- the dislocation (Volterra cut);
+- 3D on the octree;
+- piezo mobility.
+- Runtime: the 2D target is < 2 s (AMG / reuse of the factorization between steps with unchanged labels).

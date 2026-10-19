@@ -4,6 +4,22 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Process stress through the flow, 2D ([details](docs/stress.md))
+
+A linear elastic stress solver (`mechanics/`) that follows the process flow
+step by step and splits the channel stress by stressor: SiGe S/D mismatch,
+liners, STI oxide, metal gate, contacts, and stress memorization (anneal).
+Si and SiGe are anisotropic (C11, C12, C44, <110> channel); every material
+has E and nu in the material database. In a PMOS with SiGe S/D, pulling the
+dummy poly gate doubles the channel compression (-1.46 -> -2.90 GPa). An NMOS
+capped and annealed keeps +0.2 GPa of tension after the cap is gone.
+
+```bash
+python3 -m mechanics.planar_flow
+```
+
+<p align="center"><img src="docs/img/stress_pmos_gate_last.png" width="100%"></p>
+
 ## FinFET and nanosheet flows, 2 nm-node class ([details](docs/finfet_nanosheet.md))
 
 Two new virtual-fab templates at a 48 nm contacted poly pitch and a 15 nm
