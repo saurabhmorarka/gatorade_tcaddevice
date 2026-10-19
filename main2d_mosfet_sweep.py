@@ -216,20 +216,41 @@ def continuation(solve_at, p0, s0, targets, prev=None, log=None, h_init=H_INIT, 
 _CTX = {}
 
 
-def _context(config_path, extrude=None, stress_file=None):
+DEFAULT_MOBILITY = "fast"
+
+
+def mobility_options(cfg, override=None):
+    """The inversion-layer mobility of a config (docs/mobility.md): the
+    physics: mobility: entry - a mode string (fast | exact | off) or an
+    options dict (solver2d/surface_mobility.MobilityModel) - or the
+    override (a mode from --mobility). Absent: DEFAULT_MOBILITY. Returns a
+    dict, or None for off."""
+    m = (cfg.get("physics") or {}).get("mobility", DEFAULT_MOBILITY)
+    m = dict(m) if isinstance(m, dict) else {"mode": m}
+    if override:
+        m["mode"] = override
+    return None if m.get("mode", "fast") in ("off", None, False) else m
+
+
+def _context(config_path, extrude=None, stress_file=None, mobility=None):
     """extrude=(width_um, nz): run the SAME device as a 3D mesh extruded in
     z (mesh3d/extrude.py) - the 3D performance testbed and the first rung
     of the 3D validation ladder (Id per um of width must match 2D).
     A config with a stress: block gets the process stress -> mobility
     factors (solver2d/stress_mobility.py) on its mesh; stress_file is the
     field main() solved once and saved (else it is solved here)."""
-    key = (config_path, tuple(extrude) if extrude else None, stress_file)
+    key = (config_path, tuple(extrude) if extrude else None, stress_file, mobility)
     if key not in _CTX:
         cfg = load_config(config_path)
         domain, mat, dev, Cs, mesh_opts, bias_cfg, output_cfg = build_from_config(cfg)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             mesh = build_mesh2d(domain, mat=mat, **mesh_opts)
+        mob = mobility_options(cfg, mobility)
+        if mob is not None and not extrude:
+            # before equilibrium: an interface charge is electrostatics
+            from solver2d.surface_mobility import attach_mobility
+            attach_mobility(mesh, mat, mob)
         vsat = (cfg.get("physics") or {}).get("velocity_saturation", False)   # bool or a force name
         vsat_force(vsat)                                                       # validate early
         eq = solve_mosfet(mesh, mat, dev, Cs, 0.0, 0.0, velocity_saturation=vsat)
@@ -238,6 +259,9 @@ def _context(config_path, extrude=None, stress_file=None):
             width_um, nz = extrude
             mesh = extrude_mesh(mesh, mat, width_um * _UM_TO_CM, int(nz))
             g = {k: np.tile(eq[k], int(nz)) for k in _FIELDS}   # z-invariant: exact start
+            if mob is not None:
+                from solver2d.surface_mobility import attach_mobility
+                attach_mobility(mesh, mat, mob)
             eq = solve_mosfet(mesh, mat, dev, Cs, 0.0, 0.0, psi_init=g["psi"], phin_init=g["phin"],
                               phip_init=g["phip"], velocity_saturation=vsat)
         if cfg.get("stress") and stress_file != "off":
@@ -263,7 +287,8 @@ def run_curve(task):
     """One Id-Vg (task['kind']=='idvg', fixed task['Vds']) or Id-Vd
     ('idvd', fixed task['Vgs']) curve, from the equilibrium anchor."""
     t0 = time.perf_counter()
-    mesh, mat, dev, Cs, eq, vsat = _context(task["config"], task.get("extrude"), task.get("stress_file"))
+    mesh, mat, dev, Cs, eq, vsat = _context(task["config"], task.get("extrude"), task.get("stress_file"),
+                                            task.get("mobility"))
     log_lines = []
     log = log_lines.append
 
@@ -488,6 +513,9 @@ def main():
     parser.add_argument("--extrude-um", type=float, default=None,
                         help="run the device as a 3D mesh extruded over this width (um)")
     parser.add_argument("--nz", type=int, default=6, help="number of z layers with --extrude-um")
+    parser.add_argument("--mobility", choices=("fast", "exact", "off"), default=None,
+                        help="inversion-layer mobility (docs/mobility.md), overriding the config's "
+                             "physics: mobility: (default fast)")
     parser.add_argument("--no-stress", action="store_true",
                         help="ignore the config's stress: block (the unstressed reference run)")
     parser.add_argument("--vtk", nargs="?", const="last", choices=["last", "all"], default=None,
@@ -518,7 +546,10 @@ def main():
              [dict(kind="idvd", Vgs=v, values=vds_list, config=args.config, extrude=extrude)
               for v in vgs_output])
     for t in tasks:
-        t.update(vtk=args.vtk, vtk_dir=vtk_dir)
+        t.update(vtk=args.vtk, vtk_dir=vtk_dir, mobility=args.mobility)
+    mob = mobility_options(cfg, args.mobility)
+    print("inversion-layer mobility: " + ("off (bulk only)" if mob is None else
+                                          ", ".join(f"{k} {v}" for k, v in mob.items())))
     stress_file = None
     if cfg.get("stress") and args.no_stress:
         stress_file = "off"
@@ -530,7 +561,7 @@ def main():
         stress_file = _prepare_stress(cfg["stress"], domain, out_dir)
         for t in tasks:
             t["stress_file"] = stress_file
-        mesh_s = _context(args.config, extrude, stress_file)[0]
+        mesh_s = _context(args.config, extrude, stress_file, args.mobility)[0]
         _report_stress(mesh_s, domain)
 
     # One BLAS thread per worker - the workers are the parallelism.
@@ -600,7 +631,7 @@ def main():
         for res in results:
             entries = res["vtk_entries"]
             if args.vtk == "last" and res["last_state"] is not None:
-                mesh_v, mat_v = _context(args.config, extrude, stress_file)[:2]
+                mesh_v, mat_v = _context(args.config, extrude, stress_file, args.mobility)[:2]
                 entries = write_states(vtk_dir, curve_stem(res["task"]), mesh_v, mat_v,
                                        [dict(state=res["last_state"], bias=res["last_bias"],
                                              **_vtk_meta(res["task"], res["last_bias"]))])
@@ -612,7 +643,7 @@ def main():
     # Structure+fields JSON: the last point of the low-Vds transfer curve.
     structure_file = output_cfg.get("structure_file")
     if structure_file and not extrude:
-        mesh = _context(args.config, None, stress_file)[0]
+        mesh = _context(args.config, None, stress_file, args.mobility)[0]
         res = results[0]
         r = res["last_state"]
         Ex, Ey = electric_field_2d(mesh.points, mesh.triangles, r["psi"])

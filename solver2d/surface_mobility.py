@@ -67,8 +67,11 @@ FAMILIES = ("100", "110", "111")
 # (scripts/mobility/universal.py) so mu_eff(110)/mu_eff(100) = 2.0 at E_eff = 0.5 MV/cm
 # (Irie IEDM 2004; Takagi TED 41, 2363). Electrons: (110) FinFET sidewalls measure like
 # (100) (Kavalieros 2008, Young SSE 2012): 1.0; a planar (110) wafer is ~0.6-0.8.
-SCALE_110_P = 2.75
+SCALE_110_P = 3.13
 SCALE_110_N = 1.0
+# surface-roughness delta x this, per mode and carrier: the classical 1D MOS fit to the
+# universal curves (scripts/mobility/universal.py --calibrate-delta; docs/mobility.md)
+DELTA_SCALE = {"fast": {"n": 1.0, "p": 1.0}, "exact": {"n": 1.0, "p": 1.0}}
 MODES = ("off", "fast", "exact")
 D_MIN = 1e-4              # nodes with D below this (x > 9 l_crit) skip the surface terms
 
@@ -90,7 +93,9 @@ class MobilityModel:
     scale_110_p: float = SCALE_110_P
     surface_scale_n: float = 1.0     # calibration knobs: mu_ac and mu_sr x this
     surface_scale_p: float = 1.0
-    smoothing: float = None          # orientation blend width (None: nearest family in fast, 0.05 in exact)
+    delta_scale_n: float = None      # surface-roughness delta x this (None: the mode's calibrated default,
+    delta_scale_p: float = None      # DELTA_SCALE; 1 = the published parameter set)
+    smoothing: float = None          # orientation blend width (None: nearest family in fast, 0.02 in exact)
     tol: float = None                # self-consistency, max |d mu / mu| (None: 1e-4 fast, 1e-6 exact)
     frame: object = None             # device x, y, z in crystal axes (default (001) wafer, <110> channel)
 
@@ -122,6 +127,8 @@ class MobilityModel:
         for k in ("interface_charge", "highk_eps_r", "l_crit", "l_crit_highk", "F_min", "scale_110_n",
                   "scale_110_p", "surface_scale_n", "surface_scale_p"):
             setattr(m, k, float(getattr(m, k)))
+        for c in ("n", "p"):
+            setattr(m, f"delta_scale_{c}", m.delta_scale(c))
         m.highk = m.highk in (True, 1, "1", "true", "on", "yes")
         return None if m.mode == "off" else m
 
@@ -129,7 +136,13 @@ class MobilityModel:
     def sigma(self):
         if self.smoothing is not None:
             return float(self.smoothing)
-        return 0.05 if self.mode == "exact" else 0.0
+        return 0.02 if self.mode == "exact" else 0.0
+
+    def delta_scale(self, c):
+        v = getattr(self, f"delta_scale_{c}")
+        if v is None:
+            return DELTA_SCALE.get(self.mode, {}).get(c, 1.0)
+        return float(v)
 
     @property
     def tolerance(self):
@@ -418,7 +431,8 @@ class SurfaceMobility:
         self.si = silicon_nodes(mesh, mat) & self.semi
         mats, _ = node_materials(mesh, mat)
         self.klaassen = model.mode == "exact"
-        self.sets = DARWISH if model.mode == "exact" else LOMBARDI
+        base = DARWISH if model.mode == "exact" else LOMBARDI
+        self.sets = {c: dict(base[c], delta=base[c]["delta"] * model.delta_scale(c)) for c in ("n", "p")}
         # orientation: per active node, the surface-term multiplier sum_k w_k / scale_k
         a = self.act
         if model.orientation == "auto" and len(a):
