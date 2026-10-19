@@ -142,7 +142,10 @@ Gate-last NMOS vs the old gate-first (octree, fast vsat):
 
 Classical drift-diffusion (octree mesh, Schottky S/D, hybrid velocity
 saturation), Vds = 0.05 / 0.7 V, two workers. Currents per um of effective
-width; Ion at Vgs = 0.8 V.
+width; Ion at Vgs = 0.8 V. These rows are the box-epi, gate-first runs
+(before DEVELOPMENT_LOG 77); the gate-last FinFET is in the table under
+[The flows](#the-flows). The SS values come from the fast (hybrid)
+velocity-saturation mode, which under-reads SS (DEVELOPMENT_LOG 75).
 
 | device | Vt lin / sat (V) | SS (mV/dec) | DIBL (mV/V) | Ion (uA/um) | Ioff (A/um) | full I-V |
 |---|---|---|---|---|---|---|

@@ -79,7 +79,11 @@ flat floor.
 
 ## Electrical results (NMOS)
 
-`fab simulate --mesher octree`, Vds 0.05 / 0.7 V, Vgs to 0.8 V:
+`fab simulate --mesher octree`, Vds 0.05 / 0.7 V, Vgs to 0.8 V. These runs
+used the gate-first FinFET. The gate-last (RMG) default, blob + plug, gives
+Vt 0.202 / 0.150 V, DIBL 79 mV/V, Ion 1009 uA/um, Ioff 3.6e-7 A/um
+([finfet_nanosheet.md](finfet_nanosheet.md)). The SS values are from the
+fast velocity-saturation mode, which under-reads SS (DEVELOPMENT_LOG 75).
 
 | device | epi | Vt lin / sat (V) | SS | DIBL | Ion (uA/um) | Ioff (A/um) |
 |---|---|---|---|---|---|---|

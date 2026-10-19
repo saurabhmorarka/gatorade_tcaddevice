@@ -6630,3 +6630,10 @@ The HK on the trench walls leaves 11 nm of metal in a 15 nm trench. Lg stays the
   - With the superlattice grown stress-free (`sige_sl_strain=0`): recess 0, epi -1118, pull -1599, release -2166, final -1915 (sheets -1891 / -2094 / -2104 MPa).
   - The user first asked to drop the superlattice stress, then to keep it if it is the physical case. It stays ON by default (pseudomorphic growth on Si is compressive); `sige_sl_strain=0` is the what-if.
 - Lg: the user keeps the gate-last 11 nm of metal in the 15 nm trench. The 1 nm stress grid is accepted.
+
+**Docs before the merge:** the FinFET tables in docs/sd_epi.md and the
+"Electrical results" table in docs/finfet_nanosheet.md are gate-first runs.
+They are now labelled as such, with the gate-last numbers alongside (Vt 0.202 /
+0.150 V, DIBL 79, Ion 1009, Ioff 3.6e-7), and the SS columns are flagged as
+fast-mode values. The FinFET PMOS and the other 3D configs were not re-run
+electrically after the gate-last change.
