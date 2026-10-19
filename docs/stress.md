@@ -172,6 +172,8 @@ final stress, because elastic removals commute until the next birth:
 | nanosheet SiGe superlattice | mismatch at x = 0.30; born strained (pseudomorphic), removed at channel release; `sige_sl_strain=0` grows it stress-free |
 | TiN gate | −1.0 GPa |
 | TiN contacts | −1.0 GPa |
+| NMOS Si:P S/D epi | −0.4% lattice strain (`sip_strain_pct`; see [NMOS stressors](#nmos-stressors-literature-2d-planar-and-3d)) |
+| S/D edge dislocations | opt-in, `sd_disl=1` (same section) |
 | STI, spacers | optional (`sti_GPa`, `spacer_GPa`) |
 
 **Channel.** The silicon within 1.5 nm of the final gate dielectric, under
