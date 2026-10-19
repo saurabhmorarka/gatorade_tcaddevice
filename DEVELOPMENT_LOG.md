@@ -6503,3 +6503,64 @@ Tests: test_fab TestEpitaxy (+5: facet angles / widths, blob, merge by
 pitch, sliver rejected, contact plug), FinFET epi shapes + PMOS merge,
 nanosheet unmerged widths; test_octree metal-staircase regression (fails
 without the fix).
+
+## 75. Near-threshold Newton stall: researched, fixed (Id unchanged); fast/exact velocity-saturation modes
+
+Branch `nearvt-stall`. The user asked for a deeper search than before (internet and GitHub) and a better overall fix.
+- The stall: Newton hits the 15-iteration cap near threshold, then the walk halves to 3 mV steps.
+- It made the new-epi PTS nanosheet 764 s vs 421 s with the box epi.
+
+The user added: keep a super-fast default with its error measured and stated, plus an exact mode on request.
+
+**Research** (sources in docs/vsat_modes.md):
+- **Sentaurus Device User Guide**, read in full:
+  - The GradQuasiFermi interpolation is the gradient of a modified quasi-Fermi potential, phi~ = psi - Vt ln((n+n0)/Nc). It is not a density-weighted blend of two forces.
+  - The default n0 is 0; n0 > ni "shifts results"; examples use 1e8-1e12.
+  - At contact elements the field replaces grad phi by default.
+  - Newton is undamped by default. Line search is off, and Bank-Rose damping starts only after 1000 iterations. Divergence is a residual rise > RhsFactor.
+- **Genius-TCAD-Open** (source):
+  - the quasi-Fermi force floors n at 1e-2 ni;
+  - ESurface: the field parallel to the interface at Si/oxide elements;
+  - the default force is the plain edge field;
+  - unknowns (psi, n, p), with log damping of psi only.
+- **Charon:** n/(n+nref) damping of the drive.
+- **DEVSIM:** the field along the low-field current direction.
+
+**Kept 1: a near-solution full step** (`newton_solve_2d`, NEAR_*).
+- The FinFET trace at Vds 0.7:
+  - after 3 good iterations the correction is ~1e-9 V and ~5e-4 density, but the monotone line search cut every step to 1/16-1/32;
+  - the row-scaled merit rises on the O(delta^2) error of a few degenerate rows;
+  - Newton then crawled ~1% per iteration to the cap.
+- The fix: once the correction moves psi < 1e-5 V and densities < 1%, the full step is accepted unless the merit grows > 1000x. Convergence tests are unchanged.
+
+| device (full I-V, octree) | before | after | Id change |
+|---|---|---|---|
+| 2D NMOS (138 points) | 893 its | 853 its | 9e-4 at a 1e-14 A point, else 0 |
+| FinFET | 230 s (188 + 275 its) | 176 s (187 + 207 its) | 6e-7 |
+| nanosheet PTS, new epi | 744-784 s (166 + 338 its) | 541 s (166 + 182 its) | 2e-6 |
+
+**Kept 2: an exact mode.**
+- `velocity_saturation: mqf` is Sentaurus' modified quasi-Fermi gradient with n0 = 1e10 (`VSAT_MQF_DENSITY`). It is smooth on every edge, and its FD-checked partials are in test_vsat_force.
+- `fab simulate --vsat exact` selects it; `fast` (hybrid) stays the default.
+- 2D NMOS:
+  - mqf Id is independent of n0 from 1e8 to 1e14 above threshold, and Ion agrees to 0.04%;
+  - at Vds 0.05 V, mqf (n0 1e8) is within 2-5% of a run without saturation;
+  - hybrid is 13-14% low near threshold, because it applies the junction built-in field to the subthreshold channel;
+  - the user's earlier rejected c_ref 1e18 moved further that way.
+- 3D:
+  - FinFET: identical from Vgs 0.15 V up; deep-off up to 1.7x higher with mqf (SS 73 vs 62);
+  - PTS nanosheet: Ion, Vt, DIBL identical; Ioff 3.2e-8 vs 2.2e-8.
+  - Which deep-off value is right is not yet checked (no-saturation 3D run).
+- Exact mode costs: FinFET 667 s vs 230 s, PTS nanosheet 1952 s vs 764 s.
+
+**Tried and rejected:**
+- Newton updates applied in density space (Genius/DEVSIM):
+  - 2D 893 -> 1181 iterations;
+  - it accepted a point 2.4x off (Vds 1 V, Vgs 0.4 V) through the update-only convergence test.
+- A frozen hybrid weight per solve, then a polish: FinFET 244 s vs 230 s.
+- Fixing the overflow in mqf: n0/c with c floored at 1e-300 gave inf - inf on oxide nodes, a singular matrix; it is now floored at 1e-100.
+
+**Open:**
+- The update-only convergence test can accept a non-solution (seen with the rejected density update). Add a residual sanity check, like Sentaurus' CheckRhsAfterUpdate.
+- One FinFET walk step still fails at Vds 0.7.
+- The Sentaurus default of using the field on contact-touching edges is not adopted yet (it would remove the efield warm-up).

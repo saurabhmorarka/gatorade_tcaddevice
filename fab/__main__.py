@@ -40,6 +40,9 @@ def main(argv=None):
                    help="also walk the gate from 0 down to this (negative: GIDL), same step")
     m.add_argument("--tunneling", choices=("local",), default=None,
                    help="band-to-band + trap-assisted tunneling (btbt/local3d.py): GIDL, junction leakage")
+    m.add_argument("--vsat", choices=("fast", "exact"), default="fast",
+                   help="velocity-saturation driving force: fast (hybrid, default) or exact (modified "
+                        "quasi-Fermi gradient, Sentaurus-style; 2.5-3x slower in 3D; docs/vsat_modes.md)")
     m.add_argument("--mesher", choices=("cartesian", "octree"), default="cartesian",
                    help="device mesh: graded rectilinear (default) or octree (exact Voronoi dual)")
     args = ap.parse_args(argv)
@@ -54,7 +57,7 @@ def main(argv=None):
             quantum = dict(spacing_nm=args.quantum_spacing, margin_nm=args.quantum_margin)
         simulate(args.config, out, vds=args.vds, vgs_max=args.vgs_max, vgs_step=args.vgs_step,
                  half_z=not args.full_width, mesher=args.mesher, quantum=quantum, vgs_min=args.vgs_min,
-                 tunneling=args.tunneling)
+                 tunneling=args.tunneling, vsat=True if args.vsat == "fast" else "mqf")
         return 0
     cfg = flow.load(args.config)
     if args.cmd == "expand":

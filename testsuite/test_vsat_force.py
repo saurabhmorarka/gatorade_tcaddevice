@@ -52,7 +52,7 @@ class TestVsatForce(unittest.TestCase):
 
     def test_jacobian_matches_finite_differences(self):
         mat = self.mat
-        for force in (False, True, "efield", "hybrid", "gradqf"):
+        for force in (False, True, "efield", "hybrid", "gradqf", "mqf"):
             for seed in (1, 2, 3):
                 mesh = _mesh(seed=seed)
                 psi, phin, phip = _state(mat, len(mesh.points), seed)

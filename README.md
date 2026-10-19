@@ -4,6 +4,20 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Near-threshold Newton stall fixed; fast and exact velocity saturation ([details](docs/vsat_modes.md))
+
+Near threshold, the line search was cutting Newton steps to 1/32 when the
+correction was already tiny, so steps crawled to the iteration cap. Newton
+now takes the full step close to the solution, as Sentaurus does by default.
+The full I-V speedups, with the same currents to 1e-6:
+- FinFET: 230 → 176 s;
+- PTS nanosheet: 764 → 541 s.
+
+`fab simulate --vsat exact` uses Sentaurus' modified quasi-Fermi driving
+force. It gives the same Ion, Vt and DIBL as the fast default, but different
+near-threshold and deep-off currents (measured in the details), at 2.5-3x the
+run time.
+
 ## FinFET and nanosheet flows, 2 nm-node class ([details](docs/finfet_nanosheet.md))
 
 Two new virtual-fab templates at a 48 nm contacted poly pitch and a 15 nm

@@ -378,7 +378,7 @@ def _tunneling_turn_on(d):
 
     def at(lg, g):
         return solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, psi_init=g["psi"],
-                            phin_init=g["phin"], phip_init=g["phip"], cold_retry=False, velocity_saturation=True,
+                            phin_init=g["phin"], phip_init=g["phip"], cold_retry=False, velocity_saturation=d.get("vsat", True),
                             schottky=d.get("schottky"), generation=_ScaledGeneration(model, 10.0 ** lg))
     r = at(0.0, d["eq"])                      # with the occupation factor the rates vanish in equilibrium
     if not r.get("converged"):
@@ -434,7 +434,7 @@ def _solver_at(d, Vgs, Vds, frozen=False, start=None):
     def dd(pp, gss, quantum=None, **kw):
         return solve_mosfet(mesh, mat, dev, Cs, *((pp, Vds) if Vgs is None else (Vgs, pp)),
                             psi_init=gss["psi"], phin_init=gss["phin"], phip_init=gss["phip"],
-                            cold_retry=False, velocity_saturation=True, vsat_fallback=False,
+                            cold_retry=False, velocity_saturation=d.get("vsat", True), vsat_fallback=False,
                             schottky=d.get("schottky"), quantum=quantum, generation=d.get("tunneling"), **kw)
     qd = d.get("quantum")
     if qd is None:
@@ -659,7 +659,13 @@ def _octree_vtu_geometry(d):
 
 
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
-             vtk="all", workers=None, log=print, mesher="cartesian", quantum=None, vgs_min=0.0, tunneling=None):
+             vtk="all", workers=None, log=print, mesher="cartesian", quantum=None, vgs_min=0.0, tunneling=None,
+             vsat=True):
+    """vsat: the velocity-saturation driving force. True = the fast default
+    ("hybrid", solver2d/newton_solver_qf_2d.py); "mqf" = the exact one, the
+    gradient of Sentaurus' modified quasi-Fermi potential with n0 1e10
+    (DEVELOPMENT_LOG 75: the same Ion, Vt, DIBL; near-threshold and
+    deep-off currents differ, at 2.5-3x the 3D run time)."""
     from solver2d.mosfet_metrics import mosfet_metrics
     # The linear solver is core/linsolve's "auto" (PETSc block ILU at these
     # sizes) unless TCAD_LINSOLVE says otherwise. This used to force direct
@@ -672,6 +678,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     from main2d_mosfet_sweep import continuation
     key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling)
     d = _context(config, top_nm, half_z, mesher, quantum, tunneling)        # mesh + equilibrium, once
+    d["vsat"] = vsat              # equilibrium carries no current: the same for every force
     if d.get("quantum") is not None:
         q = d["quantum"]
         log(f"  quantum box: {len(q.lines)} lines, carrier {q.carrier}, {len(q.extra_nodes)} interpolated nodes")
