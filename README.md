@@ -4,6 +4,26 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Stress -> mobility: piezoresistance in the device solver ([details](docs/piezo_mobility.md))
+
+The process stress now changes the drain current. Every silicon mesh edge
+gets a low-field mobility factor from the full piezoresistance tensor:
+Smith's coefficients, rotated to the (001)/<110> device frame, applied
+along the edge, with the stress sampled at the edge midpoint. There are
+two modes: a saturating one (the default; holes towards 4x, electrons
+towards 1.8x) and Smith's linear law. An optional doping factor (Kanda for
+n, Richter for p) is on by default. The factors are computed once per mesh,
+so the I-V costs the same. Stress is off unless you ask for it
+(`fab simulate --stress`, or a `stress:` block in a 2D config); with it off,
+the currents are unchanged.
+
+PMOS on-state I-V now runs in 3D (`--vds -0.05 -0.7 --vgs-min -0.8 --vgs-max 0`).
+Its S/D Schottky contact used silicon's band gap, which made the hole
+barrier 0.67 eV instead of 0.30 eV; it now uses the SiGe it touches
+(FinFET PMOS Ion 242 -> 537 uA/um).
+
+PIEZO_README_RESULTS
+
 ## Process stress through the flow, 2D and 3D ([details](docs/stress.md))
 
 A linear elastic stress solver (`mechanics/`) that follows the process flow
