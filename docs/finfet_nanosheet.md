@@ -26,8 +26,8 @@ The rest are typical published 3-2 nm-node values:
 | | FinFET | Nanosheet |
 |---|---|---|
 | CPP / Lg / spacer | 48 / 15 / 5 nm | 48 / 15 / 5 nm (+ 5 nm inner spacers) |
-| body | fin 5 x 50 nm, 24 nm fin pitch | 3 sheets 5 x 25 nm, 10 nm gaps, 46 nm stack pitch |
-| gate stack | IL + HfO2 lumped, 2 nm, EOT 0.85 nm; TiN, wf 4.40 eV | same, wrapping every sheet |
+| body | fin 5 x 50 nm, 24 nm fin pitch | 3 sheets 5 x 25 nm, 9 nm gaps (14 nm per level, 42 nm stack), 46 nm stack pitch |
+| gate stack | IL + HfO2 lumped, 2 nm, EOT 0.85 nm; TiN, wf 4.40 eV, 15 nm above the dielectric on the fin top | same, wrapping every sheet, 15 nm above the top sheet |
 | S/D | recessed fin, Si:P epi 7e20 (sx 2, sy 3 nm) | epi from the sheet ends, 7e20 |
 | isolation | PTS 3e18 at the fin base | `pts`: PTS 1e19 under the stack (sharp, sigma 4 nm); `bdi`: 10 nm SiN under the stack + PTS 1e18 |
 | contacts | TiN trench contacts, Schottky (0.45 eV) | same |
@@ -137,6 +137,26 @@ Gate-last NMOS vs the old gate-first (octree, fast vsat):
   puts 2 nm in z at z-facing interfaces, which leaves 5 nodes across a 5 nm
   fin. FinFET and nanosheet use (1, 0.5, 0.5) nm. It matters: FinFET DIBL
   went from 52 to 66 mV/V and Ioff tripled with the finer mesh.
+
+## Realistic process profile (opt-in)
+
+`profile: realistic` in the template params (default `ideal`, unchanged).
+Configs: `configs/fab_{finfet,finfet_pmos,nanosheet,nanosheet_pmos}_realistic.yaml`;
+the whole comparison batch is `scripts/realistic_profile/all_runs.sh`.
+
+| param | default | what |
+|---|---|---|
+| `fin_w_top`, `fin_w_gate_bottom`, `fin_w_base` | 4.5, 5.5, 8.0 nm | FinFET fin width at the top, at the STI top, at the fin base (piecewise linear); needs `voxel: [0.5, 0.5, 0.25]` |
+| `recess_angle` | 2.2 deg | S/D recess walls lean in toward the floor (epi undercut) |
+| `recess_corner_radius` | 3 nm | arc fillet at the recess bottom corners |
+
+Nanosheet sheet lengths become 25 / 26 / 27-28 nm, top to bottom. NMOS,
+octree, hybrid vsat, Vds 0.05 / 0.7 V (DEVELOPMENT_LOG 79):
+
+FINFET_NS_TABLE
+
+The FinFET history costs more with the 0.25 nm z voxel; the I-V cost is the
+same order. SS is the fast-vsat value (DEVELOPMENT_LOG 75).
 
 ## Electrical results
 

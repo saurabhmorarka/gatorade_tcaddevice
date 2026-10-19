@@ -17,6 +17,7 @@ capped and annealed keeps +0.2 GPa of tension after the cap is gone.
 In 3D the FinFET and nanosheet run through their real fab flows, voxel for voxel:
 - **FinFET (now gate-last):** the dummy-poly pull takes the channel from −1.3 to −2.1 GPa.
 - **Nanosheet:** the channel release takes it from −0.76 to −1.88 GPa. Each sheet ends at about −1.73 GPa.
+- **Bilayer PMOS epi (default):** a 5 nm Si0.8Ge0.2 seed under the 50% fill gives −1.50 GPa (FinFET) and −1.04 GPa (nanosheet); an opt-in realistic etch profile (tapered fin, slanted recess) is in [docs/finfet_nanosheet.md](docs/finfet_nanosheet.md).
 
 Multigrid CG solves are linear in size. A full FinFET history takes 49 s with `--fast`.
 

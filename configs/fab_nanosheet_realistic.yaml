@@ -1,11 +1,10 @@
-# Nanosheet (GAA) NMOS, 2 nm-node class (fab/templates.py nanosheet): one
-# stack of 3 sheets in one contacted poly pitch, replacement metal gate.
-# Mesa isolation by a heavy punch-through stopper (isolation: pts); the
-# bottom-dielectric-isolation variant is configs/fab_nanosheet_bdi.yaml.
-# Lengths in nm unless a unit is given.
+# Nanosheet (GAA) NMOS with the realistic process profile (profile: realistic;
+# DEVELOPMENT_LOG 79): slanted S/D recess with a rounded bottom corner, so the
+# sheets are 25 / 26 / 27-28 nm long top to bottom. The ideal-profile device
+# is configs/fab_nanosheet.yaml. Lengths in nm unless a unit is given.
 #
-#   python3 -m fab build configs/fab_nanosheet.yaml
-#   python3 -m tcadview out/fab_nanosheet/build.pvd
+#   python3 -m fab build configs/fab_nanosheet_realistic.yaml
+#   python3 -m tcadview out/fab_nanosheet_realistic/build.pvd
 template: nanosheet
 params:
   profile: realistic

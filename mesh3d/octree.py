@@ -846,6 +846,14 @@ def _assemble(dual, materials, h, node_net, mat, origin, face_contacts, label):
     new_id[dev] = np.arange(int(dev.sum()))
     edges = new_id[e[keep_e]]
     A, As, G, L = A[keep_e], As[keep_e], G[keep_e], L[keep_e]
+    # carrier flux only between nodes that both have semiconductor volume: a
+    # facet lying exactly ON a semiconductor / insulator interface (a node
+    # missing on the interface plane, the bisector of the two nodes falling
+    # on it) is labelled semiconductor from the semiconductor side, which
+    # would leak carriers into an insulator-only node. The interface is a
+    # no-flux wall for carriers; a mesh without such facets is unchanged.
+    semi_e = cv_semi[dev][edges] > 0
+    As = np.where(semi_e.all(axis=1), As, 0.0)
 
     contact_nodes = {}
     for name, s in touch.items():
