@@ -97,6 +97,8 @@ class Region:
     material: str
     phi: np.ndarray                     # float64 level set at the nodes, < 0 inside (float64: the
                                         # EPS tie-break needs exact arithmetic near 0)
+    parent: str = None                  # a layer carved out of another region (the epi's seed):
+                                        # one-voxel slivers between the two merge (cell_labels)
 
 
 @dataclass
@@ -350,6 +352,52 @@ class Structure:
             phi = np.maximum(phi, self._column(self.mask2d(mask)) - g.h[0])
         self._add(name, material, phi)
 
+    def epi_seed(self, region, name, material, on, thickness):
+        """The seed (buffer) layer of a bilayer S/D epi: the first
+        `thickness` nm of `region` grown on the `on` materials (the recessed
+        silicon) becomes region `name` of `material` - a low-Ge SiGe seed
+        under the high-Ge fill. The epi's outer shape is unchanged.
+
+        Conformal growth: the seed spreads from the silicon nodes touching
+        the epi, through the epi only (never across a dielectric), in box
+        (max-norm) steps - its inner surface stays flat along flat silicon
+        faces and square at their corners, no curved staircase for the
+        device mesh. Its level set is a node distance to that surface."""
+        g = self.grid
+        k = self.region_index(region)
+        if k is None:
+            raise ValueError(f"epi_seed: no region {region!r}")
+        if self.region_index(name) is not None:
+            raise ValueError(f"epi_seed: region {name!r} exists already")
+        epi = self.regions[k]
+        lab = self.node_labels()
+        inside = lab == k
+        # growth starts at the epi's first nodes on the silicon (the
+        # interface lies at them, to the node tie-break)
+        si = np.isin(lab, [self.region_index(r.name) for r in self.regions_of(materials=on)])
+        src = inside & ndimage.binary_dilation(si, structure=np.ones((3, 3, 3), bool))
+        if not src.any():
+            raise ValueError(f"epi_seed: {region!r} does not touch {on}")
+        steps = [int(round(thickness / h)) for h in g.h]
+        near = src.copy()
+        for n in range(max(steps)):
+            grow = near.copy()
+            for a in range(3):
+                if n < steps[a]:
+                    grow |= ndimage.maximum_filter1d(grow, 3, axis=a, mode="constant")
+            near = (grow & inside) | src
+        near &= inside
+        # each node keeps the epi's field in its own layer and a positive
+        # distance to the other layer in the other one: min(seed, fill) is
+        # exactly the old epi field, so the solid (and every later deposit,
+        # etch and label decided from it) does not see the split
+        d_out = ndimage.distance_transform_edt(~near, sampling=g.h) - 0.5 * min(g.h)
+        d_in = ndimage.distance_transform_edt(near, sampling=g.h) - 0.5 * min(g.h)
+        seed_phi = np.where(near, epi.phi, np.maximum(epi.phi, d_out))
+        epi.phi = np.where(near, np.maximum(epi.phi, d_in), epi.phi)
+        self.regions.insert(k + 1, Region(name, material, seed_phi, parent=region))
+        self.regions = [r for r in self.regions if (r.phi < 0).any()]
+
     def contact_plug(self, regions, mask, floor_height, depth, shell):
         """Contact etch into a narrow S/D epi: below a contact trench whose
         floor is at `floor_height`, remove the `regions` (the epi) in a
@@ -530,7 +578,13 @@ class Structure:
         clean: remove one-voxel flakes (see _despeckle) - the labels the
         device mesh is built from must not carry voxel noise."""
         lab = self._raw_cell_labels()
-        return _despeckle(lab)[0] if clean else lab
+        if not clean:
+            return lab
+        lab = _despeckle(lab)[0]
+        for k, r in enumerate(self.regions):
+            if r.parent is not None and self.region_index(r.parent) is not None:
+                lab = _merge_slivers(lab, k, self.region_index(r.parent))
+        return lab
 
     def _raw_cell_labels(self):
         """Solid or gas from the cell mean of the union field (the field
@@ -545,11 +599,32 @@ class Structure:
         if not self.regions:
             return lab
         best = np.full(lab.shape, np.inf)
+        # a layer carved out of a region (its `parent`: the epi's seed)
+        # competes with the other regions as one with it - their union is
+        # the parent's old field, and the pieces' own means would read
+        # higher where their shared boundary meets the outer surface - and
+        # then takes the cells where its mean is below the parent's
+        children = {k: self.region_index(r.parent) for k, r in enumerate(self.regions)
+                    if r.parent is not None and self.region_index(r.parent) is not None}
+        family = {pk: [pk] + [ck for ck, p in children.items() if p == pk] for pk in set(children.values())}
         for k, r in enumerate(self.regions):
-            c = _cell_mean(r.phi)
+            if k in children:
+                continue
+            members = family.get(k, [k])
+            phi = r.phi if len(members) == 1 else np.minimum.reduce([self.regions[m].phi for m in members])
+            c = _cell_mean(phi)
             take = c < best
             lab[take] = k
             best = np.where(take, c, best)
+            if len(members) > 1:
+                own = np.full(lab.shape, np.inf)
+                pick = np.full(lab.shape, k, dtype=np.int16)
+                for m in members:
+                    cm = _cell_mean(self.regions[m].phi)
+                    sel = cm < own
+                    pick[sel] = m
+                    own = np.where(sel, cm, own)
+                lab[take] = pick[take]
         lab[_cell_mean(self.solid()) >= 0] = -1
         return lab
 
@@ -561,6 +636,9 @@ class Structure:
         than two voxels."""
         raw = self._raw_cell_labels()
         lab, n_flakes = _despeckle(raw)
+        for k, r in enumerate(self.regions):
+            if r.parent is not None and self.region_index(r.parent) is not None:
+                lab = _merge_slivers(lab, k, self.region_index(r.parent))
         out = []
         if n_flakes:
             out.append(f"{n_flakes} one-voxel flake cell(s) relabelled to their surroundings")
@@ -651,6 +729,41 @@ def _despeckle(lab, max_pass=4):
         if not changed:
             break
     return lab, total
+
+
+def _merge_slivers(lab, child, parent, max_pass=8):
+    """One-voxel slivers between a layer carved out of a region (`child`,
+    the epi's seed) and that region (`parent`): a later etch (the contact
+    plug) cutting their shared boundary at a glancing angle leaves cells
+    of one in a one-voxel layer with the other beside it. Both are the same
+    epi, so the sliver is noise, not a film. First the child's slivers join
+    the parent (repeated until none is left); then a parent sliver beside
+    the child joins it only where that leaves no child sliver - one
+    direction at a time, so a cell cannot flip back and forth."""
+    lab = lab.copy()
+
+    def slivers(own, other):
+        out = np.zeros(lab.shape, bool)
+        for ax in range(3):
+            v, o = np.moveaxis(lab, ax, 0), np.moveaxis(out, ax, 0)
+            lo, mid, hi = v[:-2], v[1:-1], v[2:]
+            o[1:-1] |= (mid == own) & (lo != own) & (hi != own) & ((lo == other) | (hi == other))
+        return out
+
+    for _ in range(max_pass):
+        s = slivers(child, parent)
+        if not s.any():
+            break
+        lab[s] = parent
+    s = slivers(parent, child)
+    if s.any():
+        trial = lab.copy()
+        trial[s] = child
+        lab_save, lab = lab, trial
+        bad = slivers(child, parent) & s
+        lab = lab_save
+        lab[s & ~bad] = child
+    return lab
 
 
 def _thin_cells(m):

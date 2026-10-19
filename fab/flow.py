@@ -103,6 +103,8 @@ def run_step(st, step, p):
         st.epitaxy(a["material"], a["name"], a["on"], a["to_height"], shape=a.get("shape", "facet"),
                    lateral=a.get("lateral", 5.0), mask=a.get("mask"), facet_angle=a.get("facet_angle", 54.7356),
                    lattice=a.get("lattice"))
+    elif op == "epi_seed":
+        st.epi_seed(a["region"], a["name"], a["material"], a["on"], a["thickness"])
     elif op == "contact_plug":
         st.contact_plug(a["regions"], a["mask"], a["floor_height"], a["depth"], a["shell"])
     elif op == "etch":

@@ -26,12 +26,12 @@ def line_crossing(f, coords):
 
 
 def _non_wedge(warnings):
-    """Structure-check warnings other than one-voxel-thick cells of the epi,
-    the ILD or the contacts: a shaped epi has real acute corners (the ILD
+    """Structure-check warnings other than one-voxel-thick cells of the epi
+    (and its seed layer), the ILD or the contacts: a shaped epi has real acute corners (the ILD
     under a diamond's lower facet at the STI, a facet against the fin side,
     the epi's curved top under the flat contact floor) whose tips staircase
     to one voxel."""
-    return [w for w in warnings if not (("epi'" in w or "'ild'" in w or "_contact'" in w)
+    return [w for w in warnings if not (("epi'" in w or "epi_seed'" in w or "'ild'" in w or "_contact'" in w)
                                         and "one voxel thick" in w)]
 
 
@@ -311,6 +311,33 @@ class TestEpitaxy(unittest.TestCase):
         self.assertAlmostEqual(inner - c, r, delta=0.3)
         self.assertGreater(self.width(st, 25.0), 2 * r)                    # the epi shell is still there
 
+    def test_epi_seed(self):
+        """The bilayer epi's seed: the first 5 nm grown on the silicon, cut
+        out of the epi without changing its outer shape (the union field is
+        the old epi field, node for node), on a flat face exactly 5 nm."""
+        st = self.build("facet", 5.0, fin_top=8.0)                          # a recessed fin
+        old = st.regions[st.region_index("epi")].phi.copy()
+        lab0 = st.cell_labels()
+        n_epi = (lab0 == st.region_index("epi")).sum()
+        st.epi_seed("epi", "seed", "SiGe0.2", ["Si"], 5.0)
+        seed, epi = st.regions[st.region_index("seed")], st.regions[st.region_index("epi")]
+        self.assertEqual((seed.material, seed.parent), ("SiGe0.2", "epi"))
+        np.testing.assert_array_equal(np.minimum(seed.phi, epi.phi), old)
+        lab = st.cell_labels()
+        ks, ke = st.region_index("seed"), st.region_index("epi")
+        self.assertEqual((lab == ks).sum() + (lab == ke).sum(), n_epi)
+        g = st.grid
+        k = int(np.argmin(np.abs(g.axes[2] - 20.0)))
+        col = lab[2, :, k]                                                  # up the fin's axis
+        ys = -(g.axes[1][:-1] + 0.5 * g.h[1])                               # cell centre heights
+        self.assertTrue((col[(ys > 8.0) & (ys < 13.0)] == ks).all())           # (to half a voxel)
+        self.assertTrue((col[(ys > 13.5) & (ys < 35.0)] == ke).all())
+        # no new one-voxel layers: the split's thin cells are the old epi's
+        # (the diamond's acute tip against the fin side)
+        from fab.structure import _thin_cells
+        thin_after = _thin_cells(lab == ks) | _thin_cells(lab == ke)
+        self.assertFalse((thin_after & ~_thin_cells(lab0 == st.region_index("epi"))).any())
+
     def test_sliver_merge_rejected(self):
         with self.assertRaisesRegex(ValueError, "mirror image"):
             self.build("facet", 9.7, Lz=24.0)                                         # 0.4 nm overlap
@@ -580,7 +607,8 @@ class TestFinFET(unittest.TestCase):
         # flakes: the RMG trench corners, see TestFinFET.test_structure_check
         self.assertEqual([w for w in _non_wedge(st.check()) if "flake" not in w], [])
         lab = st.node_labels()
-        merged = (lab[i] == st.region_index("sd_epi")).all(axis=1)       # rows across the whole cell
+        epi = [st.region_index(n) for n in ("sd_epi", "sd_epi_seed")]        # fill + bilayer seed
+        merged = np.isin(lab[i], epi).all(axis=1)                         # rows across the whole cell
         self.assertTrue(merged.any())
 
 

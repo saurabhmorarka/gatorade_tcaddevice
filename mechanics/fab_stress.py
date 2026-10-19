@@ -13,6 +13,8 @@ nothing.
 
 Stressors, from the fab's region names (rough defaults; --set overrides):
   sd_epi (SiGe)     lattice mismatch, x = epi_x (0.5: the PMOS Si0.5Ge0.5 S/D)
+  sd_epi_seed       the bilayer epi's low-Ge seed, x from its material name
+  (SiGe0.2)         (fab param epi_seed_x; epi_seed_thickness=0 drops it)
   sige  (SiGe)      nanosheet superlattice, x = sige_sl_x (0.30): grown
                     pseudomorphic on the Si lattice, so the SiGe is born
                     compressed (mismatch eps*); relaxes sideways at the stack
@@ -46,9 +48,10 @@ DEFAULTS = dict(epi_x=0.5, sige_sl_x=0.30, sige_sl_strain=1.0, gate_GPa=-1.0, co
 SI_LIKE = {"Si"}
 
 
-def snapshots(config, factor=2, log=print):
+def snapshots(config, factor=2, log=print, fab_set=None):
     """[(step label, coarse labels (region ids, 0 void))], {id: (name,
-    material)}, coarse Grid3D, fab params."""
+    material)}, coarse Grid3D, fab params. fab_set: fab template
+    parameters to override ({"epi_seed_thickness": 0})."""
     from fab import flow
     names = {}
     snaps = []
@@ -59,10 +62,23 @@ def snapshots(config, factor=2, log=print):
         for k, r in enumerate(st.regions):
             gid = names.setdefault(r.name, (len(names) + 1, r.material))[0]
             ids[lab == k] = gid
-        snaps.append((label, _coarsen(ids, factor)))
+        ids = _coarsen(ids, factor)
+        # a step that only relabels material born in the step before (the
+        # bilayer epi's seed carved out of the just-grown epi) is part of
+        # that birth: fold it into the previous snapshot
+        if len(snaps) >= 2:
+            prev, before = snaps[-1][1], snaps[-2][1]
+            changed = ids != prev
+            if changed.any() and ((ids != 0) == (prev != 0)).all() and (before[changed] == 0).all():
+                snaps[-1] = (f"{snaps[-1][0]} + {label}", ids)
+                snapshots.grid = st.grid
+                return
+        snaps.append((label, ids))
         snapshots.grid = st.grid
 
     cfg = flow.load(config)
+    if fab_set:
+        cfg.setdefault("params", {}).update(fab_set)
     st, _ = flow.build(cfg, on_step=on_step, log=lambda *a: None)
     gfab = st.grid
     h = float(gfab.h[0]) * factor
@@ -93,12 +109,19 @@ def _coarsen(ids, f):
     return out
 
 
+def _ge_fraction(name, mat, par):
+    """Ge fraction of a SiGe region: from the material name ("SiGe0.2", the
+    bilayer epi's seed), else the superlattice / S/D fill parameter."""
+    if len(mat) > 4:
+        return float(mat[4:])
+    return par["sige_sl_x"] if name == "sige" else par["epi_x"]
+
+
 def _materials(regions, par):
     mats = {}
     for gid, (name, mat) in regions.items():
-        if mat == "SiGe":
-            x = par["sige_sl_x"] if name == "sige" else par["epi_x"]
-            mats[gid] = el.material("SiGe", x_ge=x)
+        if mat.startswith("SiGe"):
+            mats[gid] = el.material("SiGe", x_ge=_ge_fraction(name, mat, par))
         else:
             mats[gid] = el.material(mat)
     return mats
@@ -106,12 +129,12 @@ def _materials(regions, par):
 
 def _stressor_of(name, mat, par, m):
     """(stressor name, eps*) for voxels of region `name`, or None."""
-    if mat == "SiGe":
+    if mat.startswith("SiGe"):
         if name == "sige" and not par["sige_sl_strain"]:
             return None
-        x = par["sige_sl_x"] if name == "sige" else par["epi_x"]
-        f = el.sige_mismatch(x)
-        return ("SiGe superlattice" if name == "sige" else "SiGe S/D", np.array([f, f, f, 0, 0, 0]))
+        f = el.sige_mismatch(_ge_fraction(name, mat, par))
+        sname = {"sige": "SiGe superlattice", "sd_epi_seed": "SiGe S/D seed"}.get(name, "SiGe S/D")
+        return sname, np.array([f, f, f, 0, 0, 0])
     if name == "gate" and par["gate_GPa"]:
         return "gate metal", el.film_eigenstrain(m, par["gate_GPa"])
     if name.endswith("_contact") and par["contact_GPa"]:
@@ -147,7 +170,7 @@ def channel_masks(labels, regions, grid):
     return out
 
 
-def run(config, par=DEFAULTS, factor=2, fast=False, log=print):
+def run(config, par=DEFAULTS, factor=2, fast=False, log=print, fab_set=None):
     """fast=False: solve after every step that changes the stress (the
     teaching table: every stress-changing step is listed). fast=True: solve
     only when the physics forces it - before material is born into a
@@ -155,7 +178,7 @@ def run(config, par=DEFAULTS, factor=2, fast=False, log=print):
     (exact: elastic removals/stressor switch-ons commute until the next
     birth), fewer solves; the table then lists those solves only."""
     t0 = time.perf_counter()
-    snaps, regions, grid, st = snapshots(config, factor)
+    snaps, regions, grid, st = snapshots(config, factor, fab_set=fab_set)
     t_fab = time.perf_counter() - t0
     mats = _materials(regions, par)
     sh = StressHistory3D(grid, mats)
@@ -269,15 +292,22 @@ def main():
     ap.add_argument("--fast", action="store_true",
                     help="solve only where the physics forces it (same final stress, fewer solves)")
     ap.add_argument("--set", nargs="*", default=[])
+    ap.add_argument("--fab", nargs="*", default=[],
+                    help="fab template parameters, e.g. epi_seed_thickness=0 (single-layer S/D epi)")
+    ap.add_argument("--tag", default="", help="suffix of the output names")
     a = ap.parse_args()
+    fab_set = {}
+    for kv in a.fab:
+        k, v = kv.split("=")
+        fab_set[k] = float(v)
     par = dict(DEFAULTS)
     for kv in a.set:
         k, v = kv.split("=")
         par[k] = float(v)
     os.makedirs(a.out, exist_ok=True)
     for cfg in a.configs:
-        name = os.path.splitext(os.path.basename(cfg))[0]
-        res = run(cfg, par, a.factor, a.fast)
+        name = os.path.splitext(os.path.basename(cfg))[0] + a.tag
+        res = run(cfg, par, a.factor, a.fast, fab_set=fab_set)
         txt = report(res, name)
         print(txt)
         print("  ->", plot(res, name, a.out))
