@@ -191,6 +191,18 @@ def device_voxels(st, half_z=True):
     return lab[:, j0:, :kz], net, origin, np.asarray(g.h, float)
 
 
+def _attach_total_doping(mesh, total_grid):
+    """mesh.Ntot = N_A + N_D at the device nodes (0 in insulators), from the
+    fab's donor and acceptor fields on the grid the mesh indexes
+    (mesh.grid_index): the doping-dependent mobility needs the TOTAL ionized
+    doping, the mesh's Cdop is the net (DEVELOPMENT_LOG 83)."""
+    tot = np.asarray(total_grid, float)[tuple(np.asarray(mesh.grid_index).T)]
+    net = np.asarray(mesh.Cdop, float)
+    if not np.all(tot[~mesh.is_insulator] >= np.abs(net[~mesh.is_insulator]) * (1 - 1e-9) - 1.0):
+        raise ValueError("total doping below the net doping: the total-doping grid does not match the mesh")
+    mesh.Ntot = np.where(mesh.is_insulator, 0.0, tot)
+
+
 def build_device(cfg, top_nm=None, half_z=True, log=print, grid=None, mesher="cartesian"):
     """Fab build -> device mesh. Returns a dict with the mesh, the silicon
     material, the gate workfunction, the structure, axes and bookkeeping.
@@ -218,6 +230,8 @@ def build_device(cfg, top_nm=None, half_z=True, log=print, grid=None, mesher="ca
     Cs = float(np.median(mesh.Cdop[body_nodes]))
     zmid = axes_nm[2][-1] if half_z else None
     W_nm = evaluate("W", p) if "W" in p else None
+    idx = [np.rint(_fab_index(st.grid.axes[a], axes_nm[a])).astype(int) for a in range(3)]
+    _attach_total_doping(mesh, (st.donors + st.acceptors)[np.ix_(*idx)])
     log(f"device mesh: {' x '.join(str(len(a)) for a in axes_nm)} grid, {len(mesh.points)} nodes, "
         f"{len(mesh.edges)} edges; terminals "
         + ", ".join(f"{c.name} {int((np.array(mesh.boundary_bc_type) == 'contact:' + c.name).sum())}"
@@ -234,6 +248,8 @@ def _build_device_octree(st, p, half_z, log, opts, t0):
     mat = _resolve_material_block({})
     mesh = build_octree_mesh(lab, mats, h, net, mat, origin_nm=origin, face_contacts={
         c["name"]: (1, "max") for c in st.contacts if c.get("surface") == "bottom"}, log=log, **opts)
+    j0 = int(round((origin[1] - st.grid.axes[1][0]) / st.grid.h[1]))
+    _attach_total_doping(mesh, (st.donors + st.acceptors)[:, j0:, :lab.shape[2] + 1])
     gate = next(c for c in st.contacts if c.get("type") == "gate")
     wf = evaluate(gate["workfunction_eV"], p)
     body = next(c["name"] for c in st.contacts if c.get("surface") == "bottom")
@@ -304,21 +320,39 @@ def _qkey(quantum):
     return tuple(sorted(quantum.items())) if quantum else None
 
 
-def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneling=None, stress=None):
+def _mkey(mobility):
+    """A hashable key of the inversion-layer mobility options (None = off)."""
+    if mobility is None:
+        return None
+    if isinstance(mobility, str):
+        mobility = {"mode": mobility}
+    if isinstance(mobility, dict):
+        return tuple(sorted(mobility.items()))
+    return tuple(mobility)
+
+
+def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneling=None, stress=None,
+             mobility=None):
     """Device, mesh and equilibrium, built once per process (a worker
     started by simulate() gets it from _init_worker instead). quantum: None
     (classical) or the DeviceQuantum options (Schrodinger-Poisson channel
     charge, quantum/device.py). tunneling: None or "local" (Kane band-to-band
     + Hurkx trap-assisted, btbt/local3d.py: GIDL and junction leakage).
     stress: None or (stress_field.npz, piezo mode, doping factor): the
-    process stress -> mobility factors on the mesh (apply_stress)."""
-    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress)
+    process stress -> mobility factors on the mesh (apply_stress).
+    mobility: the inversion-layer mobility options (_mkey; None = bulk
+    mobility only; solver2d/surface_mobility.py), attached before the
+    equilibrium (an interface charge is electrostatics)."""
+    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress, _mkey(mobility))
     if key not in _CTX:
         from main2d_mosfet_sweep import solve_mosfet
         from mos.mos_params import MOSDevice
         d = build_device(flow.load(cfg_path), top_nm=top_nm, half_z=half_z, log=lambda *a: None, mesher=mesher)
         if stress is not None:
             apply_stress(d, *stress, log=None)
+        if mobility is not None:
+            from solver2d.surface_mobility import attach_mobility
+            d["mobility_report"] = attach_mobility(d["mesh"], d["mat"], dict(_mkey(mobility)), log=None)
         d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
         d["schottky"] = schottky_contacts(d, log=lambda *a: None)
         d["eq"] = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=True,
@@ -540,7 +574,7 @@ def run_curve(task):
     from main2d_mosfet_sweep import continuation
     t0 = time.perf_counter()
     d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"),
-                 task.get("quantum"), task.get("tunneling"), task.get("stress"))
+                 task.get("quantum"), task.get("tunneling"), task.get("stress"), task.get("mobility"))
     Vds = task["Vds"]
     base = d.get("base", {}).get(Vds)
     it0 = 0
@@ -709,7 +743,7 @@ def _octree_vtu_geometry(d):
 
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
              vtk="all", workers=None, log=print, mesher="cartesian", quantum=None, vgs_min=0.0, tunneling=None,
-             vsat=True, stress=None, piezo="saturating", piezo_doping=True, stress_set=None):
+             vsat=True, stress=None, piezo="saturating", piezo_doping=True, stress_set=None, mobility="fast"):
     """vsat: the velocity-saturation driving force. True = the fast default
     ("hybrid", solver2d/newton_solver_qf_2d.py); "mqf" = the exact one, the
     gradient of Sentaurus' modified quasi-Fermi potential with n0 1e10
@@ -721,7 +755,12 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     changes the low-field mobility through piezoresistance (piezo
     "saturating" or "linear", piezo_doping: the doping factor;
     docs/piezo_mobility.md). A PMOS (negative vds) gets its metrics mirrored
-    (solver2d/mosfet_metrics.py::mosfet_metrics_signed)."""
+    (solver2d/mosfet_metrics.py::mosfet_metrics_signed).
+    mobility: the inversion-layer mobility (docs/mobility.md): "fast" (the
+    default: Lombardi + Masetti on the total doping, per-interface
+    orientation), "exact" (Darwish + Klaassen), "off" (bulk only, the
+    behaviour before DEVELOPMENT_LOG 83), or an options dict
+    (solver2d/surface_mobility.MobilityModel)."""
     from solver2d.mosfet_metrics import mosfet_metrics_signed
     # The linear solver is core/linsolve's "auto" (PETSc block ILU at these
     # sizes) unless TCAD_LINSOLVE says otherwise. This used to force direct
@@ -738,8 +777,16 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
         if stress == "solve":
             path = solve_stress(config, os.path.join(out_dir, "stress_field.npz"), stress_set, log=log)
         stress_key = (os.path.abspath(path), piezo, bool(piezo_doping))
-    key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress_key)
-    d = _context(config, top_nm, half_z, mesher, quantum, tunneling, stress_key)   # mesh + equilibrium, once
+    off = mobility in (None, "off") or (isinstance(mobility, dict) and mobility.get("mode") == "off")
+    mob = None if off else _mkey(mobility)
+    key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress_key, mob)
+    d = _context(config, top_nm, half_z, mesher, quantum, tunneling, stress_key, mob)   # mesh + equilibrium, once
+    r = d.get("mobility_report")
+    log("  inversion-layer mobility: off (bulk only)" if r is None else
+        f"  inversion-layer mobility ({r['mode']}, orientation {r['orientation']}): {r['n_interface']} interface "
+        f"nodes, families " + ", ".join(f"({k}) {v}" for k, v in r["families_interface"].items())
+        + (f", interface charge {r['interface_charge']:g} cm^-2" if r["interface_charge"] else "")
+        + (", remote high-k" if r["highk"] else ""))
     if stress_key is not None:
         r = d["stress_report"]
         log(f"  stress mobility ({r['mode']}, doping factor {'on' if r['doping_factor'] else 'off'}): "
@@ -768,7 +815,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     for v in vds:
         tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
                           vtk_keep=(0.0, min(vgs), max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
-                          quantum=quantum, tunneling=tunneling, stress=stress_key))
+                          quantum=quantum, tunneling=tunneling, stress=stress_key, mobility=mob))
     n_work = workers or performance_cores()
     ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
     # one BLAS / OpenMP thread per worker process (inherited at spawn)

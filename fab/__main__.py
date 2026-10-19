@@ -14,6 +14,22 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _mobility_options(args):
+    """The --mobility / --orientation / --mobility-set options as a dict
+    (None: off)."""
+    if args.mobility == "off":
+        return None
+    o = {"mode": args.mobility, "orientation": args.orientation}
+    for kv in args.mobility_set:
+        k, v = kv.split("=", 1)
+        try:
+            v = float(v)
+        except ValueError:
+            pass
+        o[k] = v
+    return o
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fab", description="tcad1d virtual fab")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -54,6 +70,16 @@ def main(argv=None):
                    help="doping factor of the piezo coefficients (Kanda n / Richter p; default on)")
     m.add_argument("--stress-set", nargs="*", default=[], metavar="K=V",
                    help="mechanics.fab_stress stressor overrides with --stress, e.g. gate_GPa=0")
+    m.add_argument("--mobility", choices=("fast", "exact", "off"), default="fast",
+                   help="inversion-layer mobility (docs/mobility.md): fast (default; Lombardi phonon + surface "
+                        "roughness, Masetti bulk on the total doping), exact (Darwish + Klaassen, carrier "
+                        "screening), off (bulk only)")
+    m.add_argument("--orientation", choices=("auto", "100"), default="auto",
+                   help="surface-orientation parameter sets: auto (per interface: (100) tops, (110) fin "
+                        "sidewalls) or 100 (one set)")
+    m.add_argument("--mobility-set", nargs="*", default=[], metavar="K=V",
+                   help="mobility options, e.g. interface_charge=1e11 highk=1 surface_scale_n=1.1 "
+                        "(solver2d/surface_mobility.MobilityModel)")
     args = ap.parse_args(argv)
 
     import yaml
@@ -68,7 +94,8 @@ def main(argv=None):
                  half_z=not args.full_width, mesher=args.mesher, quantum=quantum, vgs_min=args.vgs_min,
                  tunneling=args.tunneling, vsat=True if args.vsat == "fast" else "mqf", stress=args.stress,
                  piezo=args.piezo, piezo_doping=args.piezo_doping == "on",
-                 stress_set={k: float(v) for k, v in (kv.split("=") for kv in args.stress_set)})
+                 stress_set={k: float(v) for k, v in (kv.split("=") for kv in args.stress_set)},
+                 mobility=_mobility_options(args))
         return 0
     cfg = flow.load(args.config)
     if args.cmd == "expand":
