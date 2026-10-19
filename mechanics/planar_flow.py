@@ -197,9 +197,13 @@ def report(b, flow):
         lines.append(f"{name:42s} {tot[0]:8.0f} {tot[1]:8.0f} {tot[2]:8.0f}   {tot[0] - prev:+8.0f}")
         prev = tot[0]
     name, tot, per = b.rows[-1]
-    lines.append("final, by stressor:")
+    from mechanics.piezo import mobility_change
+    carrier = "p" if flow.startswith("pmos") else "n"
+    lines.append(f"final, by stressor:{'':22s} {'sxx':>8s} {'syy':>8s} {'szz':>8s}   d(mu)/mu (linear piezo, {carrier})")
     for s, v in per.items():
-        lines.append(f"  {s:40s} {v[0]:8.0f} {v[1]:8.0f} {v[2]:8.0f}")
+        lines.append(f"  {s:40s} {v[0]:8.0f} {v[1]:8.0f} {v[2]:8.0f}   {100 * mobility_change(v / 1e3, carrier):+6.0f}%")
+    lines.append(f"  {'total':40s} {tot[0]:8.0f} {tot[1]:8.0f} {tot[2]:8.0f}   {100 * mobility_change(tot / 1e3, carrier):+6.0f}%"
+                 "  (first order; real gains saturate at GPa stress)")
     return "\n".join(lines)
 
 

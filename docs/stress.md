@@ -92,6 +92,29 @@ by the held side walls, about E·b/L.
 
 <p align="center"><img src="img/stress_pmos_gate_first.png" width="100%"></p>
 
+## Mobility preview (linear piezoresistance)
+
+Each flow's report ends with a first-order mobility change from the final
+channel stress (`mechanics/piezo.py`):
+
+```
+dmu/mu = -(pi_l sxx + pi_v syy + pi_t szz)
+```
+
+It uses Smith's (1954) π11/π12/π44, rotated to <110>/(001):
+- NMOS: π_l = −31.2, π_t = −17.6, π_v = +53.4 (×1e-11/Pa);
+- PMOS: π_l = +71.8, π_t = −66.3, π_v = −1.1.
+
+| flow | dmu/mu (total) | largest term |
+|---|---|---|
+| PMOS SiGe, gate-first | +90% | SiGe +74% |
+| PMOS SiGe, gate-last | +178% | SiGe +150% |
+| NMOS SMT + dislocations | +39% | dislocations +25% |
+
+These are linear, small-stress numbers. Measured gains saturate at GPa
+stress (subband repopulation completes), so read them as trends and signs.
+Phase 4 will put the full tensor into the device solver.
+
 ## Checks (`testsuite/test_mechanics.py`)
 
 - Rotated Si stiffness: C11' = (C11+C12)/2 + C44 along <110>, C13' and C55'; isotropic materials are unchanged by rotation.

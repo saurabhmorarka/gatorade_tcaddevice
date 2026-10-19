@@ -179,5 +179,17 @@ class TestDislocation(unittest.TestCase):
         self.assertGreater(with_d["dislocations"][0], 200.0)    # MPa
 
 
+class TestPiezo(unittest.TestCase):
+    def test_110_coefficients_and_signs(self):
+        from mechanics.piezo import mobility_change, pi_110_on_001
+        n, p = pi_110_on_001("n"), pi_110_on_001("p")
+        self.assertAlmostEqual(n["l"], -0.312, places=3)          # Smith, <110> longitudinal
+        self.assertAlmostEqual(p["l"], 0.718, places=3)
+        # textbook signs: NMOS gains from longitudinal tension, PMOS from compression
+        self.assertGreater(mobility_change([0.1, 0, 0, 0, 0, 0], "n"), 0)
+        self.assertGreater(mobility_change([-0.1, 0, 0, 0, 0, 0], "p"), 0)
+        self.assertLess(mobility_change([0.1, 0, 0, 0, 0, 0], "p"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

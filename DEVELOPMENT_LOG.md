@@ -6556,7 +6556,13 @@ The poly pull goes -1455 -> -2895 MPa; the SMT cap alone leaves +203 MPa after t
 - an edge dislocation as a Volterra cut, eps* = sym(b x n)/t on one pixel layer from the core to the surface;
 - checked against Hirth & Lothe's infinite-medium field (syy, sxy within 20% at 10-20 nm; sxx is offset by the held side walls, ~E b / L).
 
-In the NMOS SMT flow, one dislocation per S/D at the gate-side edge (b = a/2<110>, half plane missing, core 20 nm) adds +594 MPa of channel tension: +113 -> +706 MPa. Tests: 12.
+In the NMOS SMT flow, one dislocation per S/D at the gate-side edge (b = a/2<110>, half plane missing, core 20 nm) adds +594 MPa of channel tension: +113 -> +706 MPa.
+
+**Piezo preview** (`mechanics/piezo.py`): linear dmu/mu from the channel stress, Smith pi rotated to <110>/(001).
+- PMOS gate-first +90%, gate-last +178%; NMOS SMT +39%, of which the dislocations give +25%.
+- First order only; real gains saturate at GPa.
+
+Tests: 13.
 
 **Next:**
 - take the geometry from `fab/` step snapshots;
