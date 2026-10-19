@@ -292,8 +292,10 @@ class TestNmosStressors3D(unittest.TestCase):
         (eps_xx = -b/h); the channel goes into tension; the dislocation and
         Si:P fields superpose exactly."""
         from mechanics import fab_stress as fs
-        par = dict(fs.DEFAULTS, sd_disl=1)
+        par = dict(fs.DEFAULTS, sd_disl=1, disl_depth=-1)                 # core at the epi bottom
         g, regions, labs, channel, X, Y = self._device()
+        m25, _, _ = fs.sd_dislocations(labs[2], regions, g, channel, dict(par, disl_depth=25))
+        self.assertAlmostEqual(Y[m25].max(), 24.5)                      # 25 nm: on through the Si under the epi
         mask, eps, desc = fs.sd_dislocations(labs[2], regions, g, channel, par)
         xs = np.unique(X[mask])
         np.testing.assert_allclose(xs, [11.5, 28.5])                     # the epi faces at 12 / 28

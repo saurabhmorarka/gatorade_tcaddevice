@@ -6931,7 +6931,7 @@ SMT flows (production at 32/28 nm) and OPT-IN in 3D (`sd_disl=0`).
 - the gate-last SMT poly pull adds tension.
 
 **Bugs found on the way:**
-- The first 3D test used b = −|b|z with n = −z: an inserted half plane, which flipped σzz exactly. For a missing half plane, b = −|b| n always. The sign is now stated in the docstring, and fab_stress builds b from the cut normal (n_x > 0 for any upward cut).
+- The first 3D test used b = −|b|z with n = −z: an inserted half plane, which flipped σzz exactly. For a missing half plane, b = −|b| n always. The sign is now stated in the docstring. fab_stress uses b = −|b|x, which is right because the normal of any upward cut has n_x > 0.
 - The long dislocation step label overflowed the 46-character table column; shortened.
 
 **Lessons:**
