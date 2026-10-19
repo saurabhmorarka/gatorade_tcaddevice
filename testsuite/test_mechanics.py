@@ -5,8 +5,12 @@ import unittest
 
 import numpy as np
 
+import os
+
 from mechanics import elastic as el
 from mechanics.fe2d import Grid2D, StressHistory2D
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _film_on_substrate(nx=20, h=1.0, t_film=4, t_sub=30, film_mat=None, sub_mat=None):
@@ -279,3 +283,18 @@ class TestHistory3D(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFabStressSnapshots(unittest.TestCase):
+    def test_bilayer_seed_folds_into_the_epi_birth(self):
+        """The bilayer epi's seed is carved out of the just-grown epi: the
+        stress history must see one birth (seed + fill), not a second
+        stress-free birth of the seed inside an already strained epi. The
+        seed and fill get their own Ge fraction from the material name."""
+        from mechanics import fab_stress as fs
+        snaps, regions, grid, st = fs.snapshots(os.path.join(ROOT, "configs", "fab_finfet_pmos.yaml"))
+        labels = [l for l, _ in snaps]
+        self.assertTrue(any("S/D epitaxy" in l and "epi seed" in l for l in labels))
+        self.assertFalse(any(l.startswith("S/D epi seed") for l in labels))
+        x = {n: fs._ge_fraction(n, m, fs.DEFAULTS) for n, m in regions.values() if m.startswith("SiGe")}
+        self.assertEqual(x, {"sd_epi": 0.5, "sd_epi_seed": 0.2})

@@ -17,6 +17,7 @@ capped and annealed keeps +0.2 GPa of tension after the cap is gone.
 In 3D the FinFET and nanosheet run through their real fab flows, voxel for voxel:
 - **FinFET (now gate-last):** the dummy-poly pull takes the channel from −1.3 to −2.1 GPa.
 - **Nanosheet:** the channel release takes it from −0.76 to −1.88 GPa. Each sheet ends at about −1.73 GPa.
+- **Bilayer PMOS epi (default):** a 5 nm Si0.8Ge0.2 seed under the 50% fill gives −1.50 GPa (FinFET) and −1.04 GPa (nanosheet); an opt-in realistic etch profile (tapered fin, slanted recess) is in [docs/finfet_nanosheet.md](docs/finfet_nanosheet.md).
 
 Multigrid CG solves are linear in size. A full FinFET history takes 49 s with `--fast`.
 
@@ -40,6 +41,13 @@ The full I-V speedups, with the same currents to 1e-6:
 force. It gives the same Ion, Vt and DIBL as the fast default, but different
 near-threshold and deep-off currents (measured in the details), at 2.5-3x the
 run time.
+
+Edges into a contact now use the edge field as the velocity-saturation
+force (the Sentaurus default). With the quasi-Fermi force, a depleted Schottky node at the drain
+corner had no solution past Vgs 0.765 V: the realistic FinFET at Vds 0.7 V
+stopped there. It now converges at every point (466 s instead of 1857 s), and
+the FinFET/nanosheet Id moves by at most 0.1% (the tiny contact-dominated
+test devices by up to 10% in the linear region).
 
 ## FinFET and nanosheet flows, 2 nm-node class ([details](docs/finfet_nanosheet.md))
 

@@ -24,7 +24,7 @@ from fab.templates import TEMPLATES
 # step arguments that are numbers/expressions
 NUMERIC = {"thickness", "to_height", "depth", "rp", "sigma", "peak", "dose", "lateral_sigma", "top_height", "conc",
            "sx", "sy", "sz", "lateral", "facet_angle", "floor_height", "shell",
-           "lattice"}
+           "lattice", "zc", "heights", "widths", "x_left", "x_right", "angle", "radius"}
 
 
 def load(path):
@@ -72,7 +72,7 @@ def step_args(step, p):
         if k in ("step", "label"):
             continue
         if k in NUMERIC:
-            args[k] = evaluate(v, p)
+            args[k] = [evaluate(e, p) for e in v] if isinstance(v, list) else evaluate(v, p)
         elif k == "mask":
             args[k] = _mask(v, p)
         else:
@@ -103,6 +103,13 @@ def run_step(st, step, p):
         st.epitaxy(a["material"], a["name"], a["on"], a["to_height"], shape=a.get("shape", "facet"),
                    lateral=a.get("lateral", 5.0), mask=a.get("mask"), facet_angle=a.get("facet_angle", 54.7356),
                    lattice=a.get("lattice"))
+    elif op == "fin_profile_etch":
+        st.fin_profile_etch(a["materials"], a["zc"], a["heights"], a["widths"], mask=a.get("mask"))
+    elif op == "tapered_recess":
+        st.tapered_recess(a["materials"], a["x_left"], a["x_right"], a["top_height"], a["floor_height"],
+                          angle=a.get("angle", 0.0), radius=a.get("radius", 0.0), mask=a.get("mask"))
+    elif op == "epi_seed":
+        st.epi_seed(a["region"], a["name"], a["material"], a["on"], a["thickness"])
     elif op == "contact_plug":
         st.contact_plug(a["regions"], a["mask"], a["floor_height"], a["depth"], a["shell"])
     elif op == "etch":

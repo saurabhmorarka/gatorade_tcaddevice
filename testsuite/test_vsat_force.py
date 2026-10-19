@@ -18,16 +18,19 @@ from core.params import Material                                    # noqa: E402
 from solver2d.newton_solver_qf_2d import edge_currents, edge_mobility  # noqa: E402
 
 
-def _mesh(n_edges=40, seed=0):
+def _mesh(n_edges=40, seed=0, contacts=()):
     """Random edges between random points (cm), random doping: enough to
-    exercise every term; geometry need not be a real mesh."""
+    exercise every term; geometry need not be a real mesh. contacts: node
+    indices on a contact boundary (their edges take the edge field)."""
     rng = np.random.default_rng(seed)
     N = n_edges + 1
     pts = rng.uniform(0, 20e-7, size=(N, 3))
     edges = np.stack([np.arange(n_edges), np.arange(1, N)], axis=1)
     return SimpleNamespace(points=pts, edges=edges, facet_length=rng.uniform(0.5, 2, n_edges) * 1e-14,
                            facet_length_semi=None, cv_area=np.ones(N) * 1e-21, cv_area_semi=None,
-                           Cdop=rng.choice([1e15, -1e18, 1e20], size=N), dEi_arr=None, ni_arr=None)
+                           Cdop=rng.choice([1e15, -1e18, 1e20], size=N), dEi_arr=None, ni_arr=None,
+                           boundary_point_index=np.array(contacts, int),
+                           boundary_bc_type=["contact:drain"] * len(contacts))
 
 
 def _state(mat, N, seed):
@@ -54,7 +57,7 @@ class TestVsatForce(unittest.TestCase):
         mat = self.mat
         for force in (False, True, "efield", "hybrid", "gradqf", "mqf"):
             for seed in (1, 2, 3):
-                mesh = _mesh(seed=seed)
+                mesh = _mesh(seed=seed, contacts=(0, 7, 8, 20) if seed == 3 else ())
                 psi, phin, phip = _state(mat, len(mesh.points), seed)
                 In, Ip, J = _currents(mesh, mat, psi, phin, phip, force)
                 ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
@@ -104,6 +107,24 @@ class TestVsatForce(unittest.TestCase):
                 self.assertAlmostEqual(mu_h / mu0, 1.0, places=3)
             else:
                 self.assertAlmostEqual(mu_h / mu_e, 1.0, places=3)
+
+    def test_contact_edges_use_the_field(self):
+        """An edge touching a contact node takes the edge field whatever the
+        force (VSAT_CONTACT_FIELD, DEVELOPMENT_LOG 80); other edges keep the
+        chosen force."""
+        mat = self.mat
+        mesh = _mesh(seed=4, contacts=(0, 20))
+        psi, phin, phip = _state(mat, len(mesh.points), 4)
+        n = mat.ni * np.exp((psi - phin) / mat.Vt)
+        p = mat.ni * np.exp((phip - psi) / mat.Vt)
+        mu_e = edge_mobility(mesh, mat, psi, "efield", n, p, phin, phip)
+        ce = np.zeros(len(mesh.edges), bool)
+        ce[[0, 19, 20]] = True                       # edges 0-1, 19-20, 20-21
+        for force in ("hybrid", "gradqf", "mqf"):
+            mu_f = edge_mobility(mesh, mat, psi, force, n, p, phin, phip)
+            for c in (0, 1):
+                np.testing.assert_allclose(mu_f[c][ce], mu_e[c][ce], rtol=1e-12)
+                self.assertFalse(np.allclose(mu_f[c][~ce], mu_e[c][~ce]), force)
 
 
 if __name__ == "__main__":

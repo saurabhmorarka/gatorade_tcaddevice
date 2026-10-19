@@ -1,0 +1,18 @@
+# Bulk FinFET PMOS (Si0.8Ge0.2 seed + Si0.5Ge0.5:B S/D epi) with the realistic
+# process profile (profile: realistic; DEVELOPMENT_LOG 79): tapered fin
+# 4.5 / 5.5 / 8 nm, slanted round-cornered S/D recess. The fin taper needs
+# the 0.25 nm z voxel. The ideal-profile device is configs/fab_finfet_pmos.yaml.
+# Lengths in nm unless a unit is given.
+#
+#   python3 -m fab build configs/fab_finfet_pmos_realistic.yaml
+#   python3 -m tcadview out/fab_finfet_pmos_realistic/build.pvd
+template: finfet
+params:
+  profile: realistic
+  voxel: [0.5, 0.5, 0.25]
+  type: pmos
+  cpp: 48nm
+  Lg: 15nm
+  W_fin: 5nm
+  H_fin: 50nm
+  fin_pitch: 24nm

@@ -1,0 +1,19 @@
+# Nanosheet (GAA) PMOS (Si0.8Ge0.2 seed + Si0.5Ge0.5:B S/D epi) with the
+# realistic process profile (profile: realistic; DEVELOPMENT_LOG 79): slanted
+# round-cornered S/D recess, sheets 25 / 26 / 27-28 nm long top to bottom.
+# The ideal-profile device is configs/fab_nanosheet_pmos.yaml.
+# Lengths in nm unless a unit is given.
+#
+#   python3 -m fab build configs/fab_nanosheet_pmos_realistic.yaml
+#   python3 -m tcadview out/fab_nanosheet_pmos_realistic/build.pvd
+template: nanosheet
+params:
+  profile: realistic
+  type: pmos
+  cpp: 48nm
+  Lg: 15nm
+  n_sheets: 3
+  t_sheet: 5nm
+  W_sheet: 25nm
+  t_sige: 9nm
+  isolation: pts

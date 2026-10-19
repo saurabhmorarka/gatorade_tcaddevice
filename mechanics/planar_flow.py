@@ -17,6 +17,9 @@ walls are symmetry planes, i.e. a dense array of identical devices):
 Stressors and their default inputs (rough literature values; every one can
 be changed with --set NAME=VALUE):
   sige_x        0.5    Ge fraction of the S/D epi -> mismatch eps* = 1.97 %
+  seed_nm       5      bilayer epi: a low-Ge seed this thick grown first on the
+                       recessed Si (0 = single-layer epi)
+  seed_x        0.2    Ge fraction of the seed
   sti_GPa      -0.3    STI oxide intrinsic stress (HDP oxide, compressive)
   liner_GPa    +/-     CESL nitride: -2.5 (PMOS, compressive), +1.5 (NMOS)
   gate_GPa     -1.0    TiN metal gate
@@ -45,13 +48,13 @@ from mechanics.fe2d import Grid2D, StressHistory2D
 
 GEOM = dict(h=1.0, Lg=30, tox=2, gate_h=40, spacer=8, sd=44, sti=20, sti_depth=80,
             recess=40, raise_=6, liner=10, contact_w=16, hk=2, y_top=-80, y_bot=160, smt_depth=25)
-DEFAULTS = dict(sige_x=0.5, sti_GPa=-0.3, liner_pmos_GPa=-2.5, liner_nmos_GPa=1.5,
+DEFAULTS = dict(sige_x=0.5, seed_nm=5.0, seed_x=0.2, sti_GPa=-0.3, liner_pmos_GPa=-2.5, liner_nmos_GPa=1.5,
                 gate_GPa=-1.0, contact_GPa=1.0, cap_GPa=1.5, smt_disl=1.0, disl_depth=20.0)
 
 MATS = {1: "Si", 2: "SiGe", 3: "SiO2", 4: "SiO2", 5: "Poly", 6: "Si3N4", 7: "Si3N4",
-        8: "SiO2", 9: "HfO2", 10: "TiN", 11: "W", 12: "Si3N4"}
+        8: "SiO2", 9: "HfO2", 10: "TiN", 11: "W", 12: "Si3N4", 13: "SiGe"}
 NAMES = {1: "Si", 2: "SiGe", 3: "STI", 4: "gate oxide", 5: "poly", 6: "spacer", 7: "liner",
-         8: "ILD", 9: "HfO2", 10: "TiN", 11: "W", 12: "SMT cap"}
+         8: "ILD", 9: "HfO2", 10: "TiN", 11: "W", 12: "SMT cap", 13: "SiGe seed"}
 
 
 class Builder:
@@ -66,7 +69,8 @@ class Builder:
         ny = int(round((p["y_bot"] - p["y_top"]) / p["h"]))
         self.g = Grid2D(nx, ny, p["h"], 0.0, p["y_top"])
         self.X, self.Y = self.g.coords()
-        mats = {k: el.material(n, x_ge=par["sige_x"] if n == "SiGe" else None) for k, n in MATS.items()}
+        mats = {k: el.material(n, x_ge=(par["seed_x"] if k == 13 else par["sige_x"]) if n == "SiGe" else None)
+                for k, n in MATS.items()}
         self.mats = mats
         self.sh = StressHistory2D(self.g, mats, void_ref=mats[1].C)
         self.lab = np.zeros((ny, nx), np.int32)
@@ -138,8 +142,17 @@ def run_flow(flow, geom=GEOM, par=DEFAULTS):
         b.lab[rec] = 0
         b.step("S/D recess etch")
         f = el.sige_mismatch(v["sige_x"])
-        b.lab[b.sd & (Y > -p["raise_"]) & (Y < p["recess"])] = 2
-        b.step(f"SiGe S/D epi (x={v['sige_x']:.2f}, f={100 * f:.2f}%)", {"SiGe S/D": (2, [f, f, f, 0, 0, 0])})
+        epi = b.sd & (Y > -p["raise_"]) & (Y < p["recess"])
+        b.lab[epi] = 2
+        stress = {"SiGe S/D": (2, [f, f, f, 0, 0, 0])}
+        label = f"SiGe S/D epi (x={v['sige_x']:.2f}, f={100 * f:.2f}%)"
+        if v["seed_nm"] > 0:                    # bilayer: the seed grown first on the recessed Si
+            d = ndimage.distance_transform_edt(b.lab != 1) * p["h"]
+            b.lab[epi & (d <= v["seed_nm"])] = 13
+            fs = el.sige_mismatch(v["seed_x"])
+            stress["SiGe S/D seed"] = (13, [fs, fs, fs, 0, 0, 0])
+            label += f" on a {v['seed_nm']:g} nm x={v['seed_x']:.2f} seed"
+        b.step(label, stress)
     else:
         amorph = (b.sd & (Y > 0) & (Y < p["smt_depth"])) | (b.lab == 5)
         b.step("S/D + gate amorphization (PAI)")

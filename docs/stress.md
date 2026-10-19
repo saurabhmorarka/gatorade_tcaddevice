@@ -242,6 +242,33 @@ superlattice term above, which the FinFET does not have.
 
 <p align="center"><img src="img/stress3d_nanosheet_pmos.png" width="100%"></p>
 
+### Bilayer PMOS S/D epi and the new dimensions
+
+The tables above are the single-layer Si0.5Ge0.5 epi with the old gate
+(30 nm) and SiGe gaps (10 nm). PMOS now grows a low-Ge seed first
+(fab step `epi_seed`: `epi_seed_thickness` 5 nm of Si0.8Ge0.2, measured
+inside the epi from the silicon it grew on), then the 50% fill. The seed
+lines the channel-end sidewalls and the recess floor. The gate metal is
+15 nm above the dielectric and the nanosheet gaps are 9 nm (DEVELOPMENT_LOG 78).
+Channel σxx, `--fast`:
+
+| seed | FinFET | nanosheet |
+|---|---|---|
+| 0 nm | −1908 MPa (45 s) | −1616 MPa (162 s) |
+| 5 nm (default) | −1500 MPa (49 s) | −1040 MPa (172 s) |
+| 7 nm | −1238 MPa (49 s) | −880 MPa (173 s) |
+| 10 nm | −825 MPa (83 s) | −513 MPa (242 s) |
+
+The new dimensions alone barely move the stress (no seed: −1908 / −1616 vs
+−1903 / −1637). At 5 nm the seed is ~34% of the FinFET epi and ~44% of the
+nanosheet epi, so the nanosheet loses more. With `profile: realistic`
+(tapered fin, slanted round-cornered recess, seed 5 nm): FinFET −1403 MPa
+(69 s), nanosheet −945 MPa (172 s), bottom sheet −799 MPa.
+
+```bash
+python3 -m mechanics.fab_stress configs/fab_finfet_pmos.yaml --fast --fab epi_seed_thickness=0 --tag seed0
+```
+
 ## Known limits and next phases
 
 - 3D runs on a uniform 1 nm voxel grid. An interface-refined octree, as for the device mesh, would cut unknowns for big layouts. 1 nm vs 0.5 nm convergence is not checked yet.

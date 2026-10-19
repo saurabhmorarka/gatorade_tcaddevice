@@ -1,0 +1,18 @@
+# Bulk FinFET NMOS with the realistic process profile (profile: realistic;
+# DEVELOPMENT_LOG 79): tapered fin 4.5 / 5.5 / 8 nm (top / STI top / base),
+# slanted S/D recess with a rounded bottom corner. The fin taper needs the
+# 0.25 nm z voxel. The ideal-profile device is configs/fab_finfet.yaml.
+# Lengths in nm unless a unit is given.
+#
+#   python3 -m fab build configs/fab_finfet_realistic.yaml
+#   python3 -m tcadview out/fab_finfet_realistic/build.pvd
+template: finfet
+params:
+  profile: realistic
+  voxel: [0.5, 0.5, 0.25]
+  type: nmos
+  cpp: 48nm
+  Lg: 15nm
+  W_fin: 5nm
+  H_fin: 50nm
+  fin_pitch: 24nm

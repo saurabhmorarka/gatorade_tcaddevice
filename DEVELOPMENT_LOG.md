@@ -6698,3 +6698,155 @@ They are now labelled as such, with the gate-last numbers alongside (Vt 0.202 /
 0.150 V, DIBL 79, Ion 1009, Ioff 3.6e-7), and the SS columns are flagged as
 fast-mode values. The FinFET PMOS and the other 3D configs were not re-run
 electrically after the gate-last change.
+
+
+## 78. Bilayer PMOS S/D epi (low-Ge seed + high-Ge fill); FinFET/nanosheet dimensions
+
+Branch `epi-bilayer`, merged into `realistic-profile` (79).
+
+The user thought the PMOS channel stress (-1.6 to -1.9 GPa in 3D) was too high. They gave ~1 GPa as a rough number from experience, not a limit. The fix is in the structure: a real PMOS S/D epi starts with a low-Ge seed/buffer on the recessed Si, then the high-Ge fill. Nothing is clamped or tuned.
+
+**Fab step `epi_seed`** (`fab/structure.py`):
+- It splits an existing epi region into a seed `region` and the remaining fill. The seed is everything in the epi within `thickness` of the Si it grew on, measured INSIDE the epi: a geodesic box-norm growth from the epi nodes touching Si, masked to the epi. So the seed does not leak through a dielectric, and no detached fragments appear.
+- The split is exact: seed ∪ fill = the old epi, node for node (`seed = e` near the Si, else `max(e, d_out)`; `fill = max(e, d_in)` near the Si, else `e`).
+- `Region.parent`: the seed's parent is the fill. Cell labels are family-aware: the parent and its children compete as one union (the old epi's cells exactly), then each cell goes to the member with the lowest mean phi. A one-directional sliver merge follows (child slivers to the parent, then parent slivers to the child only where that leaves no child sliver; the two-way merge ping-ponged).
+- Template params: `epi_seed_thickness` 5 nm, `epi_seed_x` 0.2 (FinFET and nanosheet PMOS; 0 thickness = the old single epi). Material "SiGe0.2"; the device solver treats it as SiGe (bands, mobility, doping) like the fill.
+- Cuts (x-y, in nm): the seed lines the channel-end sidewalls and the recess bottom, and the 50% fill is in the middle.
+
+**Stress** (`mechanics/fab_stress.py`):
+- The Ge fraction comes from the material name ("SiGe0.2"), so each layer gets its own Vegard mismatch. Stressor "SiGe S/D seed".
+- Fold rule: the `epi_seed` step only relabels part of the epi. A snapshot that changes nothing solid, where every changed voxel became a child of the region it was, is folded into the previous snapshot's births. Without it the seed was born a second time, stress-free, on the 1 nm grid (where the old "was void" test failed). Runs before this rule (FinFET -937, nanosheet -51 MPa) were wrong. Regression test: `test_bilayer_seed_folds_into_the_epi_birth`.
+- CLI: `--fab k=v` (template params) and `--tag`.
+
+**Dimensions** (user, for all profiles):
+- Gate metal 15 nm above the dielectric on FinFET and nanosheet (`gate_height` 30 -> 15).
+- Nanosheet: 5 nm sheets with a 9 nm SiGe gap (`t_sige` 10 -> 9), 14 nm per level, 42 nm stack; also in the 5 nanosheet configs.
+- The FinFET fin stays 50 nm. The "100 nm fin" the user saw was a plot in voxel indices: cut plots are in nm from now on.
+
+**Results** (PMOS channel σxx, MPa, `--fast`):
+
+| seed | FinFET | nanosheet |
+|---|---|---|
+| 0 nm | -1908 (45 s) | -1616 (162 s) |
+| 5 nm (default) | -1500 (49 s) | -1040 (172 s) |
+| 7 nm | -1238 (49 s) | -880 (173 s) |
+| 10 nm | -825 (83 s) | -513 (242 s) |
+
+- The new dimensions alone barely move the stress (no seed: -1908 / -1616 vs -1903 / -1637 before).
+- At 5 nm the seed is ~34% of the FinFET epi and ~44% of the nanosheet epi, so the nanosheet loses more.
+
+**Tests:** `TestEpitaxy.test_epi_seed` (exact union, material and parent, a column's seed from 8 to 13 nm, no new thin cells); the FinFET PMOS epi tests count both epi regions; the fold-rule test.
+
+## 79. Opt-in realistic process profile: tapered fin, slanted round-cornered S/D recess
+
+Branch `realistic-profile`. The user asked for:
+- an option, off by default, for a more realistic etch profile;
+- a slanted S/D recess (epi undercut) so the bottom nanosheet's effective Lg is 2-3 nm longer, and a rounded recess bottom corner;
+- a tapered FinFET fin: 4.5 nm at the top, 5.5 nm at the bottom of the gate (STI top), 8 nm at the fin base;
+- all of these as user parameters; one run of each device, stress and full I-V, compared with the default for results and runtime.
+
+**Fab steps** (`fab/structure.py`, only with `profile: realistic`; default `ideal` is unchanged):
+- `fin_profile_etch(zc, heights, widths)`: the fin cross-section is a piecewise-linear width vs height polygon, extruded along x. Params `fin_w_top` 4.5, `fin_w_gate_bottom` 5.5, `fin_w_base` 8.0. It needs a 0.25 nm z voxel (`voxel: [0.5, 0.5, 0.25]`); at 0.5 nm the widths quantize to whole nm.
+- `tapered_recess(x_left, x_right, top_height, floor_height, angle, radius)`: the recess walls lean in by `recess_angle` (2.2 deg) toward the floor, with an arc fillet of `recess_corner_radius` (3 nm) at the bottom corners. Nanosheet sheet lengths: 25 / 26 / 27-28 nm, top to bottom.
+- Stress coarsening is per axis (`_factors`), for the anisotropic voxel.
+- 16 thin substrate cells remain where the FinFET taper meets the spacer (accepted, reported).
+- Tests: `TestProfiles` (fin widths at four heights, recess wall slope, fillet, floor).
+- Configs: `configs/fab_{finfet,finfet_pmos,nanosheet,nanosheet_pmos}_realistic.yaml`. Batch: `scripts/realistic_profile/all_runs.sh`.
+
+**Stress** (PMOS, seed 5 nm, `--fast`):
+
+| | ideal | realistic |
+|---|---|---|
+| FinFET σxx | -1500 MPa (49 s) | -1403 MPa (69 s) |
+| nanosheet σxx | -1040 MPa (172 s) | -945 MPa (172 s); bottom sheet -799 |
+
+The FinFET stress run is slower because of the finer z voxel.
+
+**I-V** (NMOS, octree, fast vsat, Vds 0.05 / 0.7 V):
+
+| FinFET | ideal | realistic |
+|---|---|---|
+| Vt lin -> sat | 0.202 -> 0.150 V | 0.205 -> 0.150 V |
+| DIBL | 79 mV/V | 85 mV/V |
+| Ion (Vgs 0.8) | 1005 uA/um | 999 uA/um |
+| Ioff | 3.7e-7 A/um | 5.5e-7 A/um |
+| Newton its | 158 + 176 | 151 + 184 |
+| total | 160 s | 466 s |
+
+The wider fin base raises Ioff 50% and DIBL 6 mV/V; Ion is within 1%. The
+0.25 nm z voxel gives a 120k-node mesh and ~3x the cost per Newton
+iteration. The first realistic run stalled at Vds 0.7 V (fixed in 80).
+
+| nanosheet | ideal | realistic |
+|---|---|---|
+| Vt lin -> sat | 0.209 -> 0.177 V | 0.218 -> 0.187 V |
+| DIBL | 49 mV/V | 47 mV/V |
+| Ion | 1109 uA/um | 1049 uA/um (-5%) |
+| Ioff | 2.06e-8 A/um | 1.29e-8 A/um (-37%) |
+| Newton its | 159 + 204 | 184 + 174 |
+| total | 512 s | 424 s |
+
+The longer bottom sheet raises Vt and cuts Ioff and Ion.
+
+**Octree fix** (`mesh3d/octree.py`): with the 15 nm gate metal, the default FinFET failed the mesh gate ("1 edge carries semiconductor facet area but joins a non-semiconductor node"). An STI-only node (z 8.5) and a Si-only node (z 10.5) had no node between them on the fin sidewall (z 9.5), and their bisector facet lay ON the interface; it was labelled Si from the Si side. Fix: carrier facet area only where both nodes have semiconductor volume (the interface is a no-flux wall for carriers). Only edges that failed the gate change, so every mesh that passed is unchanged bit for bit. Test: `TestOctreeInterfaceFacet` (a mesh-only build of the default FinFET; the suite had no octree FinFET build).
+
+
+## 80. Velocity saturation on contact edges: the edge field (a fold at the Schottky drain)
+
+Branch `realistic-profile`. The user's rule: every bias and every profile
+must converge; a missing point blocks the merge.
+
+**Symptom.** The realistic FinFET NMOS at Vds 0.7 V could not pass Vgs
+0.7654 V. Continuation halved down to ~1e-5 V steps, and every attempt ended
+at the 15-iteration cap (`VSAT_DIRECT_MAXITER`). The curve had no Vgs 0.8
+point and cost 1834 s (ideal: 147 s).
+
+**Diagnosis** (from the saved Vgs 0.75 state, one solve at 0.77 V with a
+recording residual):
+- The whole residual is in ONE electron row: node (39.5, -4.5, 10.25) nm,
+  |F| 1.3e5, every other row < 2e4 and falling. It is a Schottky node of the
+  drain contact, at the contact's corner nearest the gate, in the 7e20 Si:P
+  epi, with a quarter-size semiconductor cell (0.25 nm z edges).
+- n there is 4-5e15 at Vgs 0.70 and 0.75 (neighbours 2e19-1.4e20): the node
+  sits inside the contact's depletion. Its four semiconductor edges carry
+  ~0.15 V of phin over 0.25-1 nm and are velocity-saturated on it (mobility
+  1.7-6 vs 20 low-field).
+- Why a wall: with the quasi-Fermi (hybrid) force an edge's current is about
+  q n vsat E/|grad phi|. Past saturation it FALLS as the phi drop grows. The
+  supply into the corner node has a maximum; once the contact sink there
+  asks for more, no solution exists on this branch (a fold). Newton's step
+  shrank to 1e-5 with dn/n ~ 5 on that node.
+
+**Fix** (`solver2d/newton_solver_qf_2d.py`, `VSAT_CONTACT_FIELD`, on by default; `TCAD_VSAT_CONTACT_FIELD=0` turns it off for A/B runs):
+edges with a contact-boundary node at either end (ohmic or Schottky; the
+gate's nodes are insulator and carry no carrier facet) take the edge field
+|dpsi|/L as the driving force, whatever force is chosen. The field does not
+depend on phi, so the supply is monotone and the sink always balances. It is
+the Sentaurus default ("at contact elements the field replaces grad phi",
+noted when the User Guide was read for 75); COMSOL's default force is also the
+field along the current, Genius's the plain edge field.
+
+**Result.** The failing step converged in 5 iterations (9 s). Full I-V, max
+|Id| change against the runs before the fix: FinFET ideal 0.03%, nanosheet
+ideal 0.008%, nanosheet realistic 0.04%, FinFET realistic 0.1%; the realistic
+FinFET has all 34 points, 466 s instead of 1857 s. Runtimes of the other
+three: 160 / 512 / 424 s (were 159 / 493 / 419). Docs: docs/vsat_modes.md
+"Edges into a contact use the edge field".
+
+The tiny test devices are contact-dominated (contacts a few nm from the
+channel), so they move more; their goldens were re-captured:
+- 3D planar tiny (ohmic): Id_lin -3.5%, Id_off -7.5%, Id_sat -0.25%;
+- tiny Schottky device: Id lin -10%, sat -0.3% (the contact-resistance
+  bracket test still passes).
+
+**Tried and rejected:**
+- No velocity saturation (low-field mobility) on contact edges: also
+  monotone, but the tiny planar Id_sat moved +68% (those contact edges do
+  saturate) and the Schottky device +7%.
+- The hybrid weight from the harmonic mean density on contact edges (so a
+  depleted end turns the edge to the field): tiny devices unchanged, but the
+  FinFET step still stalled (w only ~0.5 at a 5e15 node).
+
+**Lesson.** A continuation whose step halves to nothing at a fixed bias is a
+fold, not a step-size problem: look at WHERE the residual sits (one row
+here) before touching the step control.

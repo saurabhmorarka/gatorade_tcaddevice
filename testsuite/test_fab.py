@@ -26,12 +26,12 @@ def line_crossing(f, coords):
 
 
 def _non_wedge(warnings):
-    """Structure-check warnings other than one-voxel-thick cells of the epi,
-    the ILD or the contacts: a shaped epi has real acute corners (the ILD
+    """Structure-check warnings other than one-voxel-thick cells of the epi
+    (and its seed layer), the ILD or the contacts: a shaped epi has real acute corners (the ILD
     under a diamond's lower facet at the STI, a facet against the fin side,
     the epi's curved top under the flat contact floor) whose tips staircase
     to one voxel."""
-    return [w for w in warnings if not (("epi'" in w or "'ild'" in w or "_contact'" in w)
+    return [w for w in warnings if not (("epi'" in w or "epi_seed'" in w or "'ild'" in w or "_contact'" in w)
                                         and "one voxel thick" in w)]
 
 
@@ -311,9 +311,82 @@ class TestEpitaxy(unittest.TestCase):
         self.assertAlmostEqual(inner - c, r, delta=0.3)
         self.assertGreater(self.width(st, 25.0), 2 * r)                    # the epi shell is still there
 
+    def test_epi_seed(self):
+        """The bilayer epi's seed: the first 5 nm grown on the silicon, cut
+        out of the epi without changing its outer shape (the union field is
+        the old epi field, node for node), on a flat face exactly 5 nm."""
+        st = self.build("facet", 5.0, fin_top=8.0)                          # a recessed fin
+        old = st.regions[st.region_index("epi")].phi.copy()
+        lab0 = st.cell_labels()
+        n_epi = (lab0 == st.region_index("epi")).sum()
+        st.epi_seed("epi", "seed", "SiGe0.2", ["Si"], 5.0)
+        seed, epi = st.regions[st.region_index("seed")], st.regions[st.region_index("epi")]
+        self.assertEqual((seed.material, seed.parent), ("SiGe0.2", "epi"))
+        np.testing.assert_array_equal(np.minimum(seed.phi, epi.phi), old)
+        lab = st.cell_labels()
+        ks, ke = st.region_index("seed"), st.region_index("epi")
+        self.assertEqual((lab == ks).sum() + (lab == ke).sum(), n_epi)
+        g = st.grid
+        k = int(np.argmin(np.abs(g.axes[2] - 20.0)))
+        col = lab[2, :, k]                                                  # up the fin's axis
+        ys = -(g.axes[1][:-1] + 0.5 * g.h[1])                               # cell centre heights
+        self.assertTrue((col[(ys > 8.0) & (ys < 13.0)] == ks).all())           # (to half a voxel)
+        self.assertTrue((col[(ys > 13.5) & (ys < 35.0)] == ke).all())
+        # no new one-voxel layers: the split's thin cells are the old epi's
+        # (the diamond's acute tip against the fin side)
+        from fab.structure import _thin_cells
+        thin_after = _thin_cells(lab == ks) | _thin_cells(lab == ke)
+        self.assertFalse((thin_after & ~_thin_cells(lab0 == st.region_index("epi"))).any())
+
     def test_sliver_merge_rejected(self):
         with self.assertRaisesRegex(ValueError, "mirror image"):
             self.build("facet", 9.7, Lz=24.0)                                         # 0.4 nm overlap
+
+
+class TestProfiles(unittest.TestCase):
+    """The realistic-profile steps: a tapered fin etch and a slanted,
+    round-cornered S/D recess."""
+
+    def test_fin_profile_etch(self):
+        st = Structure(Grid(lo=(0, -10, 0), hi=(2, 30, 24), h=(0.5, 0.5, 0.25)))
+        st.substrate("Si", "substrate")
+        st.fin_profile_etch(["Si"], 12.0, [0, -10, -20], [4.5, 5.5, 8.0])
+        g = st.grid
+        f = st.regions[0].phi[2]
+
+        def width(h):
+            j = int(np.argmin(np.abs(g.axes[1] + h)))
+            z = g.axes[2]
+            k = int(np.argmin(np.abs(z - 12.0)))
+            return line_crossing(f[j, k:], z[k:]) - line_crossing(f[j, k::-1], z[k::-1])
+        self.assertAlmostEqual(width(-0.5), 4.55, delta=0.02)                 # (just below the top surface)
+        self.assertAlmostEqual(width(-5.0), 5.0, delta=0.02)
+        self.assertAlmostEqual(width(-10.0), 5.5, delta=0.02)
+        self.assertAlmostEqual(width(-15.0), 6.75, delta=0.02)
+        self.assertAlmostEqual(top_height(st, 1, 1), -20.0, places=6)           # the etch floor
+        with self.assertRaises(ValueError):
+            st.fin_profile_etch(["Si"], 12.0, [0, 5], [4, 4])                   # heights must fall
+
+    def test_tapered_recess(self):
+        st = Structure(Grid(lo=(0, -5, 0), hi=(40, 25, 2), h=(0.25, 0.25, 0.5)))
+        st.substrate("Si", "substrate")
+        ang = 3.0
+        st.tapered_recess(["Si"], 12.0, 28.0, top_height=0.0, floor_height=-20.0, angle=ang, radius=3.0)
+        g = st.grid
+        f = st.regions[0].phi[:, :, 2]
+        x = g.axes[0]
+
+        def left_wall(h):
+            j = int(np.argmin(np.abs(g.axes[1] + h)))
+            return line_crossing(f[:, j], x)                     # gas -> silicon, from x = 0
+        t = np.tan(np.radians(ang))
+        self.assertAlmostEqual(left_wall(-0.5), 12.0 - 0.5 * t, delta=0.03)
+        self.assertAlmostEqual(left_wall(-10.0), 12.0 - 10.0 * t, delta=0.03)
+        # the rounded corner: silicon fills in beside the sharp corner
+        P = 12.0 - 20.0 * t
+        self.assertLess(left_wall(-19.5), P - 0.2)
+        self.assertAlmostEqual(top_height(st, 2, 1), -20.0, places=6)            # the floor
+        self.assertAlmostEqual(top_height(st, 20, 1), 0.0, places=6)             # under the gate: untouched
 
 
 class TestDespeckle(unittest.TestCase):
@@ -580,7 +653,8 @@ class TestFinFET(unittest.TestCase):
         # flakes: the RMG trench corners, see TestFinFET.test_structure_check
         self.assertEqual([w for w in _non_wedge(st.check()) if "flake" not in w], [])
         lab = st.node_labels()
-        merged = (lab[i] == st.region_index("sd_epi")).all(axis=1)       # rows across the whole cell
+        epi = [st.region_index(n) for n in ("sd_epi", "sd_epi_seed")]        # fill + bilayer seed
+        merged = np.isin(lab[i], epi).all(axis=1)                         # rows across the whole cell
         self.assertTrue(merged.any())
 
 

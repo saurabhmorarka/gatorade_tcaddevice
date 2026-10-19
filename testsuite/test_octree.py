@@ -83,6 +83,23 @@ class TestOctreeMetalStaircase(unittest.TestCase):
         self.assertLess(d["mesh"].quality["facet_asymmetry"], 1e-6)
 
 
+class TestOctreeInterfaceFacet(unittest.TestCase):
+    """The default FinFET (gate metal 15 nm): an STI-only node and a Si-only
+    node whose bisector lies exactly on the fin sidewall got a
+    semiconductor facet from the Si side, and the gate failed
+    (conformity). Carrier facets now need semiconductor volume at both
+    ends; the gate runs on this build."""
+
+    def test_finfet_mesh_passes_gate(self):
+        from fab import flow
+        from fab.simulate import build_device
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        m = build_device(flow.load(os.path.join(root, "configs", "fab_finfet.yaml")), mesher="octree",
+                         log=lambda *a: None)["mesh"]
+        semi = m.cv_area_semi > 0
+        self.assertFalse(((m.facet_length_semi > 0) & ~semi[m.edges].all(axis=1)).any())
+
+
 @unittest.skipUnless(HAVE_NATIVE, "Rust kernels not built")
 class TestOctreeNative(unittest.TestCase):
     def setUp(self):

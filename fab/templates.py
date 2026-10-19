@@ -196,7 +196,7 @@ FINFET_DEFAULTS = {
     "sub_depth": 30,          # silicon below the fin etch bottom
     "tox": 2.0,               # gate dielectric (lumped IL + HfO2, EOT 0.85 nm: HKstack)
     "gate_dielectric": "HKstack",
-    "gate_height": 30,        # gate metal above the fin top
+    "gate_height": 15,        # gate metal above the gate dielectric on the fin top
     "gate_process": "last",   # "last": dummy poly, pulled after ILD CMP, replaced by HK + metal (RMG);
                               # "first": the HK + metal gate patterned up front
     "contact_inset": 3,       # contact trench kept off the spacer (ILD in between)
@@ -234,6 +234,19 @@ FINFET_DEFAULTS = {
     # the epi's outer shape on a 1 nm lattice (fab/structure.py epitaxy): its
     # staircase at the 0.5 nm voxel was half the mesh the shape added
     "epi_lattice": 1.0,
+    # PMOS bilayer S/D epi: a low-Ge seed grown first on the recessed silicon
+    # (epi_seed_thickness nm of Si(1-x)Ge(x), x = epi_seed_x), then the
+    # Si0.5Ge0.5 fill; 0 = a single-layer epi. NMOS Si:P is single-layer
+    "epi_seed_thickness": 5, "epi_seed_x": 0.2,
+    # process profile: "ideal" (vertical fin and S/D recess walls, sharp
+    # corners) or "realistic": a tapered fin (fin_w_top at the fin top,
+    # fin_w_gate_bottom at the STI top, fin_w_base at the fin etch floor)
+    # and a slanted S/D recess wall (recess_angle degrees from vertical,
+    # away from the gate: the channel is longer at the bottom) with a
+    # rounded floor corner (recess_corner_radius nm)
+    "profile": "ideal",
+    "fin_w_top": 4.5, "fin_w_gate_bottom": 5.5, "fin_w_base": 8.0,
+    "recess_angle": 2.2, "recess_corner_radius": 3.0,
 }
 
 FINFET_DERIVED = {
@@ -266,10 +279,16 @@ def _sd_epi_and_contacts(p, process, n, x_open_l, x_open_r):
                "mask": "!gate_sp"}
         if p.get("epi_lattice"):
             epi["lattice"] = "epi_lattice"
+    process.append(epi)
+    epi_regions = ["sd_epi"]
+    if not n and p.get("epi_seed_thickness"):
+        process.append({"step": "epi_seed", "label": f"S/D epi seed (SiGe{p['epi_seed_x']:g}, bilayer)",
+                        "region": "sd_epi", "name": "sd_epi_seed", "material": f"SiGe{p['epi_seed_x']:g}",
+                        "on": ["Si"], "thickness": "epi_seed_thickness"})
+        epi_regions.append("sd_epi_seed")
     process += [
-        epi,
         {"step": "epi_doping", "label": "S/D epi in-situ doping", "species": sd_sp, "peak": "epi_peak",
-         "sx": "epi_sx", "sy": "epi_sy", "regions": ["sd_epi"]},
+         "sx": "epi_sx", "sy": "epi_sy", "regions": epi_regions},
         {"step": "deposit", "label": "ILD deposition", "mode": "fill", "material": ild, "name": "ild",
          "to_height": "ild_top + ild_overfill"},
         {"step": "planarize", "label": "ILD CMP", "to_height": "ild_top"},
@@ -285,11 +304,11 @@ def _sd_epi_and_contacts(p, process, n, x_open_l, x_open_r):
     # surface would follow its facets down
     for side in ("source", "drain"):
         process.append({"step": "etch", "label": f"{side} contact etch (into the epi)", "mode": "anisotropic",
-                        "regions": ["ild", "sd_epi"], "mask": f"{side}_ct",
+                        "regions": ["ild"] + epi_regions, "mask": f"{side}_ct",
                         "depth": "ild_top - epi_over + contact_recess"})
         if p["epi_shape"] != "box" and p["contact_plug_depth"]:
             process.append({"step": "contact_plug", "label": f"{side} contact plug (bullet into the epi)",
-                            "regions": ["sd_epi"], "mask": f"{side}_ct",
+                            "regions": epi_regions, "mask": f"{side}_ct",
                             "floor_height": "epi_over - contact_recess", "depth": "contact_plug_depth",
                             "shell": "contact_plug_shell"})
     process += [
@@ -355,9 +374,16 @@ def _merge(defaults, derived, params, kind):
     return p, n
 
 
+def _realistic(p):
+    if p.get("profile", "ideal") not in ("ideal", "realistic"):
+        raise ValueError(f"profile must be ideal or realistic, not {p['profile']!r}")
+    return p.get("profile") == "realistic"
+
+
 def finfet(params):
     """Layer 2 + 3 for the bulk FinFET template."""
     p, n = _merge(FINFET_DEFAULTS, FINFET_DERIVED, params, "finfet")
+    realistic = _realistic(p)
     gm, hk = p["gate_material"], p["gate_dielectric"]
     sub_sp = "B" if n else "P"
     process = [
@@ -365,7 +391,10 @@ def finfet(params):
         {"step": "dope", "label": "substrate doping", "species": sub_sp, "conc": "sub_conc", "materials": ["Si"]},
         {"step": "pattern", "label": "fin mask", "name": "fin", "mask": {"rect": [-1, "Lx + 1", "zf0", "zf1"]}},
         {"step": "etch", "label": "fin etch", "mode": "anisotropic", "materials": ["Si"], "mask": "!fin",
-         "depth": "H_fin + sub_fin"},
+         "depth": "H_fin + sub_fin"} if not realistic else
+        {"step": "fin_profile_etch", "label": "fin etch (tapered)", "materials": ["Si"], "zc": "Lz/2",
+         "heights": [0, "-H_fin", "-(H_fin + sub_fin)"],
+         "widths": ["fin_w_top", "fin_w_gate_bottom", "fin_w_base"]},
         {"step": "deposit", "label": "STI oxide fill", "mode": "fill", "material": "SiO2", "name": "sti",
          "to_height": 5},
         {"step": "planarize", "label": "STI CMP (stop on the fin)", "to_height": 0},
@@ -412,7 +441,10 @@ def finfet(params):
         # on the fin only: an anisotropic front `depth` below an STI column's
         # top would reach the substrate under the STI
         {"step": "etch", "label": "S/D fin recess", "mode": "anisotropic", "materials": ["Si"],
-         "mask": {"not": {"union": ["gate_sp", "!fin"]}}, "depth": "H_fin - sd_recess_stop"},
+         "mask": {"not": {"union": ["gate_sp", "!fin"]}}, "depth": "H_fin - sd_recess_stop"} if not realistic else
+        {"step": "tapered_recess", "label": "S/D fin recess (slanted wall, rounded corner)", "materials": ["Si"],
+         "x_left": "xg0 - spacer", "x_right": "xg1 + spacer", "top_height": 0,
+         "floor_height": "-(H_fin - sd_recess_stop)", "angle": "recess_angle", "radius": "recess_corner_radius"},
     ]
     _sd_epi_and_contacts(p, process, n, "xg0 - spacer", "xg1 + spacer")
     if gate_last:
@@ -432,7 +464,7 @@ def finfet(params):
 # sheets. The substrate mesa under the stack is gated too (bottom
 # parasitic channel), held off by the punch-through stopper. Heights up
 # from the top sheet's top. 2 nm-node-class numbers: CPP 48 nm, Lg 15 nm,
-# 3 sheets 5 nm thick / 25 nm wide, 10 nm SiGe (the suspension gap), 5 nm
+# 3 sheets 5 nm thick / 25 nm wide, 9 nm SiGe (the suspension gap), 5 nm
 # inner and outer spacers.
 NANOSHEET_DEFAULTS = {
     "type": "nmos",
@@ -449,14 +481,14 @@ NANOSHEET_DEFAULTS = {
     "n_sheets": 3,
     "t_sheet": 5,
     "W_sheet": 25,
-    "t_sige": 10,             # sacrificial SiGe = sheet-to-sheet gap after release
+    "t_sige": 9,              # sacrificial SiGe = sheet-to-sheet gap after release (5 + 9 = 14 nm a sheet)
     "sige_material": "SiGe",
     "stack_pitch": 46,        # the z domain (stack-to-stack pitch)
     "sub_fin": 20,            # stack etch into the substrate (mesa height under the STI top)
     "sub_depth": 30,
     "tox": 2.0,
     "gate_dielectric": "HKstack",
-    "gate_height": 30,        # gate metal above the top sheet
+    "gate_height": 15,        # gate metal above the gate dielectric on the top sheet
     "contact_inset": 3,
     "ild_material": "SiO2",
     "ild_cap": 10, "ild_overfill": 5, "top_margin": 4,
@@ -488,6 +520,11 @@ NANOSHEET_DEFAULTS = {
     "epi_shape": None, "epi_lateral": None, "epi_lateral_n": 5, "epi_lateral_p": 7,
     "contact_plug_depth": 12, "contact_plug_shell": 2,      # (see the FinFET)
     "epi_lattice": 1.0,
+    "epi_seed_thickness": 5, "epi_seed_x": 0.2,     # PMOS bilayer epi (see the FinFET)
+    # "realistic": the S/D recess wall leans recess_angle degrees from
+    # vertical (the bottom sheet's channel is longer: 2.2 deg -> about
+    # +2.5 nm on the bottom sheet), its floor corner rounded (see the FinFET)
+    "profile": "ideal", "recess_angle": 2.2, "recess_corner_radius": 3.0,
 }
 
 NANOSHEET_DERIVED = {
@@ -500,8 +537,8 @@ NANOSHEET_DERIVED = {
     "H_stack": "n_sheets*(t_sheet + t_sige)",
     "H_sl": "H_stack + t_bdi",               # superlattice (+ the BDI layer) on the substrate
     "W": "2*n_sheets*(W_sheet + t_sheet)",   # effective width (currents per um of it)
-    "gate_top": "gate_height",
-    "ild_top": "gate_height + ild_cap",
+    "gate_top": "tox + gate_height",
+    "ild_top": "tox + gate_height + ild_cap",
 }
 
 
@@ -587,7 +624,11 @@ def nanosheet(params):
         {"step": "etch", "label": "outer spacer etch (gate top)", "mode": "anisotropic", "regions": ["spacer"],
          "depth": "1.15*spacer"},
         {"step": "etch", "label": "S/D recess (through the stack)", "mode": "anisotropic", "materials": ["Si", sg],
-         "mask": {"not": {"union": ["gate_sp", "!stack"]}}, "depth": "H_stack + 3"},
+         "mask": {"not": {"union": ["gate_sp", "!stack"]}}, "depth": "H_stack + 3"} if not _realistic(p) else
+        {"step": "tapered_recess", "label": "S/D recess (through the stack; slanted wall, rounded corner)",
+         "materials": ["Si", sg], "x_left": "xg0 - spacer", "x_right": "xg1 + spacer", "top_height": 0,
+         "floor_height": "-(H_stack + 3)", "angle": "recess_angle", "radius": "recess_corner_radius",
+         "mask": "stack"},
         {"step": "etch", "label": "SiGe lateral recess", "mode": "isotropic", "regions": ["sige"],
          "thickness": "inner_spacer"},
         {"step": "deposit", "label": "inner spacer deposition", "mode": "conformal", "material": "SiN",
