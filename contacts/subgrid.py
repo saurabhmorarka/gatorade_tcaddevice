@@ -173,6 +173,24 @@ def _tabulate_one(mat, contact, carrier, N):
     return gi, J_s
 
 
+def contact_material(mesh, mat, nodes):
+    """The semiconductor Material a contact touches: the per-node material
+    (mesh.node_materials / node_material_index) most of its nodes carry,
+    else the base `mat`. A p+ SiGe S/D contact must be tabulated with
+    SiGe's gap and band densities: with the base silicon its hole barrier
+    read Eg(Si) - Phi_Bn = 0.67 eV instead of Eg(SiGe) - Phi_Bn = 0.30 eV
+    (DEVELOPMENT_LOG 82). A single-material mesh is unchanged."""
+    mats = getattr(mesh, "node_materials", None)
+    idx = getattr(mesh, "node_material_index", None)
+    if mats is None or idx is None:
+        return mat
+    k = np.bincount(np.asarray(idx)[nodes]).argmax()
+    m = mats[k] if k > 0 else mat
+    if k > 0 and _material_key(m) == _material_key(mat):
+        return mat                            # the same semiconductor as the base: keep the base object
+    return m
+
+
 class SubgridContacts:
     """The sub-grid Schottky boundary condition for a set of contacts on a
     2D/3D mesh. contacts: {name: (SchottkyTable, metal-side info)} built by
@@ -203,8 +221,9 @@ class SubgridContacts:
             Nd = mesh.Cdop[semi]
             carrier = "n" if np.median(Nd) >= 0 else "p"
             Nabs = np.abs(Nd)
-            table = SchottkyTable.build(mat, c, carrier, max(Nabs.min(), 1e15), Nabs.max(), cache=cache, log=log)
-            specs[name] = dict(table=table, nodes=semi, carrier=carrier, contact=c)
+            cmat = contact_material(mesh, mat, semi)
+            table = SchottkyTable.build(cmat, c, carrier, max(Nabs.min(), 1e15), Nabs.max(), cache=cache, log=log)
+            specs[name] = dict(table=table, nodes=semi, carrier=carrier, contact=c, mat=cmat)
         return cls(mesh, mat, specs, area)
 
     def metal_psi0(self, name):
@@ -285,8 +304,9 @@ class SubgridContacts:
             n = ni[i] * np.exp((psi[i] - phin[i] + dEi[i]) / Vt)
             p = ni[i] * np.exp((phip[i] - psi[i] - dEi[i]) / Vt)
             c = s["contact"]
-            vn = te_velocity(c.richardson_n, mat.T, mat.Nc)
-            vp = te_velocity(c.richardson_p, mat.T, mat.Nv)
+            cm = s.get("mat", mat)
+            vn = te_velocity(c.richardson_n, cm.T, cm.Nc)
+            vp = te_velocity(c.richardson_p, cm.T, cm.Nv)
             if s["carrier"] == "n":
                 J, dJ = s["table"](np.abs(self.mesh.Cdop[i]), V - phin[i])
                 # J > 0: conventional current metal -> semiconductor = electrons leaving.

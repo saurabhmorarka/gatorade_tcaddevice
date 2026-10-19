@@ -67,3 +67,22 @@ def mosfet_metrics(curve_lo, curve_hi, L_um):
     out["Ioff"] = float(np.interp(0.0, vg_hi, id_hi))
     out["Ion_Ioff"] = out["Ion"] / out["Ioff"]
     return out
+
+
+def mosfet_metrics_signed(curve_lo, curve_hi, L_um):
+    """mosfet_metrics for either polarity. A PMOS (negative Vds) is mirrored
+    (Vgs, Vds, Id -> their negatives) and measured as an NMOS; its
+    thresholds are mirrored back (negative Vt), the currents, SS and DIBL
+    are magnitudes. out["pmos"] says which."""
+    if curve_hi["Vds"] >= 0:
+        return dict(mosfet_metrics(curve_lo, curve_hi, L_um), pmos=False)
+
+    def flip(c):
+        v, i = -np.asarray(c["Vgs"], float), -np.asarray(c["Id"], float)
+        k = np.argsort(v)
+        return dict(Vds=-c["Vds"], Vgs=v[k], Id=i[k])
+    out = mosfet_metrics(flip(curve_lo), flip(curve_hi), L_um)
+    for k in ("Vt_cc_lo", "Vt_cc_hi", "Vt_lin", "vgs_gm_max_lo"):
+        out[k] = -out[k]
+    out["pmos"] = True
+    return out

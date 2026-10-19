@@ -374,6 +374,35 @@ def _mesh_mobility_nodal_build(mesh, mat):
     return mu_n_node, mu_p_node
 
 
+def set_edge_mobility_factor(mesh, name, f_n, f_p=None):
+    """Attach (or with f_n None, remove) a named static per-edge factor of
+    the low-field mobility: edge_mobility multiplies mu_n0 / mu_p0 by the
+    product of all of them (mesh.edge_mu0_factor), before velocity
+    saturation. For physics that depends on the mesh and the structure but
+    not on the solution - the piezoresistance of the process stress
+    (solver2d/stress_mobility.py), later e.g. a surface-orientation factor:
+    the Jacobian then only carries the constant factor. Without any factor
+    the mesh has edge_mu0_factor None and the mobility is untouched (bit
+    for bit)."""
+    facs = dict(getattr(mesh, "edge_mu0_factors", None) or {})
+    if f_n is None:
+        facs.pop(name, None)
+    else:
+        E = len(mesh.edges)
+        fn = np.asarray(f_n, float)
+        fp = np.asarray(f_p if f_p is not None else f_n, float)
+        if fn.shape != (E,) or fp.shape != (E,):
+            raise ValueError(f"edge mobility factor {name!r} must have one value per edge ({E})")
+        facs[name] = (fn, fp)
+    mesh.edge_mu0_factors = facs
+    if facs:
+        fn = np.prod([v[0] for v in facs.values()], axis=0)
+        fp = np.prod([v[1] for v in facs.values()], axis=0)
+        mesh.edge_mu0_factor = (fn, fp)
+    else:
+        mesh.edge_mu0_factor = None
+
+
 def _edge_vsat(mesh, mat):
     """(vsat_n, vsat_p) per edge - the mean of its two nodes' materials -
     or the base material's scalars when every material has the same. The
@@ -494,13 +523,44 @@ def _contact_edges(mesh):
     return _mesh_cached(mesh, "contact_edges", build)
 
 
+def low_field_mobility(mesh, mat, psi=None, n=None, p=None):
+    """Per-edge low-field mobility (mu_n0, mu_p0): the one place the
+    low-field pipeline is built, in the Sentaurus order
+      1. nodal bulk / doping mobility (Caughey-Thomas or Masetti, static,
+         cached per mesh: _mesh_mobility_nodal);
+      2. (later) nodal surface / Coulomb terms combined by Matthiessen's rule;
+      3. edge value = the mean of the two nodes;
+      4. the STRESS factor on the total low-field mobility
+         (_apply_edge_factors: piezoresistance, solver2d/stress_mobility.py);
+         a per-component option would act inside step 2 instead;
+      5. (later) ballistic: 1/mu0 = 1/mu_low + 1/mu_bal.
+    Velocity saturation (edge_mobility, mobility_field) acts on the result.
+    psi, n, p are for the solution-dependent terms still to come."""
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)                 # 1 (2: surface terms here)
+    mu_n0 = 0.5 * (mu_n_node[ii] + mu_n_node[jj])                          # 3
+    mu_p0 = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
+    mu_n0, mu_p0 = _apply_edge_factors(mesh, mu_n0, mu_p0)                 # 4 (5: ballistic after this)
+    return mu_n0, mu_p0
+
+
+def _apply_edge_factors(mesh, mu_n0, mu_p0):
+    """Step 4 of low_field_mobility: the static per-edge factors
+    (set_edge_mobility_factor; the stress). None: untouched, bit for bit."""
+    fac = getattr(mesh, "edge_mu0_factor", None)
+    if fac is None:
+        return mu_n0, mu_p0
+    return mu_n0 * fac[0], mu_p0 * fac[1]
+
+
 def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phin=None, phip=None):
     """Per-edge (mu_n_e, mu_p_e, dmu_n, dmu_p); dmu_* is None without
     velocity saturation, else the 4 partials (d/dpsi_i, d/dpsi_j,
     d/dphi_i, d/dphi_j) of that carrier's edge mobility.
 
-    mu0 is the doping-dependent (Caughey-Thomas) low-field mobility,
-    averaged to the edge. With velocity saturation it is further reduced by
+    mu0 is the low-field mobility of low_field_mobility (doping-dependent,
+    averaged to the edge, times the stress factor if the mesh has one).
+    With velocity saturation it is further reduced by
     the Caughey-Thomas high-field model (mobility_field), driven per edge by
     the force selected with velocity_saturation (see _edge_force):
 
@@ -522,9 +582,7 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
         same trade-off (FLOOXS/Charon damp the gradient force the same way).
     In equilibrium the edge current is 0 whatever mu is."""
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
-    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
-    mu_n0 = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
-    mu_p0 = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
+    mu_n0, mu_p0 = low_field_mobility(mesh, mat, psi, n, p)
     force = vsat_force(velocity_saturation)
     if force is None:
         return mu_n0, mu_p0, None, None

@@ -45,6 +45,15 @@ def main(argv=None):
                         "quasi-Fermi gradient, Sentaurus-style; 2.5-3x slower in 3D; docs/vsat_modes.md)")
     m.add_argument("--mesher", choices=("cartesian", "octree"), default="cartesian",
                    help="device mesh: graded rectilinear (default) or octree (exact Voronoi dual)")
+    m.add_argument("--stress", nargs="?", const="solve", default=None, metavar="NPZ",
+                   help="process stress -> mobility (piezoresistance, docs/piezo_mobility.md): alone, run "
+                        "mechanics.fab_stress first and save <out>/stress_field.npz; or a saved field to reuse")
+    m.add_argument("--piezo", choices=("saturating", "linear"), default="saturating",
+                   help="piezoresistance model with --stress: saturating (default) or linear (Smith)")
+    m.add_argument("--piezo-doping", choices=("on", "off"), default="on",
+                   help="doping factor of the piezo coefficients (Kanda n / Richter p; default on)")
+    m.add_argument("--stress-set", nargs="*", default=[], metavar="K=V",
+                   help="mechanics.fab_stress stressor overrides with --stress, e.g. gate_GPa=0")
     args = ap.parse_args(argv)
 
     import yaml
@@ -57,7 +66,9 @@ def main(argv=None):
             quantum = dict(spacing_nm=args.quantum_spacing, margin_nm=args.quantum_margin)
         simulate(args.config, out, vds=args.vds, vgs_max=args.vgs_max, vgs_step=args.vgs_step,
                  half_z=not args.full_width, mesher=args.mesher, quantum=quantum, vgs_min=args.vgs_min,
-                 tunneling=args.tunneling, vsat=True if args.vsat == "fast" else "mqf")
+                 tunneling=args.tunneling, vsat=True if args.vsat == "fast" else "mqf", stress=args.stress,
+                 piezo=args.piezo, piezo_doping=args.piezo_doping == "on",
+                 stress_set={k: float(v) for k, v in (kv.split("=") for kv in args.stress_set)})
         return 0
     cfg = flow.load(args.config)
     if args.cmd == "expand":
