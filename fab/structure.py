@@ -398,6 +398,75 @@ class Structure:
         self.regions.insert(k + 1, Region(name, material, seed_phi, parent=region))
         self.regions = [r for r in self.regions if (r.phi < 0).any()]
 
+    def fin_profile_etch(self, materials, zc, heights, widths, mask=None):
+        """Fin etch with a tapered side wall: remove `materials` outside a fin
+        centred on z = zc whose width varies linearly between the
+        breakpoints (heights[k], widths[k]) (top first, heights in nm, up),
+        down to the last height (the etch floor), extruded along x. A
+        straight etch is two breakpoints of one width."""
+        g = self.grid
+        h, w = [float(v) for v in heights], [float(v) for v in widths]
+        if len(h) != len(w) or len(h) < 2 or any(a <= b for a, b in zip(h, h[1:])):
+            raise ValueError("fin_profile_etch: heights must fall from the top, one width each")
+        top = -g.lo[1] + 1.0                                            # a height above the domain top
+        right = [(zc + w[0] / 2, -top)] + [(zc + wk / 2, -hk) for hk, wk in zip(h, w)]
+        left = [(zc - wk / 2, -hk) for hk, wk in reversed(list(zip(h, w)))] + [(zc - w[0] / 2, -top)]
+        far = max(abs(g.lo[2]), abs(g.hi[2])) + abs(zc) + 10.0
+        polys = [right + [(zc + far, -h[-1]), (zc + far, -top)],
+                 [(zc - far, -top), (zc - far, -h[-1])] + left]
+        Y, Z = np.meshgrid(g.axes[1], g.axes[2], indexing="ij")
+        f2 = np.minimum.reduce([levelset.polygon_sdf(Z, Y, pp) for pp in polys])
+        phi_e = np.broadcast_to(f2[None], g.shape)
+        if mask is not None:
+            phi_e = np.maximum(phi_e, self._column(self.mask2d(mask)))
+        self._remove(phi_e, self.regions_of(materials=materials))
+
+    def tapered_recess(self, materials, x_left, x_right, top_height, floor_height, angle=0.0, radius=0.0,
+                       mask=None):
+        """S/D recess with a slanted side wall and a rounded bottom corner:
+        remove `materials` from the floor up, outside the gate side
+        [x_left, x_right] at the top (the spacer edges at `top_height`),
+        the side wall leaning `angle` degrees from vertical away from the
+        gate (the trench narrows downward: the silicon under the gate gets
+        longer with depth, the bottom sheet the longest), its corner with
+        the floor rounded to `radius` (nm). Extruded along z over `mask`.
+        Heights absolute (up), so the floor never follows a column top down
+        beside the fin."""
+        g = self.grid
+        depth = top_height - floor_height
+        if depth <= 0:
+            raise ValueError("tapered_recess: the floor must be below the top")
+        t = np.tan(np.radians(angle))
+        top = -g.lo[1] + 1.0                                            # a height above the domain top
+        polys = []
+        for edge, out in ((x_left, -1.0), (x_right, +1.0)):
+            far = (g.hi[0] + 10.0) if out > 0 else (g.lo[0] - 10.0)
+            T = np.array([edge, top_height])
+            P = np.array([edge + out * t * depth, floor_height])          # the sharp floor corner
+            F = np.array([far, floor_height])
+            pts = [P]
+            if radius > 0:
+                u1, u2 = (T - P) / np.linalg.norm(T - P), (F - P) / np.linalg.norm(F - P)
+                th = 0.5 * np.arccos(np.clip(u1 @ u2, -1, 1))
+                d = radius / np.tan(th)
+                if d > min(np.linalg.norm(T - P), np.linalg.norm(F - P)):
+                    raise ValueError("tapered_recess: radius too large for the recess")
+                bis = (u1 + u2) / np.linalg.norm(u1 + u2)
+                C = P + bis * radius / np.sin(th)
+                a1, a2 = P + u1 * d - C, P + u2 * d - C
+                q1, q2 = np.arctan2(a1[1], a1[0]), np.arctan2(a2[1], a2[0])
+                dq = (q2 - q1 + np.pi) % (2 * np.pi) - np.pi                # the short way round
+                pts = [C + radius * np.array([np.cos(q1 + dq * k / 16), np.sin(q1 + dq * k / 16)])
+                       for k in range(17)]
+            poly = [(edge, top), (edge, top_height)] + [tuple(q) for q in pts] + [(far, floor_height), (far, top)]
+            polys.append([(x, -hh) for x, hh in poly])                     # (x, y), y = -height
+        X, Y = np.meshgrid(g.axes[0], g.axes[1], indexing="ij")
+        f2 = np.minimum.reduce([levelset.polygon_sdf(X, Y, pp) for pp in polys])
+        phi_e = np.broadcast_to(f2[:, :, None], g.shape)
+        if mask is not None:
+            phi_e = np.maximum(phi_e, self._column(self.mask2d(mask)))
+        self._remove(phi_e, self.regions_of(materials=materials))
+
     def contact_plug(self, regions, mask, floor_height, depth, shell):
         """Contact etch into a narrow S/D epi: below a contact trench whose
         floor is at `floor_height`, remove the `regions` (the epi) in a

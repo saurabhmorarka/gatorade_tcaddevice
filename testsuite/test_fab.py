@@ -343,6 +343,52 @@ class TestEpitaxy(unittest.TestCase):
             self.build("facet", 9.7, Lz=24.0)                                         # 0.4 nm overlap
 
 
+class TestProfiles(unittest.TestCase):
+    """The realistic-profile steps: a tapered fin etch and a slanted,
+    round-cornered S/D recess."""
+
+    def test_fin_profile_etch(self):
+        st = Structure(Grid(lo=(0, -10, 0), hi=(2, 30, 24), h=(0.5, 0.5, 0.25)))
+        st.substrate("Si", "substrate")
+        st.fin_profile_etch(["Si"], 12.0, [0, -10, -20], [4.5, 5.5, 8.0])
+        g = st.grid
+        f = st.regions[0].phi[2]
+
+        def width(h):
+            j = int(np.argmin(np.abs(g.axes[1] + h)))
+            z = g.axes[2]
+            k = int(np.argmin(np.abs(z - 12.0)))
+            return line_crossing(f[j, k:], z[k:]) - line_crossing(f[j, k::-1], z[k::-1])
+        self.assertAlmostEqual(width(-0.5), 4.55, delta=0.02)                 # (just below the top surface)
+        self.assertAlmostEqual(width(-5.0), 5.0, delta=0.02)
+        self.assertAlmostEqual(width(-10.0), 5.5, delta=0.02)
+        self.assertAlmostEqual(width(-15.0), 6.75, delta=0.02)
+        self.assertAlmostEqual(top_height(st, 1, 1), -20.0, places=6)           # the etch floor
+        with self.assertRaises(ValueError):
+            st.fin_profile_etch(["Si"], 12.0, [0, 5], [4, 4])                   # heights must fall
+
+    def test_tapered_recess(self):
+        st = Structure(Grid(lo=(0, -5, 0), hi=(40, 25, 2), h=(0.25, 0.25, 0.5)))
+        st.substrate("Si", "substrate")
+        ang = 3.0
+        st.tapered_recess(["Si"], 12.0, 28.0, top_height=0.0, floor_height=-20.0, angle=ang, radius=3.0)
+        g = st.grid
+        f = st.regions[0].phi[:, :, 2]
+        x = g.axes[0]
+
+        def left_wall(h):
+            j = int(np.argmin(np.abs(g.axes[1] + h)))
+            return line_crossing(f[:, j], x)                     # gas -> silicon, from x = 0
+        t = np.tan(np.radians(ang))
+        self.assertAlmostEqual(left_wall(-0.5), 12.0 - 0.5 * t, delta=0.03)
+        self.assertAlmostEqual(left_wall(-10.0), 12.0 - 10.0 * t, delta=0.03)
+        # the rounded corner: silicon fills in beside the sharp corner
+        P = 12.0 - 20.0 * t
+        self.assertLess(left_wall(-19.5), P - 0.2)
+        self.assertAlmostEqual(top_height(st, 2, 1), -20.0, places=6)            # the floor
+        self.assertAlmostEqual(top_height(st, 20, 1), 0.0, places=6)             # under the gate: untouched
+
+
 class TestDespeckle(unittest.TestCase):
     def test_flake_removed_film_kept(self):
         from fab.structure import _despeckle

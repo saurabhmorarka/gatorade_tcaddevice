@@ -62,7 +62,7 @@ def snapshots(config, factor=2, log=print, fab_set=None):
         for k, r in enumerate(st.regions):
             gid = names.setdefault(r.name, (len(names) + 1, r.material))[0]
             ids[lab == k] = gid
-        ids = _coarsen(ids, factor)
+        ids = _coarsen(ids, _factors(st.grid.h, factor))
         # a step that only relabels material born in the step before (the
         # bilayer epi's seed carved out of the just-grown epi) is part of
         # that birth: fold it into the previous snapshot
@@ -88,12 +88,24 @@ def snapshots(config, factor=2, log=print, fab_set=None):
     return snaps, regions, grid, st
 
 
+def _factors(h, factor):
+    """Per-axis coarsening of fab voxels h to cubic stress voxels of
+    factor * h[0] (a finer fab voxel across the fin, e.g. 0.25 nm in z,
+    gets a larger factor)."""
+    fs = [factor * h[0] / ha for ha in h]
+    if any(abs(f - round(f)) > 1e-9 for f in fs):
+        raise ValueError(f"fab voxel {tuple(h)} does not coarsen to a cubic {factor * h[0]:g} nm stress voxel")
+    return tuple(int(round(f)) for f in fs)
+
+
 def _coarsen(ids, f):
-    if f == 1:
+    fx, fy, fz = (f, f, f) if np.isscalar(f) else f
+    if fx == fy == fz == 1:
         return ids
-    nx, ny, nz = (s // f * f for s in ids.shape)
-    b = ids[:nx, :ny, :nz].reshape(nx // f, f, ny // f, f, nz // f, f)
-    b = b.transpose(0, 2, 4, 1, 3, 5).reshape(nx // f, ny // f, nz // f, f ** 3)
+    nx, ny, nz = (s // fa * fa for s, fa in zip(ids.shape, (fx, fy, fz)))
+    b = ids[:nx, :ny, :nz].reshape(nx // fx, fx, ny // fy, fy, nz // fz, fz)
+    b = b.transpose(0, 2, 4, 1, 3, 5).reshape(nx // fx, ny // fy, nz // fz, fx * fy * fz)
+    f3 = fx * fy * fz
     # Solid if at least half the children are solid; then the most common
     # solid region, ties to the OLDER region (smaller id). Plain majority
     # with void as a candidate flickered: a 4 SiGe / 4 void block read as
@@ -104,7 +116,7 @@ def _coarsen(ids, f):
     if not vals:
         return out
     counts = np.stack([(b == v).sum(axis=-1) for v in vals], axis=-1)     # ascending id: argmax -> older
-    solid = (b != 0).sum(axis=-1) * 2 >= f ** 3
+    solid = (b != 0).sum(axis=-1) * 2 >= f3
     out[solid] = np.asarray(vals, np.int32)[np.argmax(counts, axis=-1)][solid]
     return out
 
