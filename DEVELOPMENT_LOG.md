@@ -6564,3 +6564,137 @@ The user added: keep a super-fast default with its error measured and stated, pl
 - The update-only convergence test can accept a non-solution (seen with the rejected density update). Add a residual sanity check, like Sentaurus' CheckRhsAfterUpdate.
 - One FinFET walk step still fails at Vds 0.7.
 - The Sentaurus default of using the field on contact-touching edges is not adopted yet (it would remove the efield warm-up).
+
+## 76. Process stress in 2D: elastic solver with process history (phase 1)
+
+Branch `stress-2d` (from `main` at 4f2bb5a). The user's scope:
+- fully elastic;
+- input strain or stress per stressor;
+- E and ν for every material, anisotropic tensors for Si/SiGe;
+- stressors: SiGe epi, liners, STI, metal gate, contacts;
+- stress tracked through the process steps, including the poly pull and stress memorization;
+- later: dislocations, then piezoresistive mobility.
+
+The user asked for rough literature inputs and all elastic data in the material database.
+
+**New:**
+- `core/materials.py` / `core/material_db.py`:
+  - E, ν, C11/C12/C44, lattice constant and a typical intrinsic film stress;
+  - entries for Si, Ge, SiO2, Si3N4, HfO2, Al2O3, SiON, Poly, Ti, TiN, TaN, NiSi, TiSi2, Al, W, Cu, Co;
+  - `FAB_ALIASES` from fab names (Si, SiN, HKstack, Metal);
+  - AlloyMaterial mixes the new fields.
+- `mechanics/elastic.py`:
+  - Voigt tensors, the Bond-matrix rotation (default (001)/<110> frame);
+  - isotropic and cubic C, SiGe via Vegard;
+  - Dismukes lattice constant and mismatch (x = 0.5: 1.97%);
+  - eps* = -S sigma0 and the film eigenstrain eps0 = -sigma0(1-nu)/E.
+- `mechanics/fe2d.py`:
+  - plane-strain Q1 pixels, 2x2 Gauss, stress stored at the Gauss points;
+  - sides rollers, bottom held, top free;
+  - `StressHistory2D.step(labels, stressors, relax)` handles birth (stress-free in the current shape, plus eps*), death (releases exactly its internal force), and anneal relax;
+  - one stress field per stressor (exact superposition, one LU per step, multi-RHS).
+- `mechanics/planar_flow.py`: three teaching flows with step tables, per-stressor curves and a sigma_xx map.
+
+**Results** (Lg 30, MPa, channel top 4 nm):
+
+| flow | sxx | syy | szz |
+|---|---|---|---|
+| PMOS SiGe gate-first | -897 | +1180 | +371 |
+| PMOS SiGe gate-last | -2674 | -106 | -205 |
+| NMOS SMT | +113 | -209 | -69 |
+
+The poly pull goes -1455 -> -2895 MPa; the SMT cap alone leaves +203 MPa after the strip. Each flow takes 6-8 s on 174 x 240 pixels (splu per step).
+
+**Tests:** `testsuite/test_mechanics.py` (10):
+- tensor rotation;
+- closed-form film and SiGe biaxial ((001), both <110> and <100>);
+- mesh convergence;
+- deposit then strip;
+- superposition;
+- memorization sign.
+
+**Dislocations** (`mechanics/dislocation.py`):
+- an edge dislocation as a Volterra cut, eps* = sym(b x n)/t on one pixel layer from the core to the surface;
+- checked against Hirth & Lothe's infinite-medium field (syy, sxy within 20% at 10-20 nm; sxx is offset by the held side walls, ~E b / L).
+
+In the NMOS SMT flow, one dislocation per S/D at the gate-side edge (b = a/2<110>, half plane missing, core 20 nm) adds +594 MPa of channel tension: +113 -> +706 MPa.
+
+**Piezo preview** (`mechanics/piezo.py`): linear dmu/mu from the channel stress, Smith pi rotated to <110>/(001).
+- PMOS gate-first +90%, gate-last +178%; NMOS SMT +39%, of which the dislocations give +25%.
+- First order only; real gains saturate at GPa.
+
+Tests: 13.
+
+**Next:**
+- take the geometry from `fab/` step snapshots;
+- 3D on the octree;
+- piezo mobility.
+- Runtime: the 2D target is < 2 s (AMG / reuse of the factorization between steps with unchanged labels).
+
+## 77. Process stress in 3D through the fab flows; FinFET gate-last (RMG)
+
+Branch `stress-3d` (from `stress-2d`). The user asked for:
+- 3D stress on the FinFET and nanosheet;
+- every major stress step solved;
+- the stress solve as fast as possible (later: layouts with several transistors);
+- the FinFET flow fixed to poly / dummy-gate pull / RMG. The pull is where the channel takes the most stress, and the metal gate keeps it.
+
+**FinFET gate-last** (`fab/templates.py`):
+- `gate_process: "last"` (default) or `"first"`;
+- dummy poly fill and etch, then the shared `_replacement_gate` after the ILD: CMP to the gate, poly pull, conformal HK (it lines the trench and wraps the fin), TiN fill, gate CMP, ILD cap, ILD CMP;
+- the nanosheet uses the same helper, with its channel release.
+- The structure check relabels 6 one-voxel flakes where the trench-wall HK meets the fin-edge HK. The labels the mesh sees are clean, as in planar; the FinFET tests accept flakes, at most 12. test_fab 41 OK.
+
+Electrical, NMOS (octree, fast vsat):
+
+| | gate-first | gate-last |
+|---|---|---|
+| Vt lin / sat | 0.206 / 0.165 V | 0.202 / 0.150 V |
+| DIBL | 63 mV/V | 79 mV/V |
+| Ion | 1042 | 1009 uA/um |
+| Ioff | 2.0e-7 | 3.6e-7 A/um |
+
+The HK on the trench walls leaves 11 nm of metal in a 15 nm trench. Lg stays the trench width; an option for a 15 nm metal gate is offered to the user.
+
+**3D solver** (`mechanics/fe3d.py`):
+- Q1 hex per voxel, 2x2x2 Gauss, the same history rules as 2D;
+- void voxels are not unknowns, so deposit-then-strip returns to exactly 0 (1e-15);
+- the stiffness is assembled in 3x3 node blocks from the per-material element tables (unique pair keys + bincount);
+- PETSc CG + GAMG with coordinates (rigid-body modes): 13-15 iterations at any size;
+- 0.19M unknowns 2.4 s, 0.74M (4 devices) 9.6 s: linear;
+- lazy solves: forces are queued and solved before a birth into an unsettled structure, before an anneal, and at the end of a step (or only when forced, `--fast`).
+
+**Fab driver** (`mechanics/fab_stress.py`):
+- snapshots every fab step (on_step) and coarsens 0.5 -> 1 nm. A cell is solid if at least half its children are solid, labelled by the commonest solid region, ties to the older region. Plain majority with void flickered: 4 SiGe / 4 void read as void, then as SiGe after the ILD filled the void, a false SiGe birth;
+- stressors by region name (SiGe S/D x 0.5, superlattice x 0.30, TiN gate and contacts -1 GPa, STI and spacer optional);
+- channel = Si within 1.5 nm of the final gate dielectric under the gate, per sheet.
+
+**Results** (sxx, MPa):
+- FinFET PMOS gate-last: epi -1313, poly pull -2104, TiN fill -1896, final -1903 (gate-first -819). SiGe -2090, gate +211; piezo +121%. 12 solves, 99 s (`--fast` 6 solves, 49 s).
+- Nanosheet PMOS: stack etch sets the sheets +821 in z, S/D recess +867, epi -322, pull -756, channel release -1883, TiN -1693, final -1637 (sheets -1726/-1733/-1743, piezo +115..+124%). 24 solves, 335 s (`--fast` 14 solves, 179 s, identical final).
+
+**Tests** (testsuite/test_mechanics.py, 17):
+- 3D film closed form and exact strip;
+- SiGe biaxial;
+- lazy == stepwise;
+- a z-uniform 3D slab equals the 2D plane-strain solve (2e-6, the 2D soft void).
+
+**Also this session:**
+- The FinFET SS question: fast (hybrid) vsat SS 62 is an artifact. No-vsat and exact both give ~74 mV/dec. The hybrid switches force at 1e16 inside the off-state channel, and the kink makes the steepest segment 62.
+- Vt, DIBL and Ion agree between modes from Vgs 0.15 V up.
+- Subthreshold current with either force is 4-8x below no-vsat at Vds 0.05: the velocity cap at the barrier top.
+- The exact mode's cost is intrinsic: the near-solution full step did not change its iterations (1097 vs 1098).
+
+**Follow-up (user questions):**
+- *Why is the FinFET channel stress higher?* The SiGe S/D term is the same in both (FinFET -2090, nanosheet -2088 MPa); both have the same CPP 48, Lg 15 and spacer 5, so the same S/D opening along x. The total differs by the nanosheet's strained-superlattice term (+278 MPa).
+- *Why +867 MPa at the nanosheet S/D recess?* The pseudomorphic SiGe superlattice is born compressed. The stack etch lets it expand sideways and stretch the sheets (+821 in z), and cutting the stack turns that into channel tension.
+  - With the superlattice grown stress-free (`sige_sl_strain=0`): recess 0, epi -1118, pull -1599, release -2166, final -1915 (sheets -1891 / -2094 / -2104 MPa).
+  - The user first asked to drop the superlattice stress, then to keep it if it is the physical case. It stays ON by default (pseudomorphic growth on Si is compressive); `sige_sl_strain=0` is the what-if.
+- Lg: the user keeps the gate-last 11 nm of metal in the 15 nm trench. The 1 nm stress grid is accepted.
+
+**Docs before the merge:** the FinFET tables in docs/sd_epi.md and the
+"Electrical results" table in docs/finfet_nanosheet.md are gate-first runs.
+They are now labelled as such, with the gate-last numbers alongside (Vt 0.202 /
+0.150 V, DIBL 79, Ion 1009, Ioff 3.6e-7), and the SS columns are flagged as
+fast-mode values. The FinFET PMOS and the other 3D configs were not re-run
+electrically after the gate-last change.

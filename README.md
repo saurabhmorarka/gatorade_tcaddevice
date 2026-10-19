@@ -4,6 +4,29 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Process stress through the flow, 2D and 3D ([details](docs/stress.md))
+
+A linear elastic stress solver (`mechanics/`) that follows the process flow
+step by step and splits the channel stress by stressor: SiGe S/D mismatch,
+liners, STI oxide, metal gate, contacts, and stress memorization (anneal).
+Si and SiGe are anisotropic (C11, C12, C44, <110> channel); every material
+has E and nu in the material database. In a PMOS with SiGe S/D, pulling the
+dummy poly gate doubles the channel compression (-1.46 -> -2.90 GPa). An NMOS
+capped and annealed keeps +0.2 GPa of tension after the cap is gone.
+
+In 3D the FinFET and nanosheet run through their real fab flows, voxel for voxel:
+- **FinFET (now gate-last):** the dummy-poly pull takes the channel from −1.3 to −2.1 GPa.
+- **Nanosheet:** the channel release takes it from −0.76 to −1.88 GPa. Each sheet ends at about −1.73 GPa.
+
+Multigrid CG solves are linear in size. A full FinFET history takes 49 s with `--fast`.
+
+```bash
+python3 -m mechanics.planar_flow                                   # 2D teaching flows
+python3 -m mechanics.fab_stress configs/fab_nanosheet_pmos.yaml    # 3D, through the fab flow
+```
+
+<p align="center"><img src="docs/img/stress3d_nanosheet_pmos.png" width="100%"></p>
+
 ## Near-threshold Newton stall fixed; fast and exact velocity saturation ([details](docs/vsat_modes.md))
 
 Near threshold, the line search was cutting Newton steps to 1/32 when the

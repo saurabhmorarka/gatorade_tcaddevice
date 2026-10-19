@@ -197,6 +197,8 @@ FINFET_DEFAULTS = {
     "tox": 2.0,               # gate dielectric (lumped IL + HfO2, EOT 0.85 nm: HKstack)
     "gate_dielectric": "HKstack",
     "gate_height": 30,        # gate metal above the fin top
+    "gate_process": "last",   # "last": dummy poly, pulled after ILD CMP, replaced by HK + metal (RMG);
+                              # "first": the HK + metal gate patterned up front
     "contact_inset": 3,       # contact trench kept off the spacer (ILD in between)
     "ild_material": "SiO2",
     "ild_cap": 10, "ild_overfill": 5, "top_margin": 4,
@@ -298,6 +300,29 @@ def _sd_epi_and_contacts(p, process, n, x_open_l, x_open_r):
     ]
 
 
+def _replacement_gate(p, process, gm, hk, hk_label, metal_label, release=None):
+    """Replacement metal gate, between the epi/ILD steps and the contacts:
+    ILD CMP opens the dummy gate (planarize to the gate top), the dummy gate
+    is pulled (then, for a nanosheet, the channel release), the HK lines
+    the trench, the metal fills it, and an ILD cap restores the ILD top."""
+    k_cmp = next(i for i, s in enumerate(process) if s.get("label") == "ILD CMP")
+    process[k_cmp] = {"step": "planarize", "label": "ILD CMP (open the dummy gate)", "to_height": "gate_top"}
+    rmg = [{"step": "etch", "label": "dummy gate pull", "mode": "anisotropic", "regions": ["dummy_gate"]}]
+    if release is not None:
+        rmg.append(release)
+    rmg += [
+        {"step": "deposit", "label": hk_label, "mode": "conformal", "material": hk, "name": "gate_oxide",
+         "thickness": "tox"},
+        {"step": "deposit", "label": metal_label, "mode": "fill", "material": gm, "name": "gate",
+         "to_height": "gate_top"},
+        {"step": "planarize", "label": "gate CMP", "to_height": "gate_top"},
+        {"step": "deposit", "label": "ILD cap", "mode": "fill", "material": p["ild_material"], "name": "ild",
+         "to_height": "ild_top + ild_overfill"},
+        {"step": "planarize", "label": "ILD CMP", "to_height": "ild_top"},
+    ]
+    process[k_cmp + 1:k_cmp + 1] = rmg
+
+
 def _device_layer(p):
     sd = {"type": p["contact_type"]}
     if p["contact_type"] == "schottky":
@@ -348,16 +373,32 @@ def finfet(params):
          "rp": "H_fin + 3", "sigma": "pts_sigma"},
         {"step": "etch", "label": "fin reveal (STI recess)", "mode": "anisotropic", "regions": ["sti"],
          "depth": "H_fin"},
-        {"step": "deposit", "label": "gate dielectric (IL + HfO2)", "mode": "conformal", "material": hk,
-         "name": "gate_oxide", "thickness": "tox"},
-        {"step": "deposit", "label": "gate metal deposition", "mode": "fill", "material": gm, "name": "gate",
-         "to_height": "gate_top"},
-        {"step": "pattern", "label": "gate mask", "name": "gate", "mask": {"rect": ["xg0", "xg1", -1, "Lz + 1"]}},
-        {"step": "etch", "label": "gate etch", "mode": "anisotropic", "materials": [gm], "mask": "!gate",
-         "stop_on": [hk]},
-        # the whole exposed dielectric, fin side walls included
-        {"step": "etch", "label": "gate dielectric strip", "mode": "anisotropic", "regions": ["gate_oxide"],
-         "mask": "!gate"},
+    ]
+    gate_last = p["gate_process"] == "last"
+    if p["gate_process"] not in ("first", "last"):
+        raise ValueError(f"gate_process must be first or last, not {p['gate_process']!r}")
+    if gate_last:
+        process += [
+            {"step": "deposit", "label": "dummy gate (poly)", "mode": "fill", "material": "Poly",
+             "name": "dummy_gate", "to_height": "gate_top"},
+            {"step": "pattern", "label": "gate mask", "name": "gate", "mask": {"rect": ["xg0", "xg1", -1, "Lz + 1"]}},
+            {"step": "etch", "label": "dummy gate etch", "mode": "anisotropic", "regions": ["dummy_gate"],
+             "mask": "!gate"},
+        ]
+    else:
+        process += [
+            {"step": "deposit", "label": "gate dielectric (IL + HfO2)", "mode": "conformal", "material": hk,
+             "name": "gate_oxide", "thickness": "tox"},
+            {"step": "deposit", "label": "gate metal deposition", "mode": "fill", "material": gm, "name": "gate",
+             "to_height": "gate_top"},
+            {"step": "pattern", "label": "gate mask", "name": "gate", "mask": {"rect": ["xg0", "xg1", -1, "Lz + 1"]}},
+            {"step": "etch", "label": "gate etch", "mode": "anisotropic", "materials": [gm], "mask": "!gate",
+             "stop_on": [hk]},
+            # the whole exposed dielectric, fin side walls included
+            {"step": "etch", "label": "gate dielectric strip", "mode": "anisotropic", "regions": ["gate_oxide"],
+             "mask": "!gate"},
+        ]
+    process += [
         {"step": "deposit", "label": "spacer deposition", "mode": "conformal", "material": "SiN", "name": "spacer",
          "thickness": "spacer"},
         {"step": "pattern", "label": "gate + spacer footprint", "name": "gate_sp",
@@ -374,6 +415,9 @@ def finfet(params):
          "mask": {"not": {"union": ["gate_sp", "!fin"]}}, "depth": "H_fin - sd_recess_stop"},
     ]
     _sd_epi_and_contacts(p, process, n, "xg0 - spacer", "xg1 + spacer")
+    if gate_last:
+        _replacement_gate(p, process, gm, hk, "gate dielectric (IL + HfO2), wraps the fin",
+                          "gate metal fill")
     domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-(H_fin + sub_fin + sub_depth)",
                                                           "ild_top + ild_overfill + top_margin"], "voxel": "voxel"}
     return {"params": p, "domain": domain, "process": process, "device": _device_layer(p)}
@@ -558,22 +602,10 @@ def nanosheet(params):
     _sd_epi_and_contacts(p, process, n, "xg0 - spacer", "xg1 + spacer")
     # replacement metal gate, between the epi/ILD steps and the contacts:
     # ILD CMP opens the dummy gate (planarize to the gate top)
-    k_cmp = next(i for i, s in enumerate(process) if s.get("label") == "ILD CMP")
-    process[k_cmp] = {"step": "planarize", "label": "ILD CMP (open the dummy gate)", "to_height": "gate_top"}
-    rmg = [
-        {"step": "etch", "label": "dummy gate pull", "mode": "anisotropic", "regions": ["dummy_gate"]},
-        {"step": "etch", "label": "channel release (SiGe removal)", "mode": "isotropic", "regions": ["sige"],
-         "thickness": "W_sheet/2 + 2"},
-        {"step": "deposit", "label": "gate dielectric (IL + HfO2), wraps every sheet", "mode": "conformal",
-         "material": hk, "name": "gate_oxide", "thickness": "tox"},
-        {"step": "deposit", "label": "gate metal fill (between the sheets)", "mode": "fill", "material": gm,
-         "name": "gate", "to_height": "gate_top"},
-        {"step": "planarize", "label": "gate CMP", "to_height": "gate_top"},
-        {"step": "deposit", "label": "ILD cap", "mode": "fill", "material": p["ild_material"], "name": "ild",
-         "to_height": "ild_top + ild_overfill"},
-        {"step": "planarize", "label": "ILD CMP", "to_height": "ild_top"},
-    ]
-    process[k_cmp + 1:k_cmp + 1] = rmg
+    _replacement_gate(p, process, gm, hk, "gate dielectric (IL + HfO2), wraps every sheet",
+                      "gate metal fill (between the sheets)",
+                      release={"step": "etch", "label": "channel release (SiGe removal)", "mode": "isotropic",
+                               "regions": ["sige"], "thickness": "W_sheet/2 + 2"})
     domain = {"x": [0, "Lx"], "z": [0, "Lz"], "height": ["-(H_sl + sub_fin + sub_depth)",
                                                           "ild_top + ild_overfill + top_margin"], "voxel": "voxel"}
     return {"params": p, "domain": domain, "process": process, "device": _device_layer(p)}

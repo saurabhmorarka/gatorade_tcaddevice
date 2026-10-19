@@ -45,10 +45,19 @@ class MaterialProperties:
     varshni_alpha_eV_per_K: float = None
     varshni_beta_K: float = None
 
-    # Room for future mechanical-property work (not consumed by any solver
-    # yet) - left optional so existing entries need no changes when used.
+    # Mechanics (mechanics/ stress solver). Every material has an isotropic
+    # E and nu; cubic crystals (Si, Ge, SiGe) also carry their stiffness
+    # tensor C11/C12/C44 (crystal axes), which the solver then uses
+    # instead of E/nu, rotated to the device frame (mechanics/elastic.py).
     youngs_modulus_GPa: float = None
     poisson_ratio: float = None
+    c11_GPa: float = None
+    c12_GPa: float = None
+    c44_GPa: float = None
+    lattice_A: float = None                # cubic lattice constant, Angstrom (epitaxial mismatch)
+    # Typical as-deposited intrinsic stress (GPa, + tensile) of a film of
+    # this material: a rough default for a stressor that gives none.
+    intrinsic_stress_GPa: float = None
 
 
 @dataclass
@@ -105,6 +114,12 @@ class AlloyMaterial:
             tau_p=mix("tau_p"),
             varshni_alpha_eV_per_K=mix("varshni_alpha_eV_per_K"),
             varshni_beta_K=mix("varshni_beta_K"),
+            youngs_modulus_GPa=mix("youngs_modulus_GPa"),
+            poisson_ratio=mix("poisson_ratio"),
+            c11_GPa=mix("c11_GPa"),
+            c12_GPa=mix("c12_GPa"),
+            c44_GPa=mix("c44_GPa"),
+            lattice_A=mix("lattice_A"),
         )
 
     def resolve_strained(self, x: float, substrate: str = "Silicon",
