@@ -196,7 +196,7 @@ FINFET_DEFAULTS = {
     "sub_depth": 30,          # silicon below the fin etch bottom
     "tox": 2.0,               # gate dielectric (lumped IL + HfO2, EOT 0.85 nm: HKstack)
     "gate_dielectric": "HKstack",
-    "gate_height": 30,        # gate metal above the fin top
+    "gate_height": 15,        # gate metal above the gate dielectric on the fin top
     "gate_process": "last",   # "last": dummy poly, pulled after ILD CMP, replaced by HK + metal (RMG);
                               # "first": the HK + metal gate patterned up front
     "contact_inset": 3,       # contact trench kept off the spacer (ILD in between)
@@ -442,7 +442,7 @@ def finfet(params):
 # sheets. The substrate mesa under the stack is gated too (bottom
 # parasitic channel), held off by the punch-through stopper. Heights up
 # from the top sheet's top. 2 nm-node-class numbers: CPP 48 nm, Lg 15 nm,
-# 3 sheets 5 nm thick / 25 nm wide, 10 nm SiGe (the suspension gap), 5 nm
+# 3 sheets 5 nm thick / 25 nm wide, 9 nm SiGe (the suspension gap), 5 nm
 # inner and outer spacers.
 NANOSHEET_DEFAULTS = {
     "type": "nmos",
@@ -459,14 +459,14 @@ NANOSHEET_DEFAULTS = {
     "n_sheets": 3,
     "t_sheet": 5,
     "W_sheet": 25,
-    "t_sige": 10,             # sacrificial SiGe = sheet-to-sheet gap after release
+    "t_sige": 9,              # sacrificial SiGe = sheet-to-sheet gap after release (5 + 9 = 14 nm a sheet)
     "sige_material": "SiGe",
     "stack_pitch": 46,        # the z domain (stack-to-stack pitch)
     "sub_fin": 20,            # stack etch into the substrate (mesa height under the STI top)
     "sub_depth": 30,
     "tox": 2.0,
     "gate_dielectric": "HKstack",
-    "gate_height": 30,        # gate metal above the top sheet
+    "gate_height": 15,        # gate metal above the gate dielectric on the top sheet
     "contact_inset": 3,
     "ild_material": "SiO2",
     "ild_cap": 10, "ild_overfill": 5, "top_margin": 4,
@@ -511,8 +511,8 @@ NANOSHEET_DERIVED = {
     "H_stack": "n_sheets*(t_sheet + t_sige)",
     "H_sl": "H_stack + t_bdi",               # superlattice (+ the BDI layer) on the substrate
     "W": "2*n_sheets*(W_sheet + t_sheet)",   # effective width (currents per um of it)
-    "gate_top": "gate_height",
-    "ild_top": "gate_height + ild_cap",
+    "gate_top": "tox + gate_height",
+    "ild_top": "tox + gate_height + ild_cap",
 }
 
 
