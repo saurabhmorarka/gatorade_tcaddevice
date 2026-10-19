@@ -1,0 +1,19 @@
+# Nanosheet (GAA) PMOS (Si0.5Ge0.5:B S/D epi), 2 nm-node class (fab/templates.py nanosheet): one
+# stack of 3 sheets in one contacted poly pitch, replacement metal gate.
+# Mesa isolation by a heavy punch-through stopper (isolation: pts); the
+# bottom-dielectric-isolation variant is configs/fab_nanosheet_bdi_pmos.yaml.
+# Lengths in nm unless a unit is given.
+#
+#   python3 -m fab build configs/fab_nanosheet_pmos.yaml
+#   python3 -m tcadview out/fab_nanosheet_pmos/build.pvd
+template: nanosheet
+params:
+  profile: realistic
+  type: pmos
+  cpp: 48nm
+  Lg: 15nm
+  n_sheets: 3
+  t_sheet: 5nm
+  W_sheet: 25nm
+  t_sige: 9nm
+  isolation: pts

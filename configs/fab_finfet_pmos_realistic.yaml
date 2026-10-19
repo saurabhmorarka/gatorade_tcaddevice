@@ -1,0 +1,15 @@
+# Bulk FinFET PMOS (Si0.5Ge0.5:B S/D epi), 2 nm-node class (fab/templates.py finfet): one fin in
+# one contacted poly pitch. Lengths in nm unless a unit is given.
+#
+#   python3 -m fab build configs/fab_finfet_pmos.yaml
+#   python3 -m tcadview out/fab_finfet_pmos/build.pvd
+template: finfet
+params:
+  profile: realistic
+  voxel: [0.5, 0.5, 0.25]
+  type: pmos
+  cpp: 48nm
+  Lg: 15nm
+  W_fin: 5nm
+  H_fin: 50nm
+  fin_pitch: 24nm
