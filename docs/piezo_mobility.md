@@ -192,7 +192,8 @@ The planar_flow stress solve takes 9-10 s, once per run (`main2d_mosfet_sweep` s
   gain. A ballistic / backscattering model (planned) links them more
   strongly.
 - **No SiGe coefficients.** The SiGe S/D keeps a factor of 1.
-- **Net doping, not total.** The doping factor uses the mesh's NET doping
-  |N_D - N_A|. Strictly, Kanda/Richter (like Masetti) need the total doping
-  N_A + N_D. The two agree wherever one species dominates: everywhere in
-  these devices except across a junction.
+- **Total doping (fixed in DEVELOPMENT_LOG 83).** The doping factor takes
+  the total doping N_A + N_D (`mesh.Ntot`, attached by `fab simulate`), as
+  Kanda/Richter (like Masetti) need. A 2D config mesh carries only the net
+  doping and falls back to |N_D - N_A|. The two agree wherever one species
+  dominates: everywhere in these devices except across a junction.

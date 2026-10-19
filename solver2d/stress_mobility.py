@@ -10,7 +10,7 @@ interface):
 
 Pi_c is the full cubic piezoresistance tensor rotated to the device frame
 (default (001) wafer, <110> channel), P_c(N) the optional doping factor at
-the edge (the mean of its nodes' |net doping|). The factors are computed
+the edge (the mean of its nodes' total doping N_A + N_D, |net| where the mesh has no total). The factors are computed
 once per mesh and attached with set_edge_mobility_factor: the stress does
 not depend on the solution, so the Newton Jacobian only carries a constant
 factor and the solve costs the same. Edges in SiGe or touching an
@@ -71,6 +71,14 @@ def silicon_nodes(mesh, mat):
     return out
 
 
+def total_doping(mesh):
+    """N_A + N_D per node: mesh.Ntot where the mesh carries it (fab devices,
+    DEVELOPMENT_LOG 83), else |net doping|."""
+    tot = getattr(mesh, "Ntot", None)
+    net = np.abs(np.asarray(mesh.Cdop, float))
+    return net if tot is None else np.maximum(np.asarray(tot, float), net)
+
+
 def edge_geometry(mesh):
     """(midpoints nm (E, 3), unit directions (E, 3)) in the device frame; a
     2D mesh's z is 0."""
@@ -127,7 +135,8 @@ def stress_factors(mesh, mat, field, model=None, materials=("Si",), check_tol=0.
         raise ValueError(f"stress field / device mesh frame check failed: {100 * miss:.2f}% of the silicon "
                          f"edges are more than one stress voxel from silicon (limit {100 * check_tol:g}%)")
     sig = field.sample(m_on, materials)
-    N = 0.5 * (np.abs(mesh.Cdop[ii[on]]) + np.abs(mesh.Cdop[jj[on]]))
+    Nn = total_doping(mesh)
+    N = 0.5 * (Nn[ii[on]] + Nn[jj[on]])
     out = {}
     for c in ("n", "p"):
         Pi = piezo.pi_tensor(c, model.frame, model.coeffs)
