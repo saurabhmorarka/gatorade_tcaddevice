@@ -56,8 +56,14 @@ KLAASSEN = {
 KLAASSEN_COMMON = dict(f_CW=2.459, f_BH=3.828, c_D=0.21, N_D_ref=4e20, c_A=0.5, N_A_ref=7.2e20,
                        s=(0.89233, 0.41372, 0.19778, 0.28227, 0.005978, 1.80618, 0.72169),
                        r=(0.7643, 2.2999, 6.5502, 2.3670, -0.01552, 0.6478))
-# Coulomb scattering by interface charge (Sentaurus Neg/PosInterfaceCharge, Table 63 defaults)
-COULOMB_IC = dict(mu1=40.0, k=1.0, c_trans=1e18, gamma=1.5, nu1=1.0, nu2=0.5, E0=2e5, eps=2.0, N0=1e11)
+# Coulomb scattering by interface charge (Sentaurus Neg/PosInterfaceCharge, Eq. 311). The form and
+# k, gamma, nu1, nu2, E0, eps, N0 are Table 63's. mu1 and c_trans are recalibrated (DEVELOPMENT_LOG 83):
+# Table 63's mu1 = 40, c_trans = 1e18 halve mu_eff near threshold already at Qit = 1e11 and keep a
+# 40-75% loss at N_inv > 2e12 (1D harness, Na 1e16, tox 5 nm). The calibrated pair gives 2-5% / 11-17% /
+# 20-26% near threshold (N_inv 1e11-5e11) for Qit 1e11 / 3e11 / 5e11 and 0.5% / 3% / 7% above 2e12.
+# coulomb_mu1=40, coulomb_c_trans=1e18 restore the table.
+COULOMB_IC = dict(mu1=200.0, k=1.0, c_trans=5e16, gamma=1.5, nu1=1.0, nu2=0.5, E0=2e5, eps=2.0, N0=1e11)
+COULOMB_IC_SENTAURUS = dict(COULOMB_IC, mu1=40.0, c_trans=1e18)
 # remote Coulomb (Tanimoto, SISPAD 2006) and remote phonon (Zhu & Ma, EDL 25, 89 (2004)), Tables 64/65
 RCS = dict(mu0=149.0, g1=0.23187, g2=2.1, g3=0.40, g4=0.05, g5=1.0, s=0.1, c0=3e16, N_floor=1e15)
 RPS = dict(mu0=496.7, g1=0.68, g2=0.34)
@@ -84,6 +90,8 @@ class MobilityModel:
     interface_field: str = "dcont"   # dcont (D-continuity on interface nodes) | lsq (one-sided gradient)
     doping: str = "total"            # total (N_A + N_D where the mesh carries it) | net (|N_D - N_A|)
     interface_charge: float = 0.0    # cm^-2 (units of q, signed): fixed charge on every Si/insulator interface
+    coulomb_mu1: float = None        # interface-charge Coulomb mu1, c_trans (None: COULOMB_IC, calibrated;
+    coulomb_c_trans: float = None    # 40 and 1e18 = Sentaurus Table 63)
     highk: bool = False              # remote Coulomb + phonon from a high-k dielectric (eps_r > highk_eps_r)
     highk_eps_r: float = 8.0
     l_crit: float = 1e-6             # cm
@@ -129,6 +137,9 @@ class MobilityModel:
             setattr(m, k, float(getattr(m, k)))
         for c in ("n", "p"):
             setattr(m, f"delta_scale_{c}", m.delta_scale(c))
+        for k in ("coulomb_mu1", "coulomb_c_trans"):
+            if getattr(m, k) is not None:
+                setattr(m, k, float(getattr(m, k)))
         m.highk = m.highk in (True, 1, "1", "true", "on", "yes")
         return None if m.mode == "off" else m
 
@@ -205,8 +216,10 @@ def interface_coulomb(F, Nit, c, T=300.0, prm=COULOMB_IC):
     as read for the plan; f(F) switches it off at flat band)."""
     x = np.maximum(np.abs(Nit), 1.0) / prm["N0"]
     f = -np.expm1(-(np.maximum(F, 1.0) / prm["E0"]) ** prm["eps"])
-    mu = prm["mu1"] * (T / 300.0) ** prm["k"] / x ** prm["nu1"] * (
-        1.0 + (c / (prm["c_trans"] * x ** prm["nu2"])) ** prm["gamma"])
+    # Sentaurus Eq. 311: nu1 in the screening term, nu2 in the prefactor
+    # (the first version had them swapped: x^-1 unscreened, 4x too strong at 1e12)
+    mu = prm["mu1"] * (T / 300.0) ** prm["k"] / x ** prm["nu2"] * (
+        1.0 + (np.maximum(c, 0.0) / (prm["c_trans"] * x ** prm["nu1"])) ** prm["gamma"])
     return f / mu
 
 
@@ -448,6 +461,20 @@ class SurfaceMobility:
         self.Da = Da
         self.Na = Nt[a]
         self.ic = None
+        self.ic_prm = dict(COULOMB_IC)
+        if model.coulomb_mu1 is not None:
+            self.ic_prm["mu1"] = model.coulomb_mu1
+        if model.coulomb_c_trans is not None:
+            self.ic_prm["c_trans"] = model.coulomb_c_trans
+        # the D-continuity value is the OXIDE-side displacement over eps_si; a fixed sheet charge on the
+        # interface node adds q Qit / eps_si on the silicon side (the D-continuity row's sign: positive in
+        # inversion; checked against the one-sided silicon gradient at depletion, where it matches to 3%).
+        # Without it a positive Qit under-reads F, and with it f(F) of the Coulomb term.
+        self.F_off = None
+        if model.interface_charge and len(self.act) and g["dcont"].any():
+            from core.params import Q as _Q
+            dc = g["dcont"][self.act]
+            self.F_off = np.where(dc, _Q * model.interface_charge / _node_eps(mesh, mat)[self.act], 0.0)
         if model.interface_charge:
             self.ic = abs(model.interface_charge)
         self.Dhk = None
@@ -467,6 +494,8 @@ class SurfaceMobility:
         F = np.full(self.N, self.model.F_min)
         if len(self.act):
             g = self.geo["Fop"] @ np.asarray(psi, float)
+            if self.F_off is not None:
+                g = g + self.F_off
             F[self.act] = np.sqrt(g * g + self.model.F_min ** 2)
         return F
 
@@ -491,8 +520,8 @@ class SurfaceMobility:
             add_n = self.orient["n"] * lombardi(Fa, self.Na, npa, self.sets["n"], T)
             add_p = self.orient["p"] * lombardi(Fa, self.Na, npa, self.sets["p"], T)
             if self.ic is not None:
-                add_n = add_n + interface_coulomb(Fa, self.ic, na, T)
-                add_p = add_p + interface_coulomb(Fa, self.ic, pa, T)
+                add_n = add_n + interface_coulomb(Fa, self.ic, na, T, self.ic_prm)
+                add_p = add_p + interface_coulomb(Fa, self.ic, pa, T, self.ic_prm)
             if self.Dhk is not None:
                 add_n = add_n + self.Dhk * remote_highk(Fa, self.Na, na, T)
                 add_p = add_p + self.Dhk * remote_highk(Fa, self.Na, pa, T)

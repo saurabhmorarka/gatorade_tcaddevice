@@ -102,6 +102,18 @@ class TestFormulas(unittest.TestCase):
         self.assertGreater(b[0], a[0])          # more charge, more scattering
         self.assertLess(c[0], b[0])             # screened by the inversion carriers
         self.assertLess(sm.interface_coulomb(np.array([1e3]), 1e12, np.array([1e18]))[0], 1e-3 * b[0])   # flat band
+        # Sentaurus Eq. 311 by hand, Table 63 (mu1 40, c_trans 1e18): nu1 = 1 in the screening term,
+        # nu2 = 0.5 in the prefactor (the first version had them swapped)
+        x, c0, F0 = 5.0, 2e18, 4e5
+        mu = 40.0 / x ** 0.5 * (1.0 + (c0 / (1e18 * x)) ** 1.5)
+        f = 1.0 - np.exp(-(F0 / 2e5) ** 2)
+        got = sm.interface_coulomb(np.array([F0]), x * 1e11, np.array([c0]), prm=sm.COULOMB_IC_SENTAURUS)
+        np.testing.assert_allclose(got, f / mu, rtol=1e-12)
+        # screening: mu_C rises monotonically with the carrier density, for both parameter sets
+        cc = np.logspace(15, 20, 26)
+        for prm in (sm.COULOMB_IC, sm.COULOMB_IC_SENTAURUS):
+            inv = sm.interface_coulomb(np.full(26, 1e6), 3e11, cc, prm=prm)
+            self.assertTrue(np.all(np.diff(inv) < 0))
         r = sm.remote_highk(np.array([1e6]), np.array([1e15]), np.array([1e19]))
         self.assertTrue(1 / 2000 < r[0] < 1 / 100)
 
@@ -295,6 +307,64 @@ class TestSolver(unittest.TestCase):
         finally:
             sm.attach_mobility(mesh, mat, "off")
             m._CTX.clear()
+
+    def test_interface_coulomb_screened_and_monotonic(self):
+        """Regression (DEVELOPMENT_LOG 83): 2D NMOS, Qit 1e12, Vds 50 mV,
+        Vgs 0-1.5 V. The first interface-Coulomb version gave mu_eff 200 ->
+        380 -> 50 and a falling Id (negative gm). Now: Id rises at every
+        step, the Coulomb-limited mobility of the mid-channel column rises
+        with N_inv (screening), and the Coulomb loss above N_inv 2e12 is
+        shrinks with N_inv against the same run without Qit at the same N_inv
+        (about 20% left at 2e12 for this large Qit; 3e11 leaves 3.5%)."""
+        import main2d_mosfet_sweep as m
+        from main2d_mosfet_sweep import continuation, solve_mosfet
+        from solver2d.current import contact_current
+        mesh, mat, dev, Cs, eq0, vsat = mosfet_2d("off")
+        gate = next(c for c in mesh.domain.contacts if c.name == "gate")
+        x0, x1 = gate.x_range_cm
+        P = mesh.points
+        col = ((P[:, 0] > x0 + 0.25 * (x1 - x0)) & (P[:, 0] < x1 - 0.25 * (x1 - x0)) & (P[:, 1] >= 0.0)
+               & (P[:, 1] < 30e-7) & ~mesh.is_insulator)
+        VG = [round(v, 2) for v in np.arange(0.0, 1.51, 0.1)]
+        res = {}
+        try:
+            for qit in (0.0, 1e12):
+                sm.attach_mobility(mesh, mat, dict(mode="fast", interface_charge=qit))
+                S = mesh.surface_mobility
+
+                def solve(vg, vd, g):
+                    return solve_mosfet(mesh, mat, dev, Cs, vg, vd, psi_init=g["psi"], phin_init=g["phin"],
+                                        phip_init=g["phip"], cold_retry=False, velocity_saturation=vsat)
+                st0, _, _ = continuation(lambda p_, g: solve(0.0, p_, g), 0.0, eq0, [0.0])
+                ramp, _, _ = continuation(lambda p_, g: solve(0.0, p_, g), 0.0, st0[0.0], [0.05])
+                st, _, _ = continuation(lambda p_, g: solve(p_, 0.05, g), 0.0, ramp[0.05], VG)
+                rows = []
+                for v in VG:
+                    r = st[v]
+                    self.assertTrue(r["converged"])
+                    w = (r["n"] * mesh.cv_area_semi)[col]
+                    mu = S.nodal(mat, r["psi"], r["n"], r["p"])[0]
+                    a = S.act
+                    inv_c = np.zeros(len(P))
+                    if S.ic is not None:
+                        Fa = S.normal_field(r["psi"])[a]
+                        inv_c[a] = S.Da * sm.interface_coulomb(Fa, S.ic, r["n"][a], S.T, S.ic_prm)
+                    rows.append((abs(contact_current(mesh, mat, r, "drain")), w.sum() / (x1 - x0) * 2,
+                                 (mu[col] * w).sum() / w.sum(), w.sum() / max((inv_c[col] * w).sum(), 1e-300)))
+                res[qit] = np.array(rows)
+        finally:
+            sm.attach_mobility(mesh, mat, "off")
+            m._CTX.clear()
+        I, Ni, mu, muC = res[1e12].T
+        self.assertTrue(np.all(np.diff(I) > 0), I)
+        on = Ni > 4e11                     # above threshold (below it f(F) switches the term on)
+        self.assertTrue(np.all(np.diff(muC[on]) > 0), muC[on])
+        # mu_eff / mu_eff(no Qit) at the same N_inv rises towards 1 (screening merges the curves)
+        ok = (Ni > 8e11) & (Ni <= res[0.0][:, 1].max())
+        ratio = (mu / np.interp(np.log(Ni), np.log(res[0.0][:, 1]), res[0.0][:, 2]))[ok]
+        self.assertGreaterEqual(ok.sum(), 3)
+        self.assertTrue(np.all(np.diff(ratio) > 0), ratio)
+        self.assertGreater(ratio[-1], 0.78)
 
 
 if __name__ == "__main__":
