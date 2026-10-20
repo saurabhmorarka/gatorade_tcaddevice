@@ -126,17 +126,60 @@ def plot(R, path, kinds=("nmos", "pmos"), title=""):
     fig.savefig(path, dpi=120)
 
 
+def sensitivity_plot(R, path, kinds=("nmos", "pmos")):
+    """dln Id / dln mu_low vs Lg (saturation Ion and linear Idlin), ballistic
+    off / on, and the linear apparent-mobility ratio ON/OFF against
+    Matthiessen's mu_bal / (mu_ch + mu_bal)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.4))
+    col = {"nmos": "C0", "pmos": "C3"}
+    for kind in kinds:
+        for tag, ls, m in (("off", "-", "o"), ("bal", "--", "s")):
+            d = R.get((kind, tag))
+            if not d:
+                continue
+            L = np.array(sorted(d))
+            for a, key in ((ax[0], "S_mu"), (ax[1], "S_mu_lin")):
+                a.plot(L, [d[l].get(key, np.nan) for l in L], ls=ls, marker=m, color=col[kind],
+                       label=f"{kind.upper()} ballistic {'on' if tag == 'bal' else 'off'}")
+        on, off = R.get((kind, "bal")), R.get((kind, "off"))
+        if on and off:
+            L = np.array(sorted(set(on) & set(off)))
+            r = [on[l]["mu_app_0.4"] / off[l]["mu_app_0.4"] for l in L]
+            pred = [on[l]["mu_bal"] / (off[l]["mu_ch_0.4"] + on[l]["mu_bal"]) for l in L]
+            ax[2].plot(L, r, "o-", color=col[kind], label=f"{kind.upper()} simulated mu_app ON/OFF")
+            ax[2].plot(L, pred, ":", color=col[kind], label=f"{kind.upper()} Matthiessen mu_bal/(mu_ch+mu_bal)")
+    ax[0].set_ylabel("dln Ion / dln mu_low (|Vds| 0.7 V, Vt,sat + 0.45 V)")
+    ax[1].set_ylabel("dln Idlin / dln mu_low (|Vds| 50 mV, Vt,lin + 0.6 V)")
+    ax[2].set_ylabel("apparent mobility, ballistic on / off (overdrive 0.4 V)")
+    for a in ax:
+        a.set_xscale("log")
+        a.set_xlabel("gate length Lg (nm)")
+        a.grid(alpha=0.3, which="both")
+        a.legend(fontsize=8)
+    ax[0].set_ylim(0, 1.05)
+    ax[1].set_ylim(0.7, 1.02)
+    fig.suptitle("2D planar (1 nm oxide, body 6e18, no stress): how much the low-field mobility still controls Id")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("results", nargs="+")
     ap.add_argument("--plot", default=None)
     ap.add_argument("--kinds", nargs="*", default=["nmos", "pmos"])
     ap.add_argument("--title", default="")
+    ap.add_argument("--sens-plot", default=None, help="dln Id / dln mu_low vs Lg figure (2D lg_sweep results)")
     a = ap.parse_args()
     R = load(a.results)
     print(tables(R, a.kinds))
     if a.plot:
         plot(R, a.plot, a.kinds, a.title)
+    if a.sens_plot:
+        sensitivity_plot(R, a.sens_plot, a.kinds)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,38 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Ballistic mobility: short-channel Lg sweep and the mobility stack ([details](docs/ballistic.md))
+
+An opt-in quasi-ballistic correction (`fab simulate --ballistic`, or a
+2D `ballistic:` block; default OFF). Per channel edge it uses Matthiessen:
+1/μ = 1/μ_low + 1/(γ^0.5 μ_bal), with μ_bal = q v_T L_ch/(2kT) (Shur /
+Sentaurus BalMob; exactly Lundstrom's linear-regime backscattering). The
+term comes after the stress factor γ and before velocity saturation. It
+only lowers μ; k = μ_bal/L is 23.9 (n) and 16.4 (p) cm²/(V s nm) from the
+masses, and Monte Carlo gives 8-13.
+
+- **FinFET Lg sweep, 12-30 nm.** NMOS Ion(15)/Ion(30) is 0.979 and
+  Ion(12)/Ion(15) 0.834: the acceptance (<= 1.05 / 1.03) passes. It
+  passes with the term off too (0.972 / 0.822): series resistance, vsat
+  and short-channel electrostatics already flatten the NMOS. The PMOS
+  requirement fails. Without stress it gains 6% from 30 to 15 nm (1.063).
+  The SiGe channel stress rises -881 -> -1500 MPa but adds only +0.7%. The
+  hole channel is still mobility-controlled, and a Matthiessen term keeps
+  a 1/L gain at any physical k (k 8.4: 1.059).
+- **The mobility stack at short Lg** (2D NMOS, 500 / 30 / 15 nm): every
+  term still acts on the same I-V region (phonon flat, roughness growing
+  with Vgs, Coulomb at and below Vt, vsat at high Vds). Their Id impact
+  shrinks with Lg mainly through velocity saturation and Rs: at Vt +
+  0.3 V, Vds 0.7 V, roughness is -40% at 500 nm and -2.8% at 15 nm. The
+  ballistic term trims each by another 10-20% (relative). dln Id/dln μ_low
+  in saturation falls from 0.99 at 500 nm to 0.39 at 15 nm (term off;
+  0.36 on).
+- **PMOS less ballistic?** Yes, for unstrained Si: holes have the shorter
+  mean free path (~5 vs ~12 nm). The Monte Carlo gap is smaller than that
+  estimate suggests, and strain closes part of it; that size is uncertain.
+
+<p align="center"><img src="docs/img/ballistic_iv_regions.png" width="100%"></p>
+
 ## Inversion-layer mobility: phonon, surface roughness, Coulomb, orientation ([details](docs/mobility.md))
 
 A carrier at the gate interface used to move with the bulk (Masetti)
@@ -103,7 +135,7 @@ barrier 0.67 eV instead of 0.30 eV; it now uses the SiGe it touches
 The 3D PMOS gains are well below the literature's +50-100% Ion, for three reasons:
 - the 3D PMOS are series-resistance limited;
 - velocity saturation caps the channel;
-- there is no ballistic model yet.
+- the ballistic mobility ([docs/ballistic.md](docs/ballistic.md)) is off by default, and it only lowers μ.
 
 These 3D NMOS numbers predate the NMOS stressors above (Si:P, on by
 default), when the 3D NMOS flows carried almost no stress. Open (user
