@@ -163,7 +163,7 @@ def _context_2d(ballistic):
     import main2d_mosfet_sweep as m
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return m._context(CFG_N, None, "off", ballistic)
+        return m._context(CFG_N, None, "off", ballistic=ballistic)
 
 
 class TestDevice2D(unittest.TestCase):
@@ -196,8 +196,9 @@ class TestDevice2D(unittest.TestCase):
         on = _context_2d("on")
         self.assertIsNone(getattr(off[0], "edge_mu_ballistic", None))
         mesh, mat, dev, Cs, eq, vsat = on
-        mu_off = low_field_mobility(off[0], mat)[0]
-        mu_on = low_field_mobility(mesh, mat)[0]
+        st = (eq["psi"], eq.get("n"), eq.get("p"))          # the surface terms are solution-dependent
+        mu_off = low_field_mobility(off[0], mat, *st)[0]
+        mu_on = low_field_mobility(mesh, mat, *st)[0]
         w = mesh.edge_mu_ballistic["inv_n"] * mesh.ballistic_report["mu_bal_n"]
         np.testing.assert_allclose(mu_on, bm.matthiessen(mu_off, mesh.ballistic_report["mu_bal_n"], w), rtol=1e-12)
 
