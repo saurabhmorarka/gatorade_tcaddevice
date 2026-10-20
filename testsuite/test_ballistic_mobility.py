@@ -1,4 +1,4 @@
-"""Ballistic mobility (solver2d/ballistic_mobility.py, DEVELOPMENT_LOG 84,
+"""Ballistic mobility (solver2d/ballistic_mobility.py, DEVELOPMENT_LOG 85,
 docs/ballistic.md): the thermal velocity and k = mu_bal/L against hand
 numbers, Matthiessen limits, the identity with Lundstrom's linear-regime
 backscattering model, the channel mask, the stress gamma^s scaling, the

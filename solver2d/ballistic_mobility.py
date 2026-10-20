@@ -1,6 +1,6 @@
 """Ballistic (channel-length) mobility: the quasi-ballistic correction of
 the drift-diffusion mobility in short channels (docs/ballistic.md,
-DEVELOPMENT_LOG 84). Default OFF.
+DEVELOPMENT_LOG 85). Default OFF.
 
     1/mu0 = 1/mu_low + w / (gamma^s * mu_bal)          per edge, low field
     mu_bal = q v_T L_ch / (2 k T),   v_T = sqrt(2 k T / (pi m*))
