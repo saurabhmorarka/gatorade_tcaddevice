@@ -363,8 +363,12 @@ def _mesh_mobility_nodal_multi(mesh, mats, idx):
 
 
 def _mesh_mobility_nodal_build(mesh, mat):
+    return _mobility_from_doping(mat, np.abs(mesh.Cdop))
+
+
+def _mobility_from_doping(mat, N_abs):
+    """(mu_n, mu_p) of mat's doping-dependent model at the doping N_abs."""
     model = getattr(mat, "doping_mobility", "caughey_thomas")
-    N_abs = np.abs(mesh.Cdop)
     if model == "masetti":
         return mobility_masetti(N_abs, mat.masetti_n), mobility_masetti(N_abs, mat.masetti_p)
     if model != "caughey_thomas":
@@ -523,23 +527,44 @@ def _contact_edges(mesh):
     return _mesh_cached(mesh, "contact_edges", build)
 
 
-def low_field_mobility(mesh, mat, psi=None, n=None, p=None):
+def mobility_state(mesh, mat, psi, n=None, p=None):
+    """The solution-dependent low-field mobility of the iterate (psi, n, p)
+    - a surface_mobility.MobilityState - or None when the mesh has none
+    (mesh.surface_mobility, solver2d/surface_mobility.py). newton_solve_2d
+    computes it at each Jacobian assembly and holds it through that
+    iteration's line search (the lagged-coefficient scheme)."""
+    sm = getattr(mesh, "surface_mobility", None)
+    return None if sm is None else sm.state(mat, psi, n, p)
+
+
+def low_field_mobility(mesh, mat, psi=None, n=None, p=None, ms=None):
     """Per-edge low-field mobility (mu_n0, mu_p0): the one place the
     low-field pipeline is built, in the Sentaurus order
       1. nodal bulk / doping mobility (Caughey-Thomas or Masetti, static,
-         cached per mesh: _mesh_mobility_nodal);
-      2. (later) nodal surface / Coulomb terms combined by Matthiessen's rule;
+         cached per mesh: _mesh_mobility_nodal; with the inversion-layer
+         model: from the total doping, or Klaassen in its exact mode);
+      2. nodal surface / Coulomb terms combined by Matthiessen's rule
+         (mesh.surface_mobility, solver2d/surface_mobility.py: Lombardi /
+         Darwish phonon + surface roughness on the normal field, interface
+         and remote Coulomb, per-interface orientation sets);
       3. edge value = the mean of the two nodes;
       4. the STRESS factor on the total low-field mobility
          (_apply_edge_factors: piezoresistance, solver2d/stress_mobility.py);
          a per-component option would act inside step 2 instead;
-      5. (later) ballistic: 1/mu0 = 1/mu_low + 1/mu_bal.
+      5. (ballistic branch) 1/mu0 = 1/mu_low + 1/mu_bal, here.
     Velocity saturation (edge_mobility, mobility_field) acts on the result.
-    psi, n, p are for the solution-dependent terms still to come."""
-    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
-    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)                 # 1 (2: surface terms here)
-    mu_n0 = 0.5 * (mu_n_node[ii] + mu_n_node[jj])                          # 3
-    mu_p0 = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
+    ms: the lagged state of steps 1-3 (mobility_state); None evaluates
+    them at (psi, n, p) - the exact current of a converged state."""
+    sm = getattr(mesh, "surface_mobility", None)
+    if sm is not None:                                                     # 1-3, solution-dependent
+        if ms is None:
+            ms = sm.state(mat, psi, n, p)
+        mu_n0, mu_p0 = ms.mu_n, ms.mu_p
+    else:
+        ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+        mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)             # 1
+        mu_n0 = 0.5 * (mu_n_node[ii] + mu_n_node[jj])                      # 3
+        mu_p0 = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
     mu_n0, mu_p0 = _apply_edge_factors(mesh, mu_n0, mu_p0)                 # 4 (5: ballistic after this)
     return mu_n0, mu_p0
 
@@ -553,7 +578,7 @@ def _apply_edge_factors(mesh, mu_n0, mu_p0):
     return mu_n0 * fac[0], mu_p0 * fac[1]
 
 
-def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phin=None, phip=None):
+def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phin=None, phip=None, ms=None):
     """Per-edge (mu_n_e, mu_p_e, dmu_n, dmu_p); dmu_* is None without
     velocity saturation, else the 4 partials (d/dpsi_i, d/dpsi_j,
     d/dphi_i, d/dphi_j) of that carrier's edge mobility.
@@ -582,7 +607,7 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
         same trade-off (FLOOXS/Charon damp the gradient force the same way).
     In equilibrium the edge current is 0 whatever mu is."""
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
-    mu_n0, mu_p0 = low_field_mobility(mesh, mat, psi, n, p)
+    mu_n0, mu_p0 = low_field_mobility(mesh, mat, psi, n, p, ms)
     force = vsat_force(velocity_saturation)
     if force is None:
         return mu_n0, mu_p0, None, None
@@ -696,7 +721,7 @@ def bernoulli_pair(x):
 
 
 def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, edge_mask=None,
-                  jacobian=False, qs=None):
+                  jacobian=False, qs=None, ms=None):
     """Electron/hole current through every edge's (semiconductor) facet,
     direction i -> j, A per unit depth - the ONE edge-current formula the
     residual, the Jacobian and solver2d/current.py all share.
@@ -721,7 +746,7 @@ def edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation=False, e
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = _edge_len(mesh)
     facet_semi, _, _ = _mesh_semi_geometry(mesh)
-    mu_n, mu_p, dmu_n, dmu_p = edge_mobility(mesh, mat, psi, velocity_saturation, n, p, phin, phip)
+    mu_n, mu_p, dmu_n, dmu_p = edge_mobility(mesh, mat, psi, velocity_saturation, n, p, phin, phip, ms)
     geo = Q * Vt * facet_semi / edge_len
     if edge_mask is not None:
         geo = geo * edge_mask
@@ -790,8 +815,15 @@ def continuity_row_scale(mat: Material, h_typ: float) -> float:
     return Q * mat.Dn * mat.ni / h_typ ** 2
 
 
+def _fixed_charge_term(mesh):
+    """Q * the fixed (interface) charge per node (mesh.fixed_charge, counts
+    per node, signed; solver2d/surface_mobility.attach_mobility) or None."""
+    fc = getattr(mesh, "fixed_charge", None)
+    return None if fc is None else Q * fc
+
+
 def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
-              edge_mask=None, velocity_saturation=False, generation=None, qs=None):
+              edge_mask=None, velocity_saturation=False, generation=None, qs=None, ms=None):
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
     _, g_e = _mesh_ni_edge_g(mesh, mat)
@@ -803,7 +835,7 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
     # Semiconductor-only facets already make every oxide edge carry zero
     # current; edge_mask (optional) can exclude further edges.
-    In_e, Ip_e = edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, qs=qs)
+    In_e, Ip_e = edge_currents(mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, qs=qs, ms=ms)
 
     div_psi = _edge_divergence(ii, jj, g_e * (psi[jj] - psi[ii]), N)
 
@@ -819,7 +851,11 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     denom_safe = np.where(denom > 0.0, denom, 1.0)
     R = np.where(denom > 0.0, (n * p - ni_arr ** 2) / denom_safe, 0.0)
 
-    Rpsi = (div_psi - Q * (n - p - mesh.Cdop) * cv_semi) / mesh.cv_area / poisson_scale
+    rho = Q * (n - p - mesh.Cdop) * cv_semi
+    fq = _fixed_charge_term(mesh)
+    if fq is not None:
+        rho = rho - fq
+    Rpsi = (div_psi - rho) / mesh.cv_area / poisson_scale
     Rn = (div_n / cv_semi_safe - Q * R) / cont_scale
     Rp = (div_p / cv_semi_safe + Q * R) / cont_scale
     if generation is not None:
@@ -851,7 +887,7 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
 
 def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
                             poisson_scale, cont_scale, edge_mask=None, velocity_saturation=False,
-                            generation=None, qs=None):
+                            generation=None, qs=None, ms=None):
     """generation: optional extra carrier generation (see newton_solve_2d).
 
     edge_mask: optional boolean (E,) array - see _residual()'s own
@@ -873,7 +909,7 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     _, cv_semi, cv_semi_safe = _mesh_semi_geometry(mesh)
     In_e, Ip_e, (dIn_dpsi_i, dIn_dpsi_j, dIn_dphin_i, dIn_dphin_j,
                  dIp_dpsi_i, dIp_dpsi_j, dIp_dphip_i, dIp_dphip_j) = edge_currents(
-        mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, jacobian=True, qs=qs)
+        mesh, mat, psi, n, p, phin, phip, velocity_saturation, edge_mask, jacobian=True, qs=qs, ms=ms)
 
     div_psi = _edge_divergence(ii, jj, g_e * (psi[jj] - psi[ii]), N)
     div_n = _edge_divergence(ii, jj, In_e, N)
@@ -888,7 +924,11 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     num = n * p - ni_arr ** 2
     R = np.where(denom > 0.0, num / denom_safe, 0.0)
 
-    Rpsi = (div_psi - Q * (n - p - mesh.Cdop) * cv_semi) / mesh.cv_area / poisson_scale
+    rho = Q * (n - p - mesh.Cdop) * cv_semi
+    fq = _fixed_charge_term(mesh)
+    if fq is not None:
+        rho = rho - fq
+    Rpsi = (div_psi - rho) / mesh.cv_area / poisson_scale
     Rn = (div_n / cv_semi_safe - Q * R) / cont_scale
     Rp = (div_p / cv_semi_safe + Q * R) / cont_scale
     dGn_dU = dGp_dU = None
@@ -1124,6 +1164,7 @@ def poisson_solve(mesh, mat, psi, phin, phip, is_contact, psi_bc, poisson_scale,
     keep = free[r]
     Lap = sp.csr_matrix((v[keep], (r[keep], c[keep])), shape=(N, N))
     semi_frac = cv_semi / cv
+    fq = _fixed_charge_term(mesh)
     lin = _poisson_linear_solver(mesh)
     psi = psi.copy()
     psi[is_contact] = psi_bc
@@ -1131,6 +1172,8 @@ def poisson_solve(mesh, mat, psi, phin, phip, is_contact, psi_bc, poisson_scale,
     for it in range(1, maxiter + 1):
         n, p = _densities(psi, phin, phip, ni_arr, Vt, dEi)
         F = Lap @ psi - Q * (n - p - mesh.Cdop) * semi_frac / poisson_scale
+        if fq is not None:
+            F = F + fq / cv / poisson_scale
         F[is_contact] = 0.0
         d = np.where(free, -Q * (n + p) / Vt * semi_frac / poisson_scale, 1.0)
         J = Lap + sp.diags(d)
@@ -1500,6 +1543,15 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             v[box_free] = np.clip(v[box_free], qf_lo, qf_hi)
         return U_
 
+    sm_model = getattr(mesh, "surface_mobility", None)
+    ms_tol = sm_model.tol if sm_model is not None else None
+
+    def _ms_at(U_):
+        if sm_model is None:
+            return None
+        n_, p_ = _densities(U_[:N], U_[N:2 * N], U_[2 * N:], ni_q, Vt, dEi_q)
+        return sm_model.state(mat, U_[:N], n_, p_)
+
     def _run_newton(psi0, phin0, phip0):
         nonlocal qs, ni_q, dEi_q
         for k_ in ("q_ok", "q_first_it", "q_mix", "q_dlam", "q_hist"):
@@ -1529,8 +1581,16 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
         if damping != "line_search":
             raise ValueError(f"damping must be 'line_search' or 'bank_rose', got {damping!r}")
 
+        # The solution-dependent low-field mobility (inversion layer,
+        # solver2d/surface_mobility.py) is lagged: evaluated at the iterate
+        # where the Jacobian is assembled, held through that iteration's
+        # line search (a consistent merit), and the solve converges only
+        # once it stopped changing (ms_tol). No term in the Jacobian.
+        ms = _ms_at(U)
+        dmu = 0.0
         F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                       poisson_scale, cont_scale, edge_mask, velocity_saturation, generation, qs=qs)
+                                       poisson_scale, cont_scale, edge_mask, velocity_saturation, generation, qs=qs,
+                                       ms=ms)
         res_norm = np.max(np.abs(F))
 
         # Step control: each Newton direction is scaled uniformly so no
@@ -1619,7 +1679,8 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             for _ in range(20):
                 U_try = _project(U + step * delta)
                 F_try = _residual(U_try, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
-                                   poisson_scale, cont_scale, edge_mask, velocity_saturation, generation, qs=qs)
+                                   poisson_scale, cont_scale, edge_mask, velocity_saturation, generation, qs=qs,
+                                   ms=ms)
                 merit_try = np.linalg.norm(row_scale * F_try)
                 if np.isfinite(merit_try) and merit_try < merit * (1 - 1e-4 * step):
                     accepted = True
@@ -1630,6 +1691,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                 step *= 0.5
             if accepted:
                 U, F = U_try, F_try
+            ms_new = ms
+            if ms is not None and accepted:
+                ms_new = _ms_at(U)
+                dmu = ms.rel_change(ms_new)
             if schottky is not None:
                 state["eta_max"] = ETA_MAX_SCHOTTKY if step < 1.0 else ETA_MAX
             upd = step * max_dpsi if accepted else 0.0
@@ -1694,6 +1759,9 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                 converged = upd_all ** 3 / upd_prev ** 2 < PSI_UPDATE_TOL
             upd_prev = upd_all if (accepted and step == 1.0) else None
             converged = converged and it >= state.get("min_iters", 1)
+            if ms is not None:
+                state["mu_change"] = dmu
+                converged = converged and dmu <= ms_tol
             if (quantum_update is not None and accepted and not state.get("q_ok")
                     and (converged or upd_all < QUANTUM_TRIGGER)):
                 # Schrodinger-Poisson corrector inside the Newton loop. Once
@@ -1723,9 +1791,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
                     converged = False
                     upd_prev = merit_prev = None
                     if it < maxiter:
+                        ms = _ms_at(U)
                         F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
                                                        poisson_scale, cont_scale, edge_mask, velocity_saturation,
-                                                       generation, qs=qs)
+                                                       generation, qs=qs, ms=ms)
                         res_norm = np.max(np.abs(F))
                         best_U, best_res = U, res_norm
                     continue
@@ -1736,9 +1805,10 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
             if tiny_step_streak >= 2:
                 break
             if it < maxiter:
+                ms = ms_new
                 F, J = _residual_and_jacobian(U, mesh, mat, is_contact_full, psi_bc, phin_bc, phip_bc,
                                                poisson_scale, cont_scale, edge_mask, velocity_saturation,
-                                               generation, qs=qs)
+                                               generation, qs=qs, ms=ms)
         if best_res < res_norm:
             U, res_norm = best_U, best_res
         return U, res_norm, it
@@ -1768,10 +1838,13 @@ def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50
     # flag existed). Drivers should test this flag, not res_norm: the
     # quadratic-prediction exit can stop with |F|_inf up to RES_PREDICT_MAX.
     converged = bool(state.get("converged")) or res_norm < RES_ACCEPT
+    if sm_model is not None:                # and the lagged mobility settled
+        converged = converged and state.get("mu_change", 0.0) <= ms_tol
     if quantum_update is not None:          # and the quantum potentials settled
         converged = converged and bool(state.get("q_ok"))
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
             "iters": it, "res_norm": res_norm, "converged": converged,
             "velocity_saturation": velocity_saturation, "schottky": schottky, "bias": dict(bias_by_contact),
             "qshift": qs, "q_updates": state.get("q_updates", 0), "q_dlam": state.get("q_dlam"),
-            "q_first_it": state.get("q_first_it", it), "q_hist": state.get("q_hist", [])}
+            "q_first_it": state.get("q_first_it", it), "q_hist": state.get("q_hist", []),
+            "mu_change": state.get("mu_change")}

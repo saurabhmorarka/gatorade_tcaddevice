@@ -7053,3 +7053,153 @@ These are stated in the docs, not tuned away.
 **Lesson.** Before reading a small stress gain as physics, find where the
 drain voltage drops. Here 85% of Vds sat in the two contacts, and a
 material-lookup bug sat in the contact table.
+
+## 83. Inversion-layer mobility: phonon, surface roughness, Coulomb, orientation
+
+Branch `mobility-stack`, step 2 of the low-field mobility pipeline that 82
+made one function (`low_field_mobility`). Plan:
+`out/passdown_logs/mobility_plan.md` (sections 1-2, 5-6). Until now a
+carrier at the gate interface had the bulk (Masetti, net doping) mobility.
+
+**Literature (read first).**
+- Sentaurus Device UG N-2017.09: Enhanced Lombardi (Table 58), the Lucent
+  set (Table 59), Philips/Klaassen (Tables 56/57), the Coulomb components
+  (Table 63), RCS/RPS (Tables 64/65), the normal-field definitions.
+- ATLAS CVT (Tables 3-28/3-29), COMSOL's Lombardi page (same Si numbers).
+- Lombardi TCAD 1988, Darwish TED 1997, Klaassen SSE 1992.
+- Takagi TED 41 Parts I and II, and the Chen/Hu universal-curve fits, as
+  the target.
+- (110): Irie IEDM 2004 (holes ~2x), Kavalieros 2008 and Young SSE 2012
+  (FinFET (110) sidewall electrons like (100)).
+
+**Model** (`solver2d/surface_mobility.py`, docs/mobility.md).
+- Per node, Matthiessen: bulk (Masetti on the TOTAL doping, or Klaassen
+  with carrier screening) + D·(1/mu_ac + 1/mu_sr) (Lombardi, or Darwish
+  with A*) + optional interface-charge and remote high-k terms;
+  D = exp(-x/10 nm). Then the edge mean, then the piezo factor (82), then
+  vsat. `fab` meshes carry `mesh.Ntot`; the piezo doping factor now uses it
+  too.
+- The normal field: one sparse operator per mesh. Interface nodes take the
+  displacement flux through their insulator edges / eps_Si (D-continuity),
+  so a 0.25-2.5 nm mesh gets the surface field the 0.1 nm Sentaurus
+  guidance would need. Other nodes: a least-squares gradient projected on
+  the nearest interface normal.
+- Orientation from that normal in the (001)/<110> frame. (100) tops,
+  (110) fin sidewalls and sheet edges. Holes on (110): mu_ac, mu_sr x3.13,
+  calibrated to mu_eff ratio 2.0 at 0.5 MV/cm. Electrons: (110) = (100).
+- Lagged in Newton: evaluated at Jacobian assembly, frozen through the
+  line search, converged only when max |dmu/mu| < 1e-4 (fast) / 1e-6
+  (exact). Same Jacobian pattern and assembly plan. Off: nothing attached,
+  bit for bit (tested; the 2D off runs reproduce the pre-branch Ion to the
+  last digit).
+- Two modes: fast (Lombardi + Masetti, nearest orientation family) and
+  exact (Darwish + Klaassen, smooth orientation blend, tighter loop).
+
+**Checks.**
+- 1D universal-curve harness (`scripts/mobility/universal.py`): N = 1e17,
+  0.3-1.2 MV/cm, fast within 12% (e) / 21% (h), exact 4% / 26%. Larger
+  deviations at N >= 5e17 are the channel Coulomb term at low E_eff,
+  which the doping-independent fit leaves out.
+- 2D long channel (`scripts/mobility/long_channel_2d.py`): the
+  mid-channel split-CV mobility on the 2.5 nm 2D mesh against the 0.04 nm
+  1D harness at the same N_inv: within 5.3% (fast) / 4.5% (exact) up to
+  2.2e12 cm^-2. mu_col 1177 -> 595 cm2/Vs; Id x0.53 at Vgs 1.5 V.
+- 14 unit tests (`testsuite/test_surface_mobility.py`): the hand numbers,
+  A*, Klaassen limits, Coulomb terms, the orientation classifier on a fin,
+  the LSQ gradient exact for linear psi, D-continuity against the analytic
+  1D surface field, off bit-identical, the Matthiessen order with stress,
+  self-consistency of the lagged loop, interface-charge electrostatics.
+
+**Interface-charge Coulomb: broken, fixed, recalibrated.** A coordinator
+run (2D NMOS, Qit 1e12, Vds 50 mV) gave a mid-channel mu_eff of ~200 near
+threshold, a spike to 380 at N_inv 8e11, then 50 at 2e12, and Id falling
+from 5.4 to 2.2 uA/um between Vgs 0.9 and 1.0 V (negative gm). Causes:
+1. nu1 and nu2 swapped against Sentaurus Eq. 311 (re-read from the guide):
+   the unscreened prefactor went as x^-1 instead of x^-0.5, and the
+   screening density as x^0.5 instead of x.
+2. The D-continuity interface field is the oxide side. The fixed sheet
+   charge sits on the interface node, so the silicon side is higher by
+   q Qit / eps_Si (4.6e4 V/cm at 3e11). It was missing, so f(F) switched
+   the term on late, right where the screening had not yet started: the
+   negative gm. Checked against the one-sided silicon gradient in
+   depletion (agrees to 1-3%).
+3. Even correct, Table 63 (mu1 40, c_trans 1e18) is far too strong for
+   these devices: in the 1D harness Qit 1e11 halves mu_eff near threshold
+   and Qit 3e11 still costs 74% above N_inv 2e12. Recalibrated to mu1 200,
+   c_trans 5e16 (target from the user: 10-30% near threshold for Qit
+   1e11-5e11, under ~5% above 2e12). `coulomb_mu1` / `coulomb_c_trans`
+   restore the table.
+After (2D, same N_inv, against no Qit): Qit 1e11 -4.3% at 1e11, -0.5% at
+2e12; Qit 3e11 -12.6% at 1e11, -9.8% at 3e11, -3.5% at 2e12; Id-Vg
+monotonic. Regression test: Qit 1e12, Id rising at every Vgs step, mu_C
+rising with N_inv above threshold, the loss shrinking with N_inv; it fails
+on the old code. Qit 1e11 (4%) sits below the 10% lower end of the
+target; raising it would push 3e11 past 5% at high N_inv. Left for the user.
+
+**Where each term acts on the I-V** (`scripts/mobility/iv_regions.py`,
+`iv_regions_plot.py`; 2D NMOS Lg 0.5 um, tox 5 nm, stack built up one
+term at a time, compared at the same N_inv; figure
+docs/img/mobility_iv_regions.png):
+- phonon: -15% near Vt, growing to -50% at Vgs 2 V;
+- surface roughness: only at N_inv > 5e11, -16% at Vgs 2 V;
+- Coulomb at Qit 3e11: -9% near Vt, screened down to -2% at high N_inv;
+- velocity saturation: only at high Vds.
+The same plot on the broken Coulomb (Qit 1e12,
+out/mobility/iv_regions_broken_qit1e12.png) shows the negative gm.
+
+**Default (user decision, 2026-10-20).** Fast, ON, with the recalibrated
+Coulomb parameters and `interface_charge = 3e11` cm^-2 as the
+MobilityModel default: the Coulomb term is on in fast and exact modes,
+`interface_charge=0` turns it off. The charge is also a fixed sheet charge
+in Poisson on every Si/insulator interface, so the default moves the
+electrostatics, not only the mobility (table below). `--mobility off`
+gives the previous currents. The universal-curve harness and the
+`iv_regions` phonon/SR cases set `interface_charge=0` explicitly.
+
+**Results** (Ion at the device's standard bias; off = bulk only, the
+pre-branch result; stack w/o Coulomb = fast with `interface_charge=0`;
+default = fast with Qit 3e11):
+
+| device (bias) | Ion off | stack, Qit 0 | default (Qit 3e11) | default vs off | Vt,sat off -> default | SS, DIBL off -> default |
+|---|---|---|---|---|---|---|
+| 2D NMOS, Lg 0.5 um (Vds 1 V) | 200.8 | 145.7 (-27%) | 164.0 | -18% | 0.746 -> 0.682 V | -, 40 -> 45 mV/V |
+| 2D PMOS, Lg 30 nm (Vds -1 V) | 974.0 | 623.9 (-36%) | 613.1 | -37% | -0.092 -> -0.117 V | -, 124 -> 133 mV/V |
+| 3D planar NMOS (fab) | 1782 | 1517 (-15%) | 1576 | -12% | 0.051 -> 0.016 V | 81 -> 88 mV/dec, 157 -> 179 mV/V |
+| 3D FinFET NMOS | 1005 | 959 (-4.6%) | 990 | -1.5% | 0.151 -> 0.106 V | 68 -> 81 mV/dec, 79 -> 131 mV/V |
+| 3D FinFET PMOS | 537 | 496 (-7.6%) | 480 | -10.6% | -0.212 -> -0.232 V | 69 -> 64 mV/dec, 70 -> 57 mV/V |
+| 3D nanosheet NMOS | 1109 | - | 1086 | -2.1% | 0.177 -> 0.170 V | 61 -> 61 mV/dec, 49 -> 44 mV/V |
+| 3D nanosheet PMOS | 393 | - | 331 | -15.8% | -0.243 -> -0.262 V | 64 -> 66 mV/dec, 48 -> 40 mV/V |
+
+Ion in uA/um at a fixed Vgs (FinFET/nanosheet |Vgs| 0.8 V, |Vds| 0.7 V; the fab planar
+and the 2D devices at their config defaults), so the default's Vt shift enters it: for the NMOS the positive
+sheet charge lowers Vt and gives back part of the mobility loss, for the PMOS
+it raises |Vt| and adds to it. Runs: `scripts/mobility/device_runs.sh`
+(results in out/mob_runs/{ion_off,ion_fast,ion_default}; nanosheet off from
+out/mob_runs/before, which is bit-identical to off on every other device).
+
+The FinFET NMOS is the outlier: SS 68 -> 81 mV/dec and DIBL 79 -> 131 mV/V.
+The 3e11 charge sits on EVERY Si/insulator interface, including the STI
+along the sub-fin, where it attracts electrons into a sub-fin leakage path
+(Ioff x6.5). The PMOS sees the mirror image (sub-fin better cut off, SS
+and DIBL improve). The nanosheet, with no sub-fin channel under the gate,
+barely moves. This is the uniform-interface-charge simplification, not a
+solver issue; see the open decisions.
+
+**Open (user decisions).**
+- The default Qit 3e11 sits on every Si/insulator interface; on the FinFET
+  NMOS the STI part opens a sub-fin leakage path (SS 68 -> 81 mV/dec,
+  Ioff x6.5). Keep, restrict to the gate dielectric, or per-interface.
+- Qit 1e11 costs 4% near threshold (target 10-30%).
+- Stack-wide: 3D dislocation default (opt-in), Si:P default (on), PMOS Rs
+  calibration (3D PMOS Rs-limited by a 0.45 eV Schottky barrier), piezo
+  f_max/f_min defaults (DEVELOPMENT_LOG 81, 82).
+
+**Not done.** The ballistic term (step 5, branch `ballistic-mobility`),
+Coulomb2D, the to-current normal field, ThinLayer, per-interface charge
+from the interface traps, a fast/exact matrix on every 3D device.
+
+**Lesson.** On a coarse FV mesh the one-sided interface gradient
+underestimates the surface field by the screening of the interface node's
+own charge. Taking the field from the oxide side through D-continuity
+(the oxide has no charge, so its field is linear and resolved) removed the
+need for a 0.1 nm first row, and the 2D/1D split-CV check confirmed it.

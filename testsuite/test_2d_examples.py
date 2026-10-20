@@ -58,7 +58,10 @@ EXAMPLES_2D = {
                      keys=["Va_V"], values=["J_anode_A_cm2"], rtol=1e-3, floor=1e-9),
     "mos_2d": dict(cmd=["main2d_mos_sweep.py"], csvs=["cv_sweep.csv"],
                    keys=["VG_V"], values=["Qs_C_cm2", "C_lf_F_cm2"], rtol=1e-3, floor=1e-14),
-    "mosfet_2d": dict(cmd=["main2d_mosfet_sweep.py"], csvs=["ids_vgs.csv", "ids_vds.csv"],
+    # the golden is the bulk-mobility solver: the inversion-layer mobility (default fast since
+    # DEVELOPMENT_LOG 83) has its own tests (test_surface_mobility.py)
+    "mosfet_2d": dict(cmd=["main2d_mosfet_sweep.py"], args=["--mobility", "off"],
+                      csvs=["ids_vgs.csv", "ids_vds.csv"],
                       keys=["Vds_V", "Vgs_V"], values=["Id_A_per_um"], rtol=1e-3, floor=1e-13,
                       quick=dict(config="configs/input_mosfet_2d.yaml",
                                  set={"bias": dict(vgs_step_V=0.15, vds_step_V=0.3)},
@@ -94,7 +97,7 @@ def run_example(name, quick=False):
             with open(cfg[0], "w") as f:
                 yaml.safe_dump(c, f)
         t0 = time.perf_counter()
-        proc = subprocess.run([sys.executable, *spec["cmd"], *cfg, "--out-dir", tmp],
+        proc = subprocess.run([sys.executable, *spec["cmd"], *cfg, *spec.get("args", []), "--out-dir", tmp],
                               cwd=TCAD1D_ROOT, capture_output=True, text=True)
         wall = time.perf_counter() - t0
         if proc.returncode != 0:
