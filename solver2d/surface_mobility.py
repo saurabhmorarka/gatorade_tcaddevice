@@ -89,7 +89,8 @@ class MobilityModel:
     orientation: str = "auto"        # auto (per-interface (100)/(110)/(111) sets) | 100 (one set)
     interface_field: str = "dcont"   # dcont (D-continuity on interface nodes) | lsq (one-sided gradient)
     doping: str = "total"            # total (N_A + N_D where the mesh carries it) | net (|N_D - N_A|)
-    interface_charge: float = 0.0    # cm^-2 (units of q, signed): fixed charge on every Si/insulator interface
+    interface_charge: float = 3e11   # cm^-2 (units of q, signed): fixed charge on every Si/insulator interface
+                                     # (sheet charge in Poisson + interface Coulomb scattering); 0 = off
     coulomb_mu1: float = None        # interface-charge Coulomb mu1, c_trans (None: COULOMB_IC, calibrated;
     coulomb_c_trans: float = None    # 40 and 1e18 = Sentaurus Table 63)
     highk: bool = False              # remote Coulomb + phonon from a high-k dielectric (eps_r > highk_eps_r)

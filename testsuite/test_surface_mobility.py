@@ -183,7 +183,8 @@ class TestGeometry(unittest.TestCase):
         Na = 1e17
         dev = MOSDevice(Na=Na, t_ox=2e-7)
         g = build_mos_grid(MAT, dev, -Na)
-        s = sm.SurfaceMobility(mesh_1d(g, MAT), MAT, sm.MobilityModel(mode="fast"))
+        # the 1D solve carries no sheet charge: no interface-charge field offset either
+        s = sm.SurfaceMobility(mesh_1d(g, MAT), MAT, sm.MobilityModel(mode="fast", interface_charge=0.0))
         oi = g["oxide_index"]
         self.assertTrue(s.geo["dcont"][oi])
         Vt = MAT.Vt
@@ -244,8 +245,11 @@ class TestSolver(unittest.TestCase):
         a = s.act
         mb_n = s.mu_b[0]
         F = s.normal_field(psi)
-        want = 1.0 / (1.0 / mb_n[a] + s.D[a] * s.orient["n"] * sm.lombardi(F[a], s.Ntot[a], n[a] + p[a],
-                                                                               s.sets["n"]))
+        # the default stack: Lombardi + the interface-charge Coulomb term (Qit 3e11)
+        self.assertEqual(s.ic, 3e11)
+        add = s.orient["n"] * sm.lombardi(F[a], s.Ntot[a], n[a] + p[a], s.sets["n"]) \
+            + sm.interface_coulomb(F[a], s.ic, n[a], s.T, s.ic_prm)
+        want = 1.0 / (1.0 / mb_n[a] + s.D[a] * add)
         np.testing.assert_allclose(mu_n[a], want, rtol=1e-12)
         f = np.linspace(0.5, 2.0, len(mesh.edges))
         try:

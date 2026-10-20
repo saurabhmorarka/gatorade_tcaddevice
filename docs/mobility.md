@@ -7,8 +7,8 @@ Code: `solver2d/surface_mobility.py`, wired into `low_field_mobility`
 
 ## How to enable it, and the defaults
 
-The model is **ON by default, in fast mode** (the plan's proposal; the
-user may still choose OFF as the default, see the end of this page):
+The model is **ON by default, in fast mode, with a 3e11 cm^-2 interface
+charge** (user decision, 2026-10-20):
 
 - 3D fab devices: `fab simulate ... --mobility fast` (default),
   `--mobility exact`, or `--mobility off` (the previous bulk-only mobility,
@@ -18,10 +18,16 @@ user may still choose OFF as the default, see the end of this page):
   config (a mapping with `mode:` plus the option keys also works), or
   `main2d_mosfet_sweep.py --mobility fast|exact|off`, which overrides the
   config. Default fast.
-- Off by default inside fast and exact: the interface charge (0), the
-  remote high-k terms (`highk=0`). On by default: the surface terms, the
-  orientation sets, the total-doping bulk term, the D-continuity interface
-  field.
+- On by default (fast and exact): the surface terms, the orientation sets,
+  the total-doping bulk term, the D-continuity interface field, and the
+  interface charge `interface_charge=3e11` (cm^-2) with its Coulomb
+  scattering. The charge is also a fixed sheet charge in Poisson, so the
+  default shifts Vt by about -q·Qit/C_ox (positive charge: NMOS Vt down,
+  PMOS |Vt| up): -70 mV at tox 5 nm (the 2D planar), ~-15 mV at ~1 nm EOT
+  (the fab devices). `interface_charge=0` turns
+  both off (`--mobility-set interface_charge=0`, or the key in a 2D
+  `physics: mobility:` mapping).
+- Off by default: the remote high-k terms (`highk=0`).
 
 Before this, the low-field mobility was the bulk doping-dependent value
 (Masetti) from the NET doping: a carrier at the gate interface moved as fast
@@ -37,7 +43,7 @@ the Sentaurus order:
 ```
 1/mu_low = 1/mu_bulk(N_A + N_D [, n, p])                 Masetti (fast) | Klaassen (exact)
          + D * s_orient * (1/mu_ac(F) + 1/mu_sr(F))      Lombardi (fast) | Darwish (exact)
-         + D / mu_ic(F, N_it, n or p)                    interface charge (opt-in)
+         + D / mu_ic(F, N_it, n or p)                    interface charge (default 3e11)
          + D * D_hk * (1/mu_rcs + 1/mu_rps)              remote high-k Coulomb + phonon (opt-in)
 mu_edge  = mean of the two nodes  x  stress factor (piezo, docs/piezo_mobility.md)
            [ballistic term: branch ballistic-mobility]   ->  velocity saturation (docs/vsat_modes.md)
@@ -63,8 +69,9 @@ D = exp(-x / 10 nm),  x = distance to the nearest semiconductor/insulator interf
   interface-charge form (Eq. 311):
   μ_C = μ1 [1 + (c / (c_trans x^ν1))^γ] / (x^ν2 · D · f(F)), x = Qit/1e11,
   f(F) = 1 - exp(-(F/E0)^ε) switching it off at flat band, c the local
-  carrier density (screening). Off by default (0). The interface-trap
-  roadmap will feed it the trapped charge later.
+  carrier density (screening). Default 3e11 cm^-2 (a typical post-anneal
+  SiO2/high-k interface); 0 turns it off. The interface-trap roadmap will
+  feed it the trapped charge later.
   - **Calibrated, not Table 63**: μ1 = 200, c_trans = 5e16 (Table 63:
     40, 1e18; `coulomb_mu1=40 coulomb_c_trans=1e18` restores them). With
     Table 63's values, Qit = 1e11 already halves μ_eff near threshold and
@@ -220,9 +227,60 @@ grows with the field (the 2.5 nm cells average F over the inversion layer).
 
 ![universal mobility](img/universal_mobility.png)
 
+## Where each term acts on the I-V
+
+`scripts/mobility/iv_regions.py <out dir>` then
+`scripts/mobility/iv_regions_plot.py <out dir>`: the 2D NMOS of
+`configs/input_mosfet_2d.yaml` (Lg 0.5 um, tox 5 nm, Na 1e16), the stack
+built up one term at a time (bulk Masetti -> + phonon -> + surface
+roughness -> + Coulomb at Qit 1e11 / 3e11), Id-Vg at Vds 50 mV with the
+mid-channel μ_eff and N_inv, Id-Vd at Vgs 1.5 V with velocity saturation
+off and on. Each term's effect is compared at the same N_inv, which
+removes the Vt shift of the sheet charge.
+
+| term | where it acts | size |
+|---|---|---|
+| phonon (Lombardi μ_ac) | everywhere above threshold, growing with the field | -15% near Vt to -50% at Vgs 2 V |
+| surface roughness (μ_sr) | only at high field, N_inv > 5e11 | -16% at Vgs 2 V |
+| interface Coulomb, Qit 3e11 | near threshold; screened away by the inversion charge | -9% near Vt, fading to -2% |
+| velocity saturation | only at high Vds (saturation region) | none in the linear region |
+
+![I-V regions of the mobility stack](img/mobility_iv_regions.png)
+
+The same study on the first (broken) interface-Coulomb version at Qit
+1e12 is `out/mobility/iv_regions_broken_qit1e12.png` (not in the
+repository): μ_eff 200 -> 380 -> 50 and a falling Id above threshold, the
+negative gm that exposed the two bugs above.
+
 ## Device results
 
-DEVICE_TABLE
+Ion before (off, bulk mobility only) and after (the default: fast, Qit 3e11),
+with the stack without the interface charge in between:
+
+| device (bias) | Ion off | stack, Qit 0 | default (Qit 3e11) | default vs off | Vt,sat off -> default | SS, DIBL off -> default |
+|---|---|---|---|---|---|---|
+| 2D NMOS, Lg 0.5 um (Vds 1 V) | 200.8 | 145.7 (-27%) | 164.0 | -18% | 0.746 -> 0.682 V | -, 40 -> 45 mV/V |
+| 2D PMOS, Lg 30 nm (Vds -1 V) | 974.0 | 623.9 (-36%) | 613.1 | -37% | -0.092 -> -0.117 V | -, 124 -> 133 mV/V |
+| 3D planar NMOS (fab) | 1782 | 1517 (-15%) | 1576 | -12% | 0.051 -> 0.016 V | 81 -> 88 mV/dec, 157 -> 179 mV/V |
+| 3D FinFET NMOS | 1005 | 959 (-4.6%) | 990 | -1.5% | 0.151 -> 0.106 V | 68 -> 81 mV/dec, 79 -> 131 mV/V |
+| 3D FinFET PMOS | 537 | 496 (-7.6%) | 480 | -10.6% | -0.212 -> -0.232 V | 69 -> 64 mV/dec, 70 -> 57 mV/V |
+| 3D nanosheet NMOS | 1109 | - | 1086 | -2.1% | 0.177 -> 0.170 V | 61 -> 61 mV/dec, 49 -> 44 mV/V |
+| 3D nanosheet PMOS | 393 | - | 331 | -15.8% | -0.243 -> -0.262 V | 64 -> 66 mV/dec, 48 -> 40 mV/V |
+
+Ion in uA/um at a fixed Vgs (FinFET/nanosheet |Vgs| 0.8 V, |Vds| 0.7 V; the fab planar
+and the 2D devices at their config defaults), so the default's Vt shift enters it: for the NMOS the positive
+sheet charge lowers Vt and gives back part of the mobility loss, for the PMOS
+it raises |Vt| and adds to it. Runs: `scripts/mobility/device_runs.sh`
+(results in out/mob_runs/{ion_off,ion_fast,ion_default}; nanosheet off from
+out/mob_runs/before, which is bit-identical to off on every other device).
+
+The FinFET NMOS is the outlier: SS 68 -> 81 mV/dec and DIBL 79 -> 131 mV/V.
+The 3e11 charge sits on EVERY Si/insulator interface, including the STI
+along the sub-fin, where it attracts electrons into a sub-fin leakage path
+(Ioff x6.5). The PMOS sees the mirror image (sub-fin better cut off, SS
+and DIBL improve). The nanosheet, with no sub-fin channel under the gate,
+barely moves. This is the uniform-interface-charge simplification, not a
+solver issue; see the open decisions.
 
 ## Parameters and sources
 
@@ -260,4 +318,15 @@ Options (`--mobility-set k=v`, or keys of `physics: mobility:` in 2D):
 - The interface charge is uniform on every interface. A per-interface value
   waits for the interface-trap work.
 
-PASSDOWN
+## Open decisions (for the user)
+
+- **Interface charge on every interface.** The default 3e11 cm^-2 sits on
+  the gate dielectric AND on STI, spacers and the BOX. On the FinFET NMOS
+  the STI part opens a sub-fin leakage path (SS 68 -> 81 mV/dec, Ioff
+  x6.5). Options: keep it (STI charge is real, often more positive than
+  the gate's), restrict the default to the gate-dielectric interface, or
+  take a per-interface value from the interface-trap work.
+- **Qit 1e11 calibration.** It costs 4% near threshold, below the 10% lower
+  end of the target; raising it would push Qit 3e11 past 5% at high N_inv.
+- **Lombardi electrons at low doping.** Fast electrons sit +34% above the
+  universal curve at 1.2 MV/cm for N_A 1e16 (exact: within 12%).

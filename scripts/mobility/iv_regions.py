@@ -14,8 +14,8 @@ VDS_SWEEP = [round(v, 2) for v in np.arange(0.0, 2.01, 0.1)]
 
 CASES = {
     "bulk (Masetti)": "off",
-    "+ phonon": {"mode": "fast", "delta_scale_n": 1e6, "delta_scale_p": 1e6},
-    "+ surface roughness": {"mode": "fast"},
+    "+ phonon": {"mode": "fast", "delta_scale_n": 1e6, "delta_scale_p": 1e6, "interface_charge": 0},
+    "+ surface roughness": {"mode": "fast", "interface_charge": 0},
     "+ Coulomb (Qit 1e11)": {"mode": "fast", "interface_charge": 1e11},
     "+ Coulomb (Qit 3e11)": {"mode": "fast", "interface_charge": 3e11},
 }

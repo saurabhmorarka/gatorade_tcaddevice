@@ -758,7 +758,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     (solver2d/mosfet_metrics.py::mosfet_metrics_signed).
     mobility: the inversion-layer mobility (docs/mobility.md): "fast" (the
     default: Lombardi + Masetti on the total doping, per-interface
-    orientation), "exact" (Darwish + Klaassen), "off" (bulk only, the
+    orientation, interface charge 3e11 cm^-2 with its Coulomb scattering;
+    interface_charge=0 removes it), "exact" (Darwish + Klaassen), "off" (bulk only, the
     behaviour before DEVELOPMENT_LOG 83), or an options dict
     (solver2d/surface_mobility.MobilityModel)."""
     from solver2d.mosfet_metrics import mosfet_metrics_signed

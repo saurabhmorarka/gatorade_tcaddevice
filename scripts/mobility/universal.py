@@ -66,7 +66,8 @@ def curve(N_sub, carrier, mode="fast", quantum=False, tox=2e-7, frame=FRAME_100,
     dev = MOSDevice(Na=N_sub, t_ox=tox)
     g = build_mos_grid(mat, dev, Cs, interface_spacing_debye_factor=interface_factor)
     m = mesh_1d(g, mat)
-    sm = SurfaceMobility(m, mat, MobilityModel(mode=mode, frame=frame, **(model_kw or {})))
+    # the universal curves are low-Qit devices: no interface charge unless model_kw sets one
+    sm = SurfaceMobility(m, mat, MobilityModel(mode=mode, frame=frame, **{"interface_charge": 0.0, **(model_kw or {})}))
     s = 1.0 if carrier == "n" else -1.0
     VG = np.linspace(0.3, 3.0, 28) if VG is None else VG
     V = node_volumes(g["x"])

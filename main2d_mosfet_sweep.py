@@ -515,7 +515,8 @@ def main():
     parser.add_argument("--nz", type=int, default=6, help="number of z layers with --extrude-um")
     parser.add_argument("--mobility", choices=("fast", "exact", "off"), default=None,
                         help="inversion-layer mobility (docs/mobility.md), overriding the config's "
-                             "physics: mobility: (default fast)")
+                             "physics: mobility: (default fast, interface charge 3e11 cm^-2; a physics: mobility: "
+                             "dict with interface_charge: 0 removes the charge and its Coulomb term)")
     parser.add_argument("--no-stress", action="store_true",
                         help="ignore the config's stress: block (the unstressed reference run)")
     parser.add_argument("--vtk", nargs="?", const="last", choices=["last", "all"], default=None,

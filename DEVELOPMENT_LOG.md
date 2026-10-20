@@ -7049,14 +7049,63 @@ rising with N_inv above threshold, the loss shrinking with N_inv; it fails
 on the old code. Qit 1e11 (4%) sits below the 10% lower end of the
 target; raising it would push 3e11 past 5% at high N_inv. Left for the user.
 
-**Results** (Ion; off -> fast, same commit, same meshes):
+**Where each term acts on the I-V** (`scripts/mobility/iv_regions.py`,
+`iv_regions_plot.py`; 2D NMOS Lg 0.5 um, tox 5 nm, stack built up one
+term at a time, compared at the same N_inv; figure
+docs/img/mobility_iv_regions.png):
+- phonon: -15% near Vt, growing to -50% at Vgs 2 V;
+- surface roughness: only at N_inv > 5e11, -16% at Vgs 2 V;
+- Coulomb at Qit 3e11: -9% near Vt, screened down to -2% at high N_inv;
+- velocity saturation: only at high Vds.
+The same plot on the broken Coulomb (Qit 1e12,
+out/mobility/iv_regions_broken_qit1e12.png) shows the negative gm.
 
-DEVLOG_TABLE
+**Default (user decision, 2026-10-20).** Fast, ON, with the recalibrated
+Coulomb parameters and `interface_charge = 3e11` cm^-2 as the
+MobilityModel default: the Coulomb term is on in fast and exact modes,
+`interface_charge=0` turns it off. The charge is also a fixed sheet charge
+in Poisson on every Si/insulator interface, so the default moves the
+electrostatics, not only the mobility (table below). `--mobility off`
+gives the previous currents. The universal-curve harness and the
+`iv_regions` phonon/SR cases set `interface_charge=0` explicitly.
 
-**Default.** Fast, ON, as the plan proposed ("default proposal; ask the
-user"). `--mobility off` gives the previous currents. The user should
-confirm this; switching the default to off is a one-word change in
-`fab/__main__.py` and `main2d_mosfet_sweep.DEFAULT_MOBILITY`.
+**Results** (Ion at the device's standard bias; off = bulk only, the
+pre-branch result; stack w/o Coulomb = fast with `interface_charge=0`;
+default = fast with Qit 3e11):
+
+| device (bias) | Ion off | stack, Qit 0 | default (Qit 3e11) | default vs off | Vt,sat off -> default | SS, DIBL off -> default |
+|---|---|---|---|---|---|---|
+| 2D NMOS, Lg 0.5 um (Vds 1 V) | 200.8 | 145.7 (-27%) | 164.0 | -18% | 0.746 -> 0.682 V | -, 40 -> 45 mV/V |
+| 2D PMOS, Lg 30 nm (Vds -1 V) | 974.0 | 623.9 (-36%) | 613.1 | -37% | -0.092 -> -0.117 V | -, 124 -> 133 mV/V |
+| 3D planar NMOS (fab) | 1782 | 1517 (-15%) | 1576 | -12% | 0.051 -> 0.016 V | 81 -> 88 mV/dec, 157 -> 179 mV/V |
+| 3D FinFET NMOS | 1005 | 959 (-4.6%) | 990 | -1.5% | 0.151 -> 0.106 V | 68 -> 81 mV/dec, 79 -> 131 mV/V |
+| 3D FinFET PMOS | 537 | 496 (-7.6%) | 480 | -10.6% | -0.212 -> -0.232 V | 69 -> 64 mV/dec, 70 -> 57 mV/V |
+| 3D nanosheet NMOS | 1109 | - | 1086 | -2.1% | 0.177 -> 0.170 V | 61 -> 61 mV/dec, 49 -> 44 mV/V |
+| 3D nanosheet PMOS | 393 | - | 331 | -15.8% | -0.243 -> -0.262 V | 64 -> 66 mV/dec, 48 -> 40 mV/V |
+
+Ion in uA/um at a fixed Vgs (FinFET/nanosheet |Vgs| 0.8 V, |Vds| 0.7 V; the fab planar
+and the 2D devices at their config defaults), so the default's Vt shift enters it: for the NMOS the positive
+sheet charge lowers Vt and gives back part of the mobility loss, for the PMOS
+it raises |Vt| and adds to it. Runs: `scripts/mobility/device_runs.sh`
+(results in out/mob_runs/{ion_off,ion_fast,ion_default}; nanosheet off from
+out/mob_runs/before, which is bit-identical to off on every other device).
+
+The FinFET NMOS is the outlier: SS 68 -> 81 mV/dec and DIBL 79 -> 131 mV/V.
+The 3e11 charge sits on EVERY Si/insulator interface, including the STI
+along the sub-fin, where it attracts electrons into a sub-fin leakage path
+(Ioff x6.5). The PMOS sees the mirror image (sub-fin better cut off, SS
+and DIBL improve). The nanosheet, with no sub-fin channel under the gate,
+barely moves. This is the uniform-interface-charge simplification, not a
+solver issue; see the open decisions.
+
+**Open (user decisions).**
+- The default Qit 3e11 sits on every Si/insulator interface; on the FinFET
+  NMOS the STI part opens a sub-fin leakage path (SS 68 -> 81 mV/dec,
+  Ioff x6.5). Keep, restrict to the gate dielectric, or per-interface.
+- Qit 1e11 costs 4% near threshold (target 10-30%).
+- Stack-wide: 3D dislocation default (opt-in), Si:P default (on), PMOS Rs
+  calibration (3D PMOS Rs-limited by a 0.45 eV Schottky barrier), piezo
+  f_max/f_min defaults (DEVELOPMENT_LOG 81, 82).
 
 **Not done.** The ballistic term (step 5, branch `ballistic-mobility`),
 Coulomb2D, the to-current normal field, ThinLayer, per-interface charge
