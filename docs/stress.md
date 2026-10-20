@@ -508,5 +508,10 @@ another agent ran heavy simulations, load average 5-7):
   - Not modelled: Frank partials bounding a {111} stacking fault (b = a/3<111>, 0.31 nm, with a vertical component), dislocation loops, and glide or climb after formation.
   - The core position is an input with a literature default. There is no nucleation model and no image-force check that the dislocation would stay put. Real dislocations in a 5 nm fin or sheet may glide out to a free surface.
   - The dislocation stress is the purely elastic Volterra field, with no core cut-off. Voxels within ~1 nm of the core carry a singular stress that the channel average does not see.
-- Piezoresistive mobility (phase 4) and the per-edge Δμ/μ = −Π:σ will use these stress fields.
+- Piezoresistive mobility uses these stress fields (DEVELOPMENT_LOG 82, [piezo_mobility.md](piezo_mobility.md)).
+
+## Open decisions (for the user)
+
+- 3D S/D dislocation default: opt-in now (`sd_disl=1`), because they give 2.4-5 GPa in 3D.
+- Si:P S/D stressor default: on (−0.4% lattice strain).
 - The magnitudes are high: a dense array, 50% Ge, plane strain, and liner and film values that are rough. The trends and their sign by direction are the teaching point.

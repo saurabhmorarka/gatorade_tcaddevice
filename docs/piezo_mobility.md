@@ -197,3 +197,11 @@ The planar_flow stress solve takes 9-10 s, once per run (`main2d_mosfet_sweep` s
   Kanda/Richter (like Masetti) need. A 2D config mesh carries only the net
   doping and falls back to |N_D - N_A|. The two agree wherever one species
   dominates: everywhere in these devices except across a junction.
+
+## Open decisions (for the user)
+
+- PMOS series-resistance calibration: the 3D PMOS are Rs-limited by a
+  0.45 eV Schottky barrier, which caps their stress gain (+8% Ion).
+- The saturating-law f_max / f_min defaults.
+- The 3D NMOS rows predate the NMOS stressors (DEVELOPMENT_LOG 81, Si:P on
+  by default); they have not been rerun with them.

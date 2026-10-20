@@ -4,6 +4,64 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Inversion-layer mobility: phonon, surface roughness, Coulomb, orientation ([details](docs/mobility.md))
+
+A carrier at the gate interface used to move with the bulk (Masetti)
+mobility. The low-field mobility now adds the inversion-layer terms per
+node (Matthiessen), within ~10 nm of every Si/insulator interface:
+- **phonon + surface roughness:** Lombardi (fast, the default) or
+  Darwish/Lucent with Klaassen's screened bulk term (`--mobility exact`);
+- **Coulomb:** the channel doping through the bulk term (now the TOTAL
+  doping on fab meshes), and a fixed interface charge, **3e11 cm^-2 by
+  default**, which also enters Poisson (a Vt shift). Its Sentaurus form
+  had two bugs (ν1/ν2 swapped, the sheet charge missing from the normal
+  field: a negative gm at Qit 1e12); fixed and recalibrated (μ1 200,
+  c_trans 5e16);
+- **orientation:** (100) tops, (110) fin sidewalls and sheet edges; (110)
+  holes calibrated to 2x the (100) μ_eff.
+
+The normal field comes from D-continuity on the oxide side, so a 2.5 nm 2D
+mesh matches a 0.04 nm 1D split-CV to within 5%. The mobility is lagged in
+Newton and converged with the solution. Turn it off with `--mobility off`
+(bit for bit the old currents) or remove only the charge with
+`--mobility-set interface_charge=0`.
+
+Where each term acts (2D NMOS, Lg 0.5 um, same N_inv): phonon -15% near
+Vt to -50% at Vgs 2 V; surface roughness only above N_inv 5e11 (-16% at
+2 V); Coulomb (3e11) -9% near Vt, screened to -2%; velocity saturation
+only at high Vds.
+
+| device | Ion off (uA/um) | default | change |
+|---|---|---|---|
+| 2D NMOS, Lg 0.5 um | 200.8 | 164.0 | -18% |
+| 2D PMOS, Lg 30 nm | 974 | 613 | -37% |
+| 3D FinFET NMOS | 1005 | 990 | -1.5% |
+| 3D FinFET PMOS | 537 | 480 | -11% |
+| 3D nanosheet NMOS | 1109 | 1086 | -2.1% |
+| 3D nanosheet PMOS | 393 | 331 | -16% |
+
+The 3D devices lose less than the 2D ones: they are series-resistance and
+velocity-saturation limited, and the charge's Vt shift gives the NMOS part
+of it back. Open: the default charge sits on every interface, STI included,
+and opens a sub-fin leak in the FinFET NMOS (SS 68 -> 81 mV/dec); keep it
+or restrict it to the gate dielectric (user decision).
+
+<p align="center"><img src="docs/img/mobility_iv_regions.png" width="100%"></p>
+
+## NMOS stressors: SMT dislocations, Si:P S/D ([details](docs/stress.md#nmos-stressors-literature-2d-planar-and-3d))
+
+- **SMT edge dislocations** (Volterra field, checked against the analytic
+  edge dislocation and the literature): the largest NMOS stressor. A 2D
+  planar NMOS reaches +0.65 GPa (poly gate) and +1.2 GPa (gate-last), of
+  which the dislocations are +0.54 / +0.71 GPa, in line with the ~0.6 to
+  >1 GPa reported.
+- **Si:P S/D** (-0.4% lattice strain, on by default in 3D): FinFET NMOS
+  +0.56 GPa, nanosheet +0.87 GPa.
+- **3D dislocations are opt-in** (`--set sd_disl=1`): they push the 3D
+  channels to 2.4-5 GPa, more than anything measured, so they are a what-if.
+- Open (user decisions): the 3D dislocation default (now off) and the Si:P
+  default (now on).
+
 ## Stress -> mobility: piezoresistance in the device solver ([details](docs/piezo_mobility.md))
 
 The process stress now changes the drain current. Every silicon mesh edge
@@ -43,7 +101,11 @@ The 3D PMOS gains are well below the literature's +50-100% Ion, for three reason
 - velocity saturation caps the channel;
 - there is no ballistic model yet.
 
-The 3D NMOS flows on main carry almost no stress.
+These 3D NMOS numbers predate the NMOS stressors above (Si:P, on by
+default), when the 3D NMOS flows carried almost no stress. Open (user
+decisions): the PMOS series-resistance calibration (the 3D PMOS are
+Rs-limited by a 0.45 eV Schottky barrier) and the saturating-law
+f_max/f_min defaults.
 
 The details are in [docs/piezo_mobility.md](docs/piezo_mobility.md).
 
@@ -54,7 +116,7 @@ step by step and splits the channel stress by stressor: SiGe S/D mismatch,
 liners, STI oxide, metal gate, contacts, and stress memorization (anneal).
 Si and SiGe are anisotropic (C11, C12, C44, <110> channel); every material
 has E and nu in the material database. In a PMOS with SiGe S/D, pulling the
-dummy poly gate doubles the channel compression (-1.46 -> -2.90 GPa). An NMOS
+dummy poly gate doubles the channel compression (-1.42 -> -2.75 GPa). An NMOS
 capped and annealed keeps +0.2 GPa of tension after the cap is gone.
 
 In 3D the FinFET and nanosheet run through their real fab flows, voxel for voxel:
@@ -62,7 +124,7 @@ In 3D the FinFET and nanosheet run through their real fab flows, voxel for voxel
 - **Nanosheet:** the channel release takes it from −0.76 to −1.88 GPa. Each sheet ends at about −1.73 GPa.
 - **Bilayer PMOS epi (default):** a 5 nm Si0.8Ge0.2 seed under the 50% fill gives −1.50 GPa (FinFET) and −1.04 GPa (nanosheet); an opt-in realistic etch profile (tapered fin, slanted recess) is in [docs/finfet_nanosheet.md](docs/finfet_nanosheet.md).
 
-- **NMOS stressors (DEVELOPMENT_LOG 81):** literature-checked SMT edge dislocations, a gate-last SMT flow, tensile Si:P S/D epi, and dislocations in 3D as Volterra cuts. A planar NMOS reaches +0.65 GPa (poly gate) and +1.2 GPa (gate-last) with SMT dislocations and a tensile CESL. The dislocations are the largest term, in line with the ~0.6 to >1 GPa reported. In 3D, a tensile Si:P S/D (−0.4% lattice strain, on by default) gives the NMOS FinFET +0.56 GPa and the nanosheet +0.87 GPa. Opt-in S/D dislocations (`--set sd_disl=1`) push these past 2 GPa, more than anything measured, so they are a what-if.
+- **NMOS stressors (DEVELOPMENT_LOG 81):** SMT dislocations, gate-last SMT, Si:P S/D and opt-in 3D dislocations; see the NMOS section above.
 
 Multigrid CG solves are linear in size. A full FinFET history takes 49 s with `--fast`.
 
