@@ -82,6 +82,15 @@ def main(argv=None):
                         "interface_charge_where=all (also STI / spacers / BOX; default gate) highk=1 "
                         "surface_scale_n=1.1 "
                         "(solver2d/surface_mobility.MobilityModel)")
+    m.add_argument("--ballistic", nargs="?", const="on", choices=("on", "off"), default="off",
+                   help="ballistic mobility 1/mu = 1/mu_low + 1/mu_bal in the gated channel (docs/ballistic.md; "
+                        "default off)")
+    m.add_argument("--ballistic-k", type=float, default=None, metavar="K",
+                   help="with --ballistic: mu_bal/L_ch in cm2/(V s nm) for both carriers (default: from the "
+                        "masses, 23.9 n / 16.4 p; Sentaurus 20; Monte Carlo 8.4)")
+    m.add_argument("--ballistic-placement", choices=("lowfield", "total"), default=None,
+                   help="with --ballistic: lowfield (Matthiessen into the low-field mobility, before velocity "
+                        "saturation) or total (on the field-dependent mobility, Sentaurus Mobility(BalMob))")
     args = ap.parse_args(argv)
 
     import yaml
@@ -97,7 +106,10 @@ def main(argv=None):
                  tunneling=args.tunneling, vsat=True if args.vsat == "fast" else "mqf", stress=args.stress,
                  piezo=args.piezo, piezo_doping=args.piezo_doping == "on",
                  stress_set={k: float(v) for k, v in (kv.split("=") for kv in args.stress_set)},
-                 mobility=_mobility_options(args))
+                 mobility=_mobility_options(args),
+                 ballistic=None if args.ballistic == "off" else dict(
+                     {"enabled": True}, **({"k": args.ballistic_k} if args.ballistic_k is not None else {}),
+                     **({"placement": args.ballistic_placement} if args.ballistic_placement else {})))
         return 0
     cfg = flow.load(args.config)
     if args.cmd == "expand":
