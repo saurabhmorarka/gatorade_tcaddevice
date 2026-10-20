@@ -332,7 +332,7 @@ def _mkey(mobility):
 
 
 def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneling=None, stress=None,
-             mobility=None):
+             mobility=None, ballistic=None):
     """Device, mesh and equilibrium, built once per process (a worker
     started by simulate() gets it from _init_worker instead). quantum: None
     (classical) or the DeviceQuantum options (Schrodinger-Poisson channel
@@ -342,8 +342,10 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneli
     process stress -> mobility factors on the mesh (apply_stress).
     mobility: the inversion-layer mobility options (_mkey; None = bulk
     mobility only; solver2d/surface_mobility.py), attached before the
-    equilibrium (an interface charge is electrostatics)."""
-    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress, _mkey(mobility))
+    equilibrium (an interface charge is electrostatics).
+    ballistic: None (off) or a tuple of BallisticModel option items: the
+    ballistic mobility (apply_ballistic), after the stress factor."""
+    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress, _mkey(mobility), ballistic)
     if key not in _CTX:
         from main2d_mosfet_sweep import solve_mosfet
         from mos.mos_params import MOSDevice
@@ -353,6 +355,8 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneli
         if mobility is not None:
             from solver2d.surface_mobility import attach_mobility
             d["mobility_report"] = attach_mobility(d["mesh"], d["mat"], dict(_mkey(mobility)), log=None)
+        if ballistic is not None:
+            apply_ballistic(d, dict(ballistic), log=None)
         d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
         d["schottky"] = schottky_contacts(d, log=lambda *a: None)
         d["eq"] = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=True,
@@ -478,6 +482,19 @@ def apply_stress(d, path, mode="saturating", doping_factor=True, log=print):
     return d["stress_report"]
 
 
+def apply_ballistic(d, opts=None, log=print):
+    """Attach the ballistic mobility (solver2d/ballistic_mobility.py,
+    docs/ballistic.md) to d["mesh"]: L_ch = the template's Lg (unless opts
+    gives L_nm), the channel window centred on the gate contact's nodes."""
+    from solver2d.ballistic_mobility import BallisticModel, gate_window_nm, set_ballistic_mobility
+    model = BallisticModel.from_options(opts)
+    L = model.L_nm if model.L_nm is not None else d.get("L_nm")
+    gate = next(c["name"] for c in d["st"].contacts if c.get("type") == "gate") if "st" in d else "gate"
+    gx = gate_window_nm(d["mesh"], gate=gate, L_nm=L)
+    d["ballistic_report"] = set_ballistic_mobility(d["mesh"], model, gate_x_nm=gx, L_nm=L, log=log)
+    return d["ballistic_report"]
+
+
 def drain_current(d, r):
     """Total drain current of the full device (A), from the solved half."""
     from solver2d.current import contact_current
@@ -574,7 +591,8 @@ def run_curve(task):
     from main2d_mosfet_sweep import continuation
     t0 = time.perf_counter()
     d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"),
-                 task.get("quantum"), task.get("tunneling"), task.get("stress"), task.get("mobility"))
+                 task.get("quantum"), task.get("tunneling"), task.get("stress"), task.get("mobility"),
+                 task.get("ballistic"))
     Vds = task["Vds"]
     base = d.get("base", {}).get(Vds)
     it0 = 0
@@ -743,7 +761,8 @@ def _octree_vtu_geometry(d):
 
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
              vtk="all", workers=None, log=print, mesher="cartesian", quantum=None, vgs_min=0.0, tunneling=None,
-             vsat=True, stress=None, piezo="saturating", piezo_doping=True, stress_set=None, mobility="fast"):
+             vsat=True, stress=None, piezo="saturating", piezo_doping=True, stress_set=None, mobility="fast",
+             ballistic=None):
     """vsat: the velocity-saturation driving force. True = the fast default
     ("hybrid", solver2d/newton_solver_qf_2d.py); "mqf" = the exact one, the
     gradient of Sentaurus' modified quasi-Fermi potential with n0 1e10
@@ -762,7 +781,10 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     the gate-dielectric interfaces; interface_charge=0 removes it,
     interface_charge_where=all puts it on STI / spacers / BOX too), "exact" (Darwish + Klaassen), "off" (bulk only, the
     behaviour before DEVELOPMENT_LOG 83), or an options dict
-    (solver2d/surface_mobility.MobilityModel)."""
+    (solver2d/surface_mobility.MobilityModel).
+    ballistic: None (off, the default), True (the default model) or a dict
+    of BallisticModel options: the ballistic mobility after the stress
+    factor (docs/ballistic.md)."""
     from solver2d.mosfet_metrics import mosfet_metrics_signed
     # The linear solver is core/linsolve's "auto" (PETSc block ILU at these
     # sizes) unless TCAD_LINSOLVE says otherwise. This used to force direct
@@ -781,8 +803,9 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
         stress_key = (os.path.abspath(path), piezo, bool(piezo_doping))
     off = mobility in (None, "off") or (isinstance(mobility, dict) and mobility.get("mode") == "off")
     mob = None if off else _mkey(mobility)
-    key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress_key, mob)
-    d = _context(config, top_nm, half_z, mesher, quantum, tunneling, stress_key, mob)   # mesh + equilibrium, once
+    bal_key = None if not ballistic else tuple(sorted((ballistic if isinstance(ballistic, dict) else {}).items()))
+    key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress_key, mob, bal_key)
+    d = _context(config, top_nm, half_z, mesher, quantum, tunneling, stress_key, mob, bal_key)   # mesh + equilibrium, once
     r = d.get("mobility_report")
     log("  inversion-layer mobility: off (bulk only)" if r is None else
         f"  inversion-layer mobility ({r['mode']}, orientation {r['orientation']}): {r['n_interface']} interface "
@@ -790,6 +813,10 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
         + (f", interface charge {r['interface_charge']:g} cm^-2 on {r['charged_nodes']} "
            f"({r['interface_charge_where']}) interface nodes" if r["interface_charge"] else "")
         + (", remote high-k" if r["highk"] else ""))
+    if bal_key is not None:
+        r = d["ballistic_report"]
+        log(f"  ballistic mobility: L_ch {r['L_nm']:g} nm, mu_bal n/p = {r['mu_bal_n']:.0f}/{r['mu_bal_p']:.0f} cm2/Vs, "
+            f"gate x {r['gate_x_nm'][0]:.1f}..{r['gate_x_nm'][1]:.1f} nm, {r['n_channel_edges']} channel edges")
     if stress_key is not None:
         r = d["stress_report"]
         log(f"  stress mobility ({r['mode']}, doping factor {'on' if r['doping_factor'] else 'off'}): "
@@ -818,7 +845,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     for v in vds:
         tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
                           vtk_keep=(0.0, min(vgs), max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
-                          quantum=quantum, tunneling=tunneling, stress=stress_key, mobility=mob))
+                          quantum=quantum, tunneling=tunneling, stress=stress_key, mobility=mob, ballistic=bal_key))
     n_work = workers or performance_cores()
     ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
     # one BLAS / OpenMP thread per worker process (inherited at spawn)

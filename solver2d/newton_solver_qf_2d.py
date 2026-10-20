@@ -51,6 +51,7 @@ from core.linsolve import LinearSolver
 from core.physics import equilibrium_bulk_potential_arr
 from core.solver import contact_values
 from core.bank_rose_damping import bank_rose_solve
+from solver2d.ballistic_mobility import apply_ballistic, apply_ballistic_total
 
 MAX_QF_STEP = 5.0
 MAX_PSI_STEP = 1.0
@@ -551,7 +552,9 @@ def low_field_mobility(mesh, mat, psi=None, n=None, p=None, ms=None):
       4. the STRESS factor on the total low-field mobility
          (_apply_edge_factors: piezoresistance, solver2d/stress_mobility.py);
          a per-component option would act inside step 2 instead;
-      5. (ballistic branch) 1/mu0 = 1/mu_low + 1/mu_bal, here.
+      5. ballistic, opt-in: 1/mu0 = 1/mu_low + w/(gamma^s mu_bal)
+         (apply_ballistic: solver2d/ballistic_mobility.py; static per mesh;
+         gamma = the stress factor alone).
     Velocity saturation (edge_mobility, mobility_field) acts on the result.
     ms: the lagged state of steps 1-3 (mobility_state); None evaluates
     them at (psi, n, p) - the exact current of a converged state."""
@@ -565,7 +568,8 @@ def low_field_mobility(mesh, mat, psi=None, n=None, p=None, ms=None):
         mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)             # 1
         mu_n0 = 0.5 * (mu_n_node[ii] + mu_n_node[jj])                      # 3
         mu_p0 = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
-    mu_n0, mu_p0 = _apply_edge_factors(mesh, mu_n0, mu_p0)                 # 4 (5: ballistic after this)
+    mu_n0, mu_p0 = _apply_edge_factors(mesh, mu_n0, mu_p0)                 # 4
+    mu_n0, mu_p0 = apply_ballistic(mesh, mu_n0, mu_p0)                     # 5
     return mu_n0, mu_p0
 
 
@@ -610,7 +614,7 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
     mu_n0, mu_p0 = low_field_mobility(mesh, mat, psi, n, p, ms)
     force = vsat_force(velocity_saturation)
     if force is None:
-        return mu_n0, mu_p0, None, None
+        return apply_ballistic_total(mesh, mu_n0, mu_p0, None, None)
     L = _edge_len(mesh)
     dpsi = psi[jj] - psi[ii]
     if force == "efield":
@@ -629,7 +633,9 @@ def edge_mobility(mesh, mat, psi, velocity_saturation=False, n=None, p=None, phi
     vsat_n, vsat_p = _edge_vsat(mesh, mat)
     mu_n, dmu_n_dF = mobility_field(Fn, mu_n0, vsat_n, mat.beta_n)
     mu_p, dmu_p_dF = mobility_field(Fp, mu_p0, vsat_p, mat.beta_p)
-    return mu_n, mu_p, tuple(dmu_n_dF * d for d in dFn), tuple(dmu_p_dF * d for d in dFp)
+    # ballistic on the total mobility (placement "total", Sentaurus Eq. 367; off: untouched)
+    return apply_ballistic_total(mesh, mu_n, mu_p, tuple(dmu_n_dF * d for d in dFn),
+                                 tuple(dmu_p_dF * d for d in dFp))
 
 
 def _semiconductor_edge_mask(mesh):

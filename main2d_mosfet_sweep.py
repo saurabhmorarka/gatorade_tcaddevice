@@ -232,14 +232,42 @@ def mobility_options(cfg, override=None):
     return None if m.get("mode", "fast") in ("off", None, False) else m
 
 
-def _context(config_path, extrude=None, stress_file=None, mobility=None):
+def ballistic_options(cfg, override=None):
+    """The ballistic-mobility options of a config (a ballistic: block,
+    docs/ballistic.md; default off) or None when off. override: None (the
+    config decides), "on" (the config's block, or the defaults) or "off"."""
+    b = cfg.get("ballistic")
+    if isinstance(b, bool):
+        b = {"enabled": b}
+    b = dict(b or {})
+    on = bool(b.get("enabled", bool(b))) if override is None else override == "on"
+    return b if on else None
+
+
+def _apply_ballistic(mesh, cfg, domain, override=None, log=None):
+    """Attach the ballistic term (solver2d/ballistic_mobility.py) to a 2D
+    (or extruded) mesh: L_ch = the gate contact's length unless the block
+    gives L_nm, the channel window = the gate contact."""
+    opts = ballistic_options(cfg, override)
+    if opts is None:
+        return None
+    from solver2d.ballistic_mobility import BallisticModel, set_ballistic_mobility
+    gate = next(c for c in domain.contacts if c.name == "gate")
+    gx = (gate.x_range_cm[0] * 1e7, gate.x_range_cm[1] * 1e7)
+    return set_ballistic_mobility(mesh, BallisticModel.from_options(opts), gate_x_nm=gx,
+                                  L_nm=gx[1] - gx[0], log=log)
+
+
+def _context(config_path, extrude=None, stress_file=None, mobility=None, ballistic=None):
     """extrude=(width_um, nz): run the SAME device as a 3D mesh extruded in
     z (mesh3d/extrude.py) - the 3D performance testbed and the first rung
     of the 3D validation ladder (Id per um of width must match 2D).
     A config with a stress: block gets the process stress -> mobility
     factors (solver2d/stress_mobility.py) on its mesh; stress_file is the
-    field main() solved once and saved (else it is solved here)."""
-    key = (config_path, tuple(extrude) if extrude else None, stress_file, mobility)
+    field main() solved once and saved (else it is solved here).
+    ballistic: None (the config's ballistic: block decides), "on" or "off"
+    (solver2d/ballistic_mobility.py, applied after the stress factor)."""
+    key = (config_path, tuple(extrude) if extrude else None, stress_file, mobility, ballistic)
     if key not in _CTX:
         cfg = load_config(config_path)
         domain, mat, dev, Cs, mesh_opts, bias_cfg, output_cfg = build_from_config(cfg)
@@ -271,6 +299,7 @@ def _context(config_path, extrude=None, stress_file=None, mobility=None):
             field = field_from_config(st, domain, log=None)
             mesh.stress_report = apply_stress_mobility(mesh, mat, field, PiezoModel.from_options(st), log=None)
             mesh.stress_field = field
+        mesh.ballistic_report = _apply_ballistic(mesh, cfg, domain, ballistic)
         _CTX[key] = (mesh, mat, dev, Cs, eq, vsat)
     return _CTX[key]
 
@@ -288,7 +317,7 @@ def run_curve(task):
     ('idvd', fixed task['Vgs']) curve, from the equilibrium anchor."""
     t0 = time.perf_counter()
     mesh, mat, dev, Cs, eq, vsat = _context(task["config"], task.get("extrude"), task.get("stress_file"),
-                                            task.get("mobility"))
+                                            task.get("mobility"), task.get("ballistic"))
     log_lines = []
     log = log_lines.append
 
@@ -519,6 +548,9 @@ def main():
                              "dict with interface_charge: 0 removes the charge and its Coulomb term)")
     parser.add_argument("--no-stress", action="store_true",
                         help="ignore the config's stress: block (the unstressed reference run)")
+    parser.add_argument("--ballistic", choices=("on", "off"), default=None,
+                        help="ballistic mobility (docs/ballistic.md): override the config's ballistic: block "
+                             "(default: the config decides; off without a block)")
     parser.add_argument("--vtk", nargs="?", const="last", choices=["last", "all"], default=None,
                         help="also write VTK (<out-dir>/vtk/*.vtu + one .pvd per curve, for ParaView): "
                              "'last' (default) = the last point of each curve, 'all' = every bias point "
@@ -547,10 +579,17 @@ def main():
              [dict(kind="idvd", Vgs=v, values=vds_list, config=args.config, extrude=extrude)
               for v in vgs_output])
     for t in tasks:
-        t.update(vtk=args.vtk, vtk_dir=vtk_dir, mobility=args.mobility)
+        t.update(vtk=args.vtk, vtk_dir=vtk_dir, mobility=args.mobility, ballistic=args.ballistic)
     mob = mobility_options(cfg, args.mobility)
     print("inversion-layer mobility: " + ("off (bulk only)" if mob is None else
                                           ", ".join(f"{k} {v}" for k, v in mob.items())))
+    bal = ballistic_options(cfg, args.ballistic)
+    if bal is not None:
+        from solver2d.ballistic_mobility import BallisticModel, ballistic_k
+        m = BallisticModel.from_options(bal)
+        L_nm = m.L_nm or L_um * 1e3
+        print(f"ballistic mobility ON: L_ch {L_nm:g} nm, mu_bal n/p = {m.k('n') * L_nm:.0f}/{m.k('p') * L_nm:.0f} "
+              f"cm2/Vs (docs/ballistic.md)")
     stress_file = None
     if cfg.get("stress") and args.no_stress:
         stress_file = "off"
@@ -562,7 +601,7 @@ def main():
         stress_file = _prepare_stress(cfg["stress"], domain, out_dir)
         for t in tasks:
             t["stress_file"] = stress_file
-        mesh_s = _context(args.config, extrude, stress_file, args.mobility)[0]
+        mesh_s = _context(args.config, extrude, stress_file, args.mobility, args.ballistic)[0]
         _report_stress(mesh_s, domain)
 
     # One BLAS thread per worker - the workers are the parallelism.
@@ -632,7 +671,7 @@ def main():
         for res in results:
             entries = res["vtk_entries"]
             if args.vtk == "last" and res["last_state"] is not None:
-                mesh_v, mat_v = _context(args.config, extrude, stress_file, args.mobility)[:2]
+                mesh_v, mat_v = _context(args.config, extrude, stress_file, args.mobility, args.ballistic)[:2]
                 entries = write_states(vtk_dir, curve_stem(res["task"]), mesh_v, mat_v,
                                        [dict(state=res["last_state"], bias=res["last_bias"],
                                              **_vtk_meta(res["task"], res["last_bias"]))])
@@ -644,7 +683,7 @@ def main():
     # Structure+fields JSON: the last point of the low-Vds transfer curve.
     structure_file = output_cfg.get("structure_file")
     if structure_file and not extrude:
-        mesh = _context(args.config, None, stress_file, args.mobility)[0]
+        mesh = _context(args.config, None, stress_file, args.mobility, args.ballistic)[0]
         res = results[0]
         r = res["last_state"]
         Ex, Ey = electric_field_2d(mesh.points, mesh.triangles, r["psi"])

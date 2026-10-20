@@ -7277,3 +7277,84 @@ mask follows the nearest interface node. An unknown value raises.
 
 **Open.** A separate STI/spacer charge (real, often more positive than
 the gate's) waits for the interface-trap work.
+
+## 85. Ballistic mobility (opt-in): Lg sweep, the mobility stack at short Lg, PMOS vs NMOS
+
+Branch `ballistic-mobility`, rebased onto the mobility stack (log 83) and
+the gate-only interface charge (log 84). Plan:
+out/passdown_logs/mobility_plan.md section 4. Default OFF, so the default
+I-V of every device is unchanged.
+
+**Model** (solver2d/ballistic_mobility.py, docs/ballistic.md).
+- Step 5 of `low_field_mobility`, after the stress factor and before vsat:
+  1/μ0 = 1/μ_low + w/(γ^s μ_bal).
+- μ_bal = q v_T L_ch/(2kT), v_T = sqrt(2kT/(π m*)): k = 23.9 (n, 0.19 m0)
+  and 16.4 (p, 0.40 m0) cm²/(V s nm).
+- γ is the piezo 'stress' factor alone, s = 0.5. w is the gated, low-doped
+  channel mask.
+- Placement `total` (Sentaurus Eq. 367) is an option.
+- μ_bal is static, so there is no Newton cost.
+- CLI: `fab simulate --ballistic [--ballistic-k] [--ballistic-placement]`;
+  2D: a `ballistic:` block / `--ballistic on|off`.
+
+**Rebase.** Conflicts were in low_field_mobility, fab/simulate,
+fab/__main__ and main2d_mosfet_sweep: both the mobility and the ballistic
+options are kept, and the pipeline is bulk -> surface/Coulomb -> edge mean
+-> stress -> ballistic -> vsat. Two tests called `low_field_mobility`
+without the solution. The surface terms now need it, so the tests pass
+the state, and `_context(..., ballistic=)` is called by keyword.
+
+**B1, FinFET Lg sweep** (12-30 nm, cpp = Lg + 33, the default mobility
+stack; scripts/ballistic/finfet_sweep.py, out/ballistic_finfet2):
+- NMOS, ballistic on: Ion 458 / 549 / 588 / 561 uA/um at 12 / 15 / 20 /
+  30 nm.
+  - Ion(15)/Ion(30) = 0.979 and Ion(12)/Ion(15) = 0.834: PASS.
+  - It also passes with the term off (0.972 / 0.822). Rs, vsat and the
+    short-channel electrostatics flatten the NMOS (DIBL 7 -> 179 mV/V).
+  - The term costs 3-5% Ion and 8-10% Idlin.
+- PMOS: FAIL on "gains only through SiGe stress".
+  - No stress, ballistic on: Ion(15)/Ion(30) = 1.063 (off: 1.072).
+  - σxx rises -881 -> -1500 MPa, but the stress share of the gain is only
+    +0.7% (stress gain 8.0% -> 8.8%).
+  - Cause: the hole channel is still mobility-controlled (2D S_sat 0.52
+    at 15 nm), and a Matthiessen term keeps G ∝ μ_eff/L with an Lg
+    dependence unless μ_bal ≪ μ_low.
+  - With the Monte Carlo k = 8.4: PMOS 1.059 (stress 1.070), NMOS 0.992.
+  - Not tuned further: a smaller k or a vsat/Rs retune would be fitting
+    the criterion. A source-injection-limited model (KVM-like) is the
+    physical next step.
+
+**B2, the mobility stack at short Lg** (scripts/ballistic/iv_regions_ballistic.py,
+2D planar NMOS, 1 nm oxide, Lg 500 / 30 / 15 nm, ballistic off/on):
+- The sheet charge is separated from its Coulomb scattering (μ1 = 1e12),
+  so each mobility step is compared at a fixed bias.
+- Every term acts on the same I-V region at every Lg: phonon flat, SR
+  growing with Vgs, Coulomb scattering at and below Vt (-40% deep in
+  subthreshold, ~-1 to -6% at Vt + 0.05 V, ~0 at Vt + 0.3 V), vsat at high
+  Vds.
+- The magnitudes shrink with Lg mostly through vsat and Rs. At Vt + 0.3,
+  Vds 0.7 V: SR -40% (500) -> -18% (30) -> -2.8% (15). The ballistic term
+  takes another 10-20% (relative) off each term.
+- S = dln Id/dln μ_low (lg_sweep.py, now also in the linear regime):
+  - S_sat NMOS 0.99 -> 0.39 (off) / 0.36 (on) from 500 to 15 nm;
+  - S_lin stays ~1 off, 0.87 on at 15 nm;
+  - μ_app ON/OFF = μ_bal/(μ_ch + μ_bal) within 0.6% (15-500 nm), 1.8%
+    at 12 nm;
+  - PMOS loses less (ON/OFF 0.89 vs 0.82 at 15 nm).
+- Figures: docs/img/ballistic_iv_regions.png,
+  ballistic_sensitivity_lg.png.
+
+**B3, literature** (docs/ballistic.md): unstrained PMOS is less ballistic
+(λ_p ~5 nm vs λ_n ~12 nm from λ = 2(kT/q)μ/v_T). Multi-subband MC (De
+Michielis 2009) finds the gap small, and strain shrinks it (the
+Khakifirooz/Antoniadis v_x0 gain is sub-linear in μ, ~2x for ~4x). The
+size of the gap is uncertain.
+
+**Tests**: 10 in test_ballistic_mobility (~2 s).
+
+**Open**:
+- the PMOS Lg acceptance (needs a source-injection model);
+- the k default (theory vs MC), a user decision;
+- the FinFET PMOS Idlin is not monotonic in Lg (39 / 68 / 38 / 62 uA/um,
+  the same with the term off), unexplained;
+- the 2D stand-in device has a low μ_ch (45-85).
