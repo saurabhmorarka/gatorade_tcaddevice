@@ -7203,3 +7203,77 @@ underestimates the surface field by the screening of the interface node's
 own charge. Taking the field from the oxide side through D-continuity
 (the oxide has no charge, so its field is linear and resolved) removed the
 need for a 0.1 nm first row, and the 2D/1D split-CV check confirmed it.
+
+## 84. Interface charge on the gate dielectric only (default)
+
+Branch `coulomb-gate-interface`. The log-83 default (Qit 3e11 cm^-2, the
+sheet charge plus its Coulomb scattering) sat on EVERY Si/insulator
+interface. On the FinFET NMOS the STI part, along the sub-fin, opened a
+leakage path: SS 68 -> 81 mV/dec, DIBL 79 -> 131 mV/V, Ioff x6.5, Vt,sat
+-45 mV. The user approved the default from a gate-oxide (channel) study,
+so the charge now goes on the gate dielectric only.
+
+**Option.** `MobilityModel.interface_charge_where`: `gate` (default) or
+`all` (the log-83 behaviour, bit for bit: the FinFET N/P runs reproduce
+its Ion, SS, DIBL and Ioff to the last digit). Both the Poisson sheet charge
+(`mesh.fixed_charge`) and the Coulomb term follow it. A surface-term node
+takes the charge of its nearest interface node. The phonon and roughness
+terms are unchanged (every interface). CLI: `fab simulate
+--mobility-set interface_charge_where=all`; 2D: the key in
+`physics: mobility:`.
+
+**Which nodes are on a gate dielectric** (`gate_interface_nodes`,
+solver2d/surface_mobility.py). Region labels do not help: on fab meshes
+the IL, high-k, STI and spacer are all just insulator nodes, and the gate
+stack is connected to the STI. The test is geometric:
+- A ray goes from each interface node along its normal into the insulator,
+  in 0.25 nm steps, taking the nearest mesh node at each step.
+- It hits the gate at a gate-contact node: a contact whose nodes are all
+  insulator nodes, i.e. a gate metal on a dielectric. S/D and body
+  contacts touch the semiconductor.
+- It is blocked by a semiconductor node or an S/D metal surface (inner
+  spacers between sheets, STI between fins). It gives up at 20 nm.
+- A node is gated when its hit distance is <= 2 x the gate-stack
+  thickness + 1 nm. The thickness is the 5th percentile of the hits. The
+  minimum is not robust: 2-9 gate-edge voxel nodes hit at 0.25-0.5 nm. A
+  first version used the minimum and dropped fin-sidewall nodes that hit at
+  2.25 nm.
+- Hits on the fab meshes: the gate stack at 1.5-2.25 nm, an S/D epi face
+  across the spacer at ~6.5 nm, the substrate under the STI not at all
+  (horizontal rays from the sub-fin hit nothing); threshold 4 nm.
+- Gated nodes: FinFET 1034 of 5375 (fin top and sidewalls down to the STI
+  top, y 0..48 nm), nanosheet 2416 of 9382 (sheets plus the substrate top
+  under the gate), planar 289 of 2758 (under the gate), the 2D devices all
+  of theirs (no STI). Cost < 1 s per mesh.
+
+**Test** (`test_interface_charge_gate_only`): a 3D fin with a wrap-around
+gate over STI (1 nm gate oxide, the gate electrode 4 nm above the
+substrate on the STI top). The fin top and sidewalls are charged; the
+sub-fin sidewalls and the substrate under the STI are not. `all` charges
+every interface node. The sheet charge is zero off the gate. The Coulomb
+mask follows the nearest interface node. An unknown value raises.
+
+**Results** (`scripts/mobility/device_runs.sh`, out/mob_runs/ion_gate;
+`all` in ion_all; Qit 0 = ion_fast; |Vgs| 0.8 V, |Vds| 0.7 V):
+
+| FinFET | SS | DIBL | Ioff (A/um) | Ion (uA/um) | Vt,sat |
+|---|---|---|---|---|---|
+| NMOS Qit 0 | 68 | 79 | 3.6e-7 | 959 | 0.153 |
+| NMOS gate (default) | 64 | 75 | 3.9e-7 | 981 | 0.145 |
+| NMOS all | 81 | 131 | 2.4e-6 | 990 | 0.106 |
+| PMOS Qit 0 | 69 | 67 | 4.5e-8 | 496 | -0.216 |
+| PMOS gate (default) | 66 | 63 | 4.0e-8 | 485 | -0.226 |
+| PMOS all | 64 | 57 | 7.9e-9 | 480 | -0.232 |
+
+- The sub-fin leak is gone. Ion vs mobility off: NMOS -2.4%, PMOS -9.7%.
+- The 2-4 mV/dec steeper SS against Qit 0 comes from the Coulomb term.
+  It is strongest unscreened in weak inversion and fades along the
+  turn-on, so the mobility rises with Vgs.
+- Other devices: 3D planar NMOS Ion 1576 -> 1547, SS 88 -> 86, DIBL
+  179 -> 169. Nanosheet N 1086 -> 1080, P 331 -> 333. The 2D NMOS and PMOS
+  are unchanged; they have no STI.
+- docs/mobility.md (Ion table, the FinFET table, the detection rule) and
+  the README are updated.
+
+**Open.** A separate STI/spacer charge (real, often more positive than
+the gate's) waits for the interface-trap work.

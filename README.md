@@ -13,7 +13,8 @@ node (Matthiessen), within ~10 nm of every Si/insulator interface:
   Darwish/Lucent with Klaassen's screened bulk term (`--mobility exact`);
 - **Coulomb:** the channel doping through the bulk term (now the TOTAL
   doping on fab meshes), and a fixed interface charge, **3e11 cm^-2 by
-  default**, which also enters Poisson (a Vt shift). Its Sentaurus form
+  default on the gate dielectric** (`interface_charge_where=all` puts it
+  on STI, spacers and the BOX too), which also enters Poisson (a Vt shift). Its Sentaurus form
   had two bugs (ν1/ν2 swapped, the sheet charge missing from the normal
   field: a negative gm at Qit 1e12); fixed and recalibrated (μ1 200,
   c_trans 5e16);
@@ -35,16 +36,19 @@ only at high Vds.
 |---|---|---|---|
 | 2D NMOS, Lg 0.5 um | 200.8 | 164.0 | -18% |
 | 2D PMOS, Lg 30 nm | 974 | 613 | -37% |
-| 3D FinFET NMOS | 1005 | 990 | -1.5% |
-| 3D FinFET PMOS | 537 | 480 | -11% |
-| 3D nanosheet NMOS | 1109 | 1086 | -2.1% |
-| 3D nanosheet PMOS | 393 | 331 | -16% |
+| 3D FinFET NMOS | 1005 | 981 | -2.4% |
+| 3D FinFET PMOS | 537 | 485 | -9.7% |
+| 3D nanosheet NMOS | 1109 | 1080 | -2.6% |
+| 3D nanosheet PMOS | 393 | 333 | -15% |
 
 The 3D devices lose less than the 2D ones: they are series-resistance and
 velocity-saturation limited, and the charge's Vt shift gives the NMOS part
-of it back. Open: the default charge sits on every interface, STI included,
-and opens a sub-fin leak in the FinFET NMOS (SS 68 -> 81 mV/dec); keep it
-or restrict it to the gate dielectric (user decision).
+of it back. The charge sits only on the gate-dielectric interface, found
+geometrically on any mesh (a ray along the interface normal must reach the
+gate within ~2x the gate-stack thickness). On every interface, the STI charge
+along the FinFET sub-fin opened a leak: NMOS SS 68 -> 81 mV/dec, DIBL
+79 -> 131 mV/V, Ioff x6.5. On the gate only, the FinFET NMOS has SS 64 mV/dec,
+DIBL 75 mV/V, Ioff 3.9e-7 A/um and Ion 981 uA/um (PMOS: 66, 63, 4.0e-8, 485).
 
 <p align="center"><img src="docs/img/mobility_iv_regions.png" width="100%"></p>
 
