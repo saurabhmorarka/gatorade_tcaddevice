@@ -49,12 +49,15 @@ Films vary widely with process; treat these as teaching values.
 ## Results
 
 Lg 30 nm, spacer 8 nm, 44 nm S/D, 20 nm STI half-width, 40 nm SiGe recess.
-Channel stress is the mean over the top 4 nm of the channel, in MPa (+ tensile):
+The PMOS S/D is the bilayer epi (5 nm x = 0.2 seed + x = 0.5 fill, DEVELOPMENT_LOG 78).
+Channel stress is the mean over the top 4 nm of the channel, in MPa (+ tensile;
+rerun on main after the nmos-stress and piezo-mobility merges,
+`python3 -m mechanics.planar_flow`):
 
 | flow | σxx (channel) | σyy (vertical) | σzz (width) |
 |---|---|---|---|
-| PMOS SiGe, gate-first | −897 | +1180 | +371 |
-| PMOS SiGe, gate-last (RMG) | −2674 | −106 | −205 |
+| PMOS SiGe, gate-first | −879 | +1023 | +315 |
+| PMOS SiGe, gate-last (RMG) | −2524 | −136 | −206 |
 | NMOS SMT (poly gate), no dislocations | +113 | −209 | −69 |
 | NMOS SMT + edge dislocations (poly gate) | +652 | −293 | −65 |
 | NMOS SMT + edge dislocations, gate-last (RMG) | +1198 | −27 | +65 |
@@ -62,12 +65,14 @@ Channel stress is the mean over the top 4 nm of the channel, in MPa (+ tensile):
 The NMOS rows are broken down step by step and by stressor, with the
 literature they are checked against, in [NMOS stressors](#nmos-stressors-literature-2d-planar-and-3d) below.
 
-**The poly pull.** In the gate-last flow, channel compression reaches −1455 MPa
-after ILD CMP. Pulling the dummy poly takes it to −2895 MPa: the poly had
+**The poly pull.** In the gate-last flow, channel compression reaches −1420 MPa
+after ILD CMP. Pulling the dummy poly takes it to −2748 MPa (−2524 MPa at the end
+of the flow, after the TiN fill and the contacts): the poly had
 been holding the channel against the SiGe push. In the gate-first flow a
-rigid TiN gate (E = 400 GPa) sits there from the start, and the SiGe gives only
-−756 MPa. The vertical stress shows the same thing from the other side. Under
-a gate, the SiGe squeezes the channel up against the gate (σyy ≈ +0.9 GPa).
+rigid TiN gate (E = 400 GPa) sits there from the start, and the SiGe epi gives only
+−738 MPa. The vertical stress shows the same thing from the other side. Under
+a gate, the SiGe squeezes the channel up against the gate (σyy ≈ +0.7 GPa after
+the epi, +1.0 GPa at the end).
 With the gate pulled, the channel surface is free and σyy drops to about 0.
 
 <p align="center"><img src="img/stress_pmos_gate_last.png" width="100%"></p>
