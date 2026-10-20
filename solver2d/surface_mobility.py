@@ -89,8 +89,10 @@ class MobilityModel:
     orientation: str = "auto"        # auto (per-interface (100)/(110)/(111) sets) | 100 (one set)
     interface_field: str = "dcont"   # dcont (D-continuity on interface nodes) | lsq (one-sided gradient)
     doping: str = "total"            # total (N_A + N_D where the mesh carries it) | net (|N_D - N_A|)
-    interface_charge: float = 3e11   # cm^-2 (units of q, signed): fixed charge on every Si/insulator interface
+    interface_charge: float = 3e11   # cm^-2 (units of q, signed): fixed charge on the Si/insulator interface
                                      # (sheet charge in Poisson + interface Coulomb scattering); 0 = off
+    interface_charge_where: str = "gate"   # gate (gate-dielectric interfaces only: gate_interface_nodes)
+                                     # | all (every Si/insulator interface: STI, spacers, BOX too)
     coulomb_mu1: float = None        # interface-charge Coulomb mu1, c_trans (None: COULOMB_IC, calibrated;
     coulomb_c_trans: float = None    # 40 and 1e18 = Sentaurus Table 63)
     highk: bool = False              # remote Coulomb + phonon from a high-k dielectric (eps_r > highk_eps_r)
@@ -131,6 +133,8 @@ class MobilityModel:
             raise ValueError(f"orientation must be auto or 100, not {m.orientation!r}")
         if m.interface_field not in ("dcont", "lsq"):
             raise ValueError(f"interface_field must be dcont or lsq, not {m.interface_field!r}")
+        if m.interface_charge_where not in ("gate", "all"):
+            raise ValueError(f"interface_charge_where must be gate or all, not {m.interface_charge_where!r}")
         if m.doping not in ("total", "net"):
             raise ValueError(f"doping must be total or net, not {m.doping!r}")
         for k in ("interface_charge", "highk_eps_r", "l_crit", "l_crit_highk", "F_min", "scale_110_n",
@@ -323,7 +327,8 @@ def interface_geometry(mesh, mat, l_crit=1e-6, interface_field="dcont", highk_ep
     s = np.einsum("ek,ek->e", t, nrm[a])                     # < 0: the edge points into the insulator
     area = np.bincount(a, fac * np.maximum(-s, 0.0), minlength=N)
 
-    geo = dict(N=N, dim=dim, semi=semi, is_interface=is_if, area=area, n_interface=int(is_if.sum()))
+    geo = dict(N=N, dim=dim, semi=semi, is_interface=is_if, area=area, n_interface=int(is_if.sum()),
+               if_normal=nrm)
     dist = np.full(N, np.inf)
     node_nrm = np.zeros((N, dim))
     near = np.full(N, -1)
@@ -393,6 +398,87 @@ def interface_geometry(mesh, mat, l_crit=1e-6, interface_field="dcont", highk_ep
             dist_hk[sn] = cKDTree(P[hk]).query(P[sn])[0]
     geo["dist_highk"] = dist_hk
     return geo
+
+
+GATE_RAY_STEP = 2.5e-8      # cm: the ray-march step of gate_interface_nodes
+GATE_RAY_MAX = 2e-6         # cm: rays stop here (no gate within 20 nm: not a gate dielectric)
+GATE_THICK_FACTOR = 2.0     # gated: hit distance <= this x the gate-stack thickness + GATE_THICK_PAD
+GATE_THICK_PAD = 1e-7       # cm
+GATE_THICK_QUANTILE = 5.0   # the gate-stack thickness: this percentile of the hit distances
+
+
+def gate_contact_nodes(mesh):
+    """Boolean per node: the nodes of the gate-like contacts (every node of
+    the contact is an insulator node: a gate metal sitting on a dielectric;
+    the S/D and body contacts touch the semiconductor)."""
+    N = len(mesh.points)
+    ins = np.zeros(N, bool) if getattr(mesh, "is_insulator", None) is None else np.asarray(mesh.is_insulator, bool)
+    btype = np.asarray(mesh.boundary_bc_type, dtype=object)
+    is_c = np.array([str(b).startswith("contact:") for b in btype], bool)
+    bidx = np.asarray(mesh.boundary_point_index, int)[is_c]
+    names = np.array([str(b).split(":", 1)[1] for b in btype[is_c]], dtype=object)
+    out = np.zeros(N, bool)
+    for nm in set(names):
+        k = bidx[names == nm]
+        if len(k) and ins[k].all():
+            out[k] = True
+    return out
+
+
+def gate_interface_nodes(mesh, geo):
+    """(gated, hit): which Si/insulator interface nodes sit on a GATE
+    dielectric, and the distance (cm) along the interface normal to the gate.
+
+    From each interface node a ray goes along the normal into the insulator
+    (steps GATE_RAY_STEP, nearest mesh node at each step). It hits the gate
+    when the nearest node is a gate-contact node (gate_contact_nodes); it is
+    blocked by another semiconductor node or a semiconductor-contact metal
+    node (an inner spacer between two sheets, STI between fins) and gives up
+    after GATE_RAY_MAX. A node is gated when its hit distance is at most
+    GATE_THICK_FACTOR x the gate-stack thickness + GATE_THICK_PAD, the
+    thickness being a low percentile of all hits (GATE_THICK_QUANTILE; the
+    minimum is not robust: a few gate-edge / voxel-corner nodes hit at
+    0.25-0.5 nm): the gate stack itself and the bisector of a fin corner,
+    not a gate electrode across a thick STI / BOX / spacer (an S/D epi face
+    across the spacer hits at ~6.5 nm in the fab FinFET and nanosheet, the
+    gate stack at 1.5-2.25 nm: threshold 4 nm). Mesh-type agnostic: 1D-3D,
+    rectilinear, triangles, octree."""
+    from scipy.spatial import cKDTree
+    P = np.asarray(mesh.points, float)
+    if P.ndim == 1:
+        P = P[:, None]
+    N = len(P)
+    is_if = geo["is_interface"]
+    gate = gate_contact_nodes(mesh)
+    gated = np.zeros(N, bool)
+    hit = np.full(N, np.inf)
+    ifn = np.flatnonzero(is_if)
+    if not len(ifn) or not gate.any():
+        return gated, hit
+    semi = geo["semi"]
+    ins = ~semi
+    stop = semi.copy()
+    btype = np.asarray(mesh.boundary_bc_type, dtype=object)
+    is_c = np.array([str(b).startswith("contact:") for b in btype], bool)
+    cidx = np.asarray(mesh.boundary_point_index, int)[is_c]
+    stop[cidx[ins[cidx] & ~gate[cidx]]] = True                 # S/D metal surfaces
+    nrm = geo["if_normal"][ifn]                                # points into the semiconductor
+    tree = cKDTree(P)
+    alive = np.ones(len(ifn), bool)
+    for s in np.arange(1, int(GATE_RAY_MAX / GATE_RAY_STEP) + 1) * GATE_RAY_STEP:
+        k = np.flatnonzero(alive)
+        if not len(k):
+            break
+        _, nn = tree.query(P[ifn[k]] - s * nrm[k])
+        g = gate[nn]
+        hit[ifn[k[g]]] = s
+        blocked = stop[nn] & (nn != ifn[k])
+        alive[k[g | blocked]] = False
+    fin = np.isfinite(hit)
+    if fin.any():
+        t_gate = np.percentile(hit[fin], GATE_THICK_QUANTILE)
+        gated = fin & (hit <= GATE_THICK_FACTOR * t_gate + GATE_THICK_PAD)
+    return gated, hit
 
 
 class MobilityState:
@@ -471,13 +557,21 @@ class SurfaceMobility:
         # interface node adds q Qit / eps_si on the silicon side (the D-continuity row's sign: positive in
         # inversion; checked against the one-sided silicon gradient at depletion, where it matches to 3%).
         # Without it a positive Qit under-reads F, and with it f(F) of the Coulomb term.
+        # where the charge sits: every interface node, or only those on a gate dielectric
+        self.charged = g["is_interface"].copy()
+        self.gate_hit = None
+        if model.interface_charge and model.interface_charge_where == "gate":
+            self.charged, self.gate_hit = gate_interface_nodes(mesh, g)
         self.F_off = None
         if model.interface_charge and len(self.act) and g["dcont"].any():
             from core.params import Q as _Q
-            dc = g["dcont"][self.act]
+            dc = g["dcont"][self.act] & self.charged[self.act]
             self.F_off = np.where(dc, _Q * model.interface_charge / _node_eps(mesh, mat)[self.act], 0.0)
-        if model.interface_charge:
+        self.ic_mask = None
+        if model.interface_charge and len(self.act):
             self.ic = abs(model.interface_charge)
+            # an active node takes the charge of its nearest interface node
+            self.ic_mask = self.charged[g["nearest"][self.act]].astype(float)
         self.Dhk = None
         if model.highk:
             dk = np.exp(-g["dist_highk"][a] / model.l_crit_highk)
@@ -521,8 +615,8 @@ class SurfaceMobility:
             add_n = self.orient["n"] * lombardi(Fa, self.Na, npa, self.sets["n"], T)
             add_p = self.orient["p"] * lombardi(Fa, self.Na, npa, self.sets["p"], T)
             if self.ic is not None:
-                add_n = add_n + interface_coulomb(Fa, self.ic, na, T, self.ic_prm)
-                add_p = add_p + interface_coulomb(Fa, self.ic, pa, T, self.ic_prm)
+                add_n = add_n + self.ic_mask * interface_coulomb(Fa, self.ic, na, T, self.ic_prm)
+                add_p = add_p + self.ic_mask * interface_coulomb(Fa, self.ic, pa, T, self.ic_prm)
             if self.Dhk is not None:
                 add_n = add_n + self.Dhk * remote_highk(Fa, self.Na, na, T)
                 add_p = add_p + self.Dhk * remote_highk(Fa, self.Na, pa, T)
@@ -546,7 +640,10 @@ class SurfaceMobility:
                     n_active=int(len(self.act)), dcont_nodes=int(g["dcont"].sum()),
                     families_interface={f: int(c) for f, c in zip(FAMILIES, fam_if)},
                     families_active={f: int(c) for f, c in zip(FAMILIES, fam)},
-                    interface_charge=self.model.interface_charge, highk=self.model.highk,
+                    interface_charge=self.model.interface_charge,
+                    interface_charge_where=self.model.interface_charge_where,
+                    charged_nodes=int(self.charged.sum()) if self.model.interface_charge else 0,
+                    highk=self.model.highk,
                     highk_nodes_reachable=int(np.isfinite(g["dist_highk"]).any()))
 
 
@@ -582,11 +679,12 @@ def attach_mobility(mesh, mat, model, log=None):
         return None
     sm = SurfaceMobility(mesh, mat, model)
     mesh.surface_mobility = sm
-    mesh.fixed_charge = model.interface_charge * sm.geo["area"] if model.interface_charge else None
+    mesh.fixed_charge = (model.interface_charge * sm.geo["area"] * sm.charged) if model.interface_charge else None
     rep = sm.report()
     if log:
         log(f"inversion-layer mobility ({rep['mode']}, orientation {rep['orientation']}): "
             f"{rep['n_interface']} interface nodes {rep['families_interface']}, {rep['n_active']} nodes in reach"
-            + (f", interface charge {model.interface_charge:g} cm^-2" if model.interface_charge else "")
+            + (f", interface charge {model.interface_charge:g} cm^-2 on {rep['charged_nodes']} "
+               f"({model.interface_charge_where}) nodes" if model.interface_charge else "")
             + (", remote high-k terms" if model.highk else ""))
     return rep

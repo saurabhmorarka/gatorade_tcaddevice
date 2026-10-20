@@ -21,7 +21,9 @@ charge** (user decision, 2026-10-20):
 - On by default (fast and exact): the surface terms, the orientation sets,
   the total-doping bulk term, the D-continuity interface field, and the
   interface charge `interface_charge=3e11` (cm^-2) with its Coulomb
-  scattering. The charge is also a fixed sheet charge in Poisson, so the
+  scattering, on the GATE-DIELECTRIC interfaces only
+  (`interface_charge_where=gate`, DEVELOPMENT_LOG 84; `all` puts it on STI,
+  spacers and the BOX too, the behaviour of log 83). The charge is also a fixed sheet charge in Poisson, so the
   default shifts Vt by about -q·Qit/C_ox (positive charge: NMOS Vt down,
   PMOS |Vt| up): -70 mV at tox 5 nm (the 2D planar), ~-15 mV at ~1 nm EOT
   (the fab devices). `interface_charge=0` turns
@@ -62,7 +64,9 @@ D = exp(-x / 10 nm),  x = distance to the nearest semiconductor/insulator interf
   impurity scattering is screened by the free carriers, so a doped channel
   in strong inversion is not over-degraded the way Masetti does it.
 - **Coulomb, interface charge**: `--mobility-set interface_charge=<cm^-2>`
-  puts a fixed sheet charge on every semiconductor/insulator interface. It is
+  puts a fixed sheet charge on the gate-dielectric interface nodes
+  (`interface_charge_where=gate`, the default; `all`: every
+  semiconductor/insulator interface). It is
   in Poisson (it shifts Vt), it adds q·Qit/ε_Si to the interface nodes'
   normal field (the D-continuity value is the oxide side; the silicon side
   carries the sheet charge too), and it scatters carriers with Sentaurus'
@@ -120,7 +124,25 @@ sparse operator per mesh (one SpMV per evaluation):
 - The interface set is every semiconductor/insulator interface (the Sentaurus
   default): gate dielectric, STI, spacers. The metal-surface nodes of the
   S/D contacts are not a dielectric; the gate contact's are (they sit on the
-  gate dielectric).
+  gate dielectric). The phonon and surface-roughness terms act on all of it.
+- **Gate-dielectric interface nodes** (where the default interface charge and
+  its Coulomb term sit; `gate_interface_nodes`): from each interface node a
+  ray goes along the interface normal into the insulator, 0.25 nm steps,
+  the nearest mesh node at each step. It hits the gate when that node is a
+  gate-contact node (a contact whose nodes are all insulator nodes: the gate
+  metal on its dielectric). It is blocked by another semiconductor node or an
+  S/D metal surface, and gives up after 20 nm. A node is gated when the hit
+  distance is at most 2x the gate-stack thickness + 1 nm, the thickness being
+  the 5th percentile of all hits (the minimum is not robust: a few gate-edge
+  voxel nodes hit at 0.25-0.5 nm). So a gate electrode across a thick STI,
+  BOX or spacer does not count. Fab FinFET and nanosheet: the gate stack hits at
+  1.5-2.25 nm, an S/D epi face across the spacer at ~6.5 nm, the substrate
+  under the STI not at all; threshold 4 nm. Fab FinFET NMOS: 1034 of 5375
+  interface nodes (the fin top and sidewalls under the gate, down to the STI
+  top), nanosheet 2416 of 9382 (the sheets and the substrate top under the
+  gate), planar 289 of 2758. It works on any mesh (2D/3D, rectilinear,
+  triangles, octree) and takes < 1 s. An active node takes the charge of
+  its nearest interface node for the Coulomb term.
 - F is floored at 1e3 V/cm (Sentaurus `EnormMinimum`).
 
 ## Surface orientation
@@ -254,33 +276,54 @@ negative gm that exposed the two bugs above.
 
 ## Device results
 
-Ion before (off, bulk mobility only) and after (the default: fast, Qit 3e11),
-with the stack without the interface charge in between:
+Ion before (off, bulk mobility only) and after (the default: fast, Qit 3e11
+on the gate dielectric), with the stack without the interface charge in
+between (DEVELOPMENT_LOG 84; the 2D devices have no STI, so `gate` and
+`all` are the same there):
 
-| device (bias) | Ion off | stack, Qit 0 | default (Qit 3e11) | default vs off | Vt,sat off -> default | SS, DIBL off -> default |
+| device (bias) | Ion off | stack, Qit 0 | default (Qit 3e11, gate) | default vs off | Vt,sat off -> default | SS, DIBL off -> default |
 |---|---|---|---|---|---|---|
 | 2D NMOS, Lg 0.5 um (Vds 1 V) | 200.8 | 145.7 (-27%) | 164.0 | -18% | 0.746 -> 0.682 V | -, 40 -> 45 mV/V |
 | 2D PMOS, Lg 30 nm (Vds -1 V) | 974.0 | 623.9 (-36%) | 613.1 | -37% | -0.092 -> -0.117 V | -, 124 -> 133 mV/V |
-| 3D planar NMOS (fab) | 1782 | 1517 (-15%) | 1576 | -12% | 0.051 -> 0.016 V | 81 -> 88 mV/dec, 157 -> 179 mV/V |
-| 3D FinFET NMOS | 1005 | 959 (-4.6%) | 990 | -1.5% | 0.151 -> 0.106 V | 68 -> 81 mV/dec, 79 -> 131 mV/V |
-| 3D FinFET PMOS | 537 | 496 (-7.6%) | 480 | -10.6% | -0.212 -> -0.232 V | 69 -> 64 mV/dec, 70 -> 57 mV/V |
-| 3D nanosheet NMOS | 1109 | - | 1086 | -2.1% | 0.177 -> 0.170 V | 61 -> 61 mV/dec, 49 -> 44 mV/V |
-| 3D nanosheet PMOS | 393 | - | 331 | -15.8% | -0.243 -> -0.262 V | 64 -> 66 mV/dec, 48 -> 40 mV/V |
+| 3D planar NMOS (fab) | 1782 | 1517 (-15%) | 1547 | -13% | 0.051 -> 0.038 V | 81 -> 86 mV/dec, 157 -> 169 mV/V |
+| 3D FinFET NMOS | 1005 | 959 (-4.6%) | 981 | -2.4% | 0.151 -> 0.145 V | 68 -> 64 mV/dec, 79 -> 75 mV/V |
+| 3D FinFET PMOS | 537 | 496 (-7.6%) | 485 | -9.7% | -0.212 -> -0.226 V | 69 -> 66 mV/dec, 70 -> 63 mV/V |
+| 3D nanosheet NMOS | 1109 | - | 1080 | -2.6% | 0.177 -> 0.171 V | 61 -> 61 mV/dec, 49 -> 43 mV/V |
+| 3D nanosheet PMOS | 393 | - | 333 | -15.3% | -0.243 -> -0.261 V | 64 -> 66 mV/dec, 48 -> 41 mV/V |
 
 Ion in uA/um at a fixed Vgs (FinFET/nanosheet |Vgs| 0.8 V, |Vds| 0.7 V; the fab planar
 and the 2D devices at their config defaults), so the default's Vt shift enters it: for the NMOS the positive
 sheet charge lowers Vt and gives back part of the mobility loss, for the PMOS
 it raises |Vt| and adds to it. Runs: `scripts/mobility/device_runs.sh`
-(results in out/mob_runs/{ion_off,ion_fast,ion_default}; nanosheet off from
+(results in out/mob_runs/{ion_off,ion_fast,ion_gate}; nanosheet off from
 out/mob_runs/before, which is bit-identical to off on every other device).
 
-The FinFET NMOS is the outlier: SS 68 -> 81 mV/dec and DIBL 79 -> 131 mV/V.
-The 3e11 charge sits on EVERY Si/insulator interface, including the STI
-along the sub-fin, where it attracts electrons into a sub-fin leakage path
-(Ioff x6.5). The PMOS sees the mirror image (sub-fin better cut off, SS
-and DIBL improve). The nanosheet, with no sub-fin channel under the gate,
-barely moves. This is the uniform-interface-charge simplification, not a
-solver issue; see the open decisions.
+**Gate dielectric only vs every interface (FinFET).** With the charge on
+every interface (`interface_charge_where=all`, the log-83 default, out/mob_runs/ion_all) the
+FinFET NMOS opened a sub-fin leak: the charge on the STI along the sub-fin
+attracts electrons under the gate's reach. On the gate dielectric only, it
+is gone:
+
+| FinFET (|Vgs| 0.8, |Vds| 0.7 V) | SS (mV/dec) | DIBL (mV/V) | Ioff (A/um) | Ion (uA/um) | Vt,sat (V) |
+|---|---|---|---|---|---|
+| NMOS, mobility off | 68 | 79 | 3.7e-7 | 1005 | 0.151 |
+| NMOS, Qit 0 | 68 | 79 | 3.6e-7 | 959 | 0.153 |
+| NMOS, Qit 3e11 gate (default) | 64 | 75 | 3.9e-7 | 981 | 0.145 |
+| NMOS, Qit 3e11 all | 81 | 131 | 2.4e-6 | 990 | 0.106 |
+| PMOS, mobility off | 69 | 70 | 4.7e-8 | 537 | -0.212 |
+| PMOS, Qit 0 | 69 | 67 | 4.5e-8 | 496 | -0.216 |
+| PMOS, Qit 3e11 gate (default) | 66 | 63 | 4.0e-8 | 485 | -0.226 |
+| PMOS, Qit 3e11 all | 64 | 57 | 7.9e-9 | 480 | -0.232 |
+
+The `all` rows reproduce the log-83 numbers to the last digit (the option
+is bit-identical to the old code). With `gate`, the Vt shift is the gate
+stack's (-8 mV NMOS, -10 mV PMOS against Qit 0). The SS gets 2-4 mV/dec
+steeper than at Qit 0. That is the Coulomb term, not electrostatics: it is
+strongest in weak inversion (unscreened: on the 2D planar NMOS with a
+1 nm oxide it costs about 40% of Id deep in subthreshold and about 3% at
+Vt) and
+fades with N_inv, so the mobility rises along the turn-on. The 3D planar
+NMOS also loses part of its STI-edge effect (SS 88 -> 86, DIBL 179 -> 169).
 
 ## Parameters and sources
 
@@ -304,7 +347,7 @@ form was re-read from Eq. 311 for the fix above; the remote-Coulomb formula
 is still the plan's reading of the guide.
 
 Options (`--mobility-set k=v`, or keys of `physics: mobility:` in 2D):
-`interface_charge`, `coulomb_mu1`, `coulomb_c_trans`, `highk`, `orientation`, `interface_field` (dcont | lsq),
+`interface_charge`, `interface_charge_where` (gate | all), `coulomb_mu1`, `coulomb_c_trans`, `highk`, `orientation`, `interface_field` (dcont | lsq),
 `doping` (total | net), `l_crit`, `F_min`, `scale_110_n`, `scale_110_p`,
 `surface_scale_n/p` (μ_ac and μ_sr), `delta_scale_n/p` (μ_sr only),
 `smoothing`, `tol`.
@@ -315,17 +358,16 @@ Options (`--mobility-set k=v`, or keys of `physics: mobility:` in 2D):
   parameters. Only Si channels invert, so this is harmless.
 - The Lombardi/Darwish sets were fitted with a classical inversion charge.
   With `--quantum` the charge sits ~1 nm deeper and samples a lower field.
-- The interface charge is uniform on every interface. A per-interface value
-  waits for the interface-trap work.
+- The interface charge is one value on the gate dielectric (or one value
+  everywhere with `interface_charge_where=all`). A per-interface value
+  (STI and spacer charge of its own) waits for the interface-trap work.
 
 ## Open decisions (for the user)
 
-- **Interface charge on every interface.** The default 3e11 cm^-2 sits on
-  the gate dielectric AND on STI, spacers and the BOX. On the FinFET NMOS
-  the STI part opens a sub-fin leakage path (SS 68 -> 81 mV/dec, Ioff
-  x6.5). Options: keep it (STI charge is real, often more positive than
-  the gate's), restrict the default to the gate-dielectric interface, or
-  take a per-interface value from the interface-trap work.
+- **Interface charge on every interface: RESOLVED (log 84).** The default
+  is now the gate dielectric only. Ask the user whether STI/spacer charge
+  should get its own value later: the STI charge is real and often more
+  positive than the gate's. That waits for the interface-trap work.
 - **Qit 1e11 calibration.** It costs 4% near threshold, below the 10% lower
   end of the target; raising it would push Qit 3e11 past 5% at high N_inv.
 - **Lombardi electrons at low doping.** Fast electrons sit +34% above the
