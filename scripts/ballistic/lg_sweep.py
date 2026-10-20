@@ -1,6 +1,6 @@
 """Gate-length sweep of the 2D planar NMOS / PMOS with the ballistic
 mobility on and off, process stress on and off (docs/ballistic.md,
-DEVELOPMENT_LOG 84; the criteria are mobility_plan.md section 4.3).
+DEVELOPMENT_LOG 85; the criteria are mobility_plan.md section 4.3).
 
 Every device is the 30 nm configs/input_mosfet_2d_stress_{nmos,pmos}.yaml
 cell with the gate (and the planar_flow stress cell) stretched to Lg:
@@ -136,7 +136,7 @@ def channel_mobility(mesh, mat, r, kind, gx):
     b = getattr(mesh, "edge_mu_ballistic", None)
     mesh.edge_mu_ballistic = None
     try:
-        mu = low_field_mobility(mesh, mat)[0 if kind == "nmos" else 1]
+        mu = low_field_mobility(mesh, mat, r["psi"], r.get("n"), r.get("p"))[0 if kind == "nmos" else 1]
     finally:
         mesh.edge_mu_ballistic = b
     P = mesh.points * 1e7
@@ -266,6 +266,15 @@ def run_case(task):
             out[f"mu_app_{ov}"] = Id * (gx[1] - gx[0]) * 1e-7 / (Qi * dphi)
             out[f"Qinv_{ov}"] = Qi
             out[f"mu_ch_{ov}"] = channel_mobility(mesh, mat, r, kind, gx)
+            if ov == LIN_OVERDRIVES[-1]:
+                # S_lin = dln Idlin / dln mu_low at this overdrive (+10% low-field mobility)
+                set_edge_mobility_factor(mesh, "perturb", np.full(len(mesh.edges), 1.1))
+                r2 = M.solve_mosfet(mesh, mat, dev, Cs, vg, Vl, psi_init=r["psi"], phin_init=r["phin"],
+                                    phip_init=r["phip"], cold_retry=False, velocity_saturation=vsat)
+                iters += r2["iters"]
+                if M._converged(r2):
+                    out["S_mu_lin"] = float(np.log(abs(M._id_per_um(mesh, mat, r2)) * 1e4 / Id) / np.log(1.1))
+                set_edge_mobility_factor(mesh, "perturb", None)
     out.update(newton_iters=iters, failed=failed, time_s=time.perf_counter() - t0)
     return out
 

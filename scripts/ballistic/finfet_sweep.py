@@ -1,7 +1,7 @@
 """Gate-length sweep of the 3D FinFET (NMOS / PMOS) with the ballistic
 mobility on and off and (PMOS) the process stress on and off: runs
 `python -m fab simulate` per case (octree, fast vsat) and reads the I-V
-(docs/ballistic.md, DEVELOPMENT_LOG 84).
+(docs/ballistic.md, DEVELOPMENT_LOG 85).
 
 The device is configs/fab_finfet{,_pmos}.yaml with Lg changed and the
 contacted poly pitch cpp = Lg + 33 nm (the default 48 nm at Lg 15: the
