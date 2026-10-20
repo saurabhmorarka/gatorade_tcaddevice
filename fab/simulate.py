@@ -304,17 +304,21 @@ def _qkey(quantum):
     return tuple(sorted(quantum.items())) if quantum else None
 
 
-def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneling=None):
+def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneling=None, stress=None):
     """Device, mesh and equilibrium, built once per process (a worker
     started by simulate() gets it from _init_worker instead). quantum: None
     (classical) or the DeviceQuantum options (Schrodinger-Poisson channel
     charge, quantum/device.py). tunneling: None or "local" (Kane band-to-band
-    + Hurkx trap-assisted, btbt/local3d.py: GIDL and junction leakage)."""
-    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum), tunneling)
+    + Hurkx trap-assisted, btbt/local3d.py: GIDL and junction leakage).
+    stress: None or (stress_field.npz, piezo mode, doping factor): the
+    process stress -> mobility factors on the mesh (apply_stress)."""
+    key = (cfg_path, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress)
     if key not in _CTX:
         from main2d_mosfet_sweep import solve_mosfet
         from mos.mos_params import MOSDevice
         d = build_device(flow.load(cfg_path), top_nm=top_nm, half_z=half_z, log=lambda *a: None, mesher=mesher)
+        if stress is not None:
+            apply_stress(d, *stress, log=None)
         d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
         d["schottky"] = schottky_contacts(d, log=lambda *a: None)
         d["eq"] = solve_mosfet(d["mesh"], d["mat"], d["dev"], d["Cs"], 0.0, 0.0, velocity_saturation=True,
@@ -393,6 +397,51 @@ def _tunneling_turn_on(d):
 
 def _init_worker(key, d):
     _CTX[key] = d
+
+
+# --- process stress -> mobility (solver2d/stress_mobility.py, docs/piezo_mobility.md) ---------
+def _fab_params_key(p):
+    import json
+    return json.dumps({k: p[k] for k in sorted(p)}, default=str)
+
+
+def solve_stress(config, path, par=None, log=print):
+    """Run mechanics.fab_stress on the config (fast mode: the same final
+    stress, fewer solves) and save the final field to `path` (.npz) with the
+    config and the fab parameters it was built from."""
+    from mechanics import fab_stress
+    from mechanics.stress_field import StressField
+    t0 = time.perf_counter()
+    pr = dict(fab_stress.DEFAULTS, **(par or {}))
+    res = fab_stress.run(config, pr, fast=True, log=lambda *a: None)
+    fl = flow.expand(flow.load(config))
+    p = resolve_params({k: v for k, v in fl["params"].items() if v is not None})
+    field = StressField.from_fab_stress(res, config=os.path.abspath(config), par=pr)
+    field.meta["fab_params"] = _fab_params_key(p)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    field.save(path)
+    tot, _ = res["rows"][-1][1]["channel"]
+    log(f"  process stress (mechanics.fab_stress, {res['sh'].n_solves} solves, {time.perf_counter() - t0:.0f} s): "
+        f"channel sigma xx/yy/zz = {tot[0] * 1e3:.0f} / {tot[1] * 1e3:.0f} / {tot[2] * 1e3:.0f} MPa -> {path}")
+    return path
+
+
+def apply_stress(d, path, mode="saturating", doping_factor=True, log=print):
+    """Load the stress field `path`, check it belongs to this device (the
+    same fab parameters; every silicon edge of the mesh inside the stress
+    grid and on silicon voxels there - stress_factors' frame check) and
+    attach the piezoresistive mobility factors to d["mesh"]."""
+    from mechanics.stress_field import StressField
+    from solver2d.stress_mobility import PiezoModel, apply_stress_mobility
+    field = StressField.load(path)
+    fp = field.meta.get("fab_params")
+    if fp is not None and fp != _fab_params_key(d["params"]):
+        raise ValueError(f"stress field {path} was solved for different fab parameters than this device "
+                         f"({field.meta.get('config')})")
+    model = PiezoModel(mode=mode, doping_factor=doping_factor)
+    d["stress_report"] = apply_stress_mobility(d["mesh"], d["mat"], field, model, log=log)
+    d["stress_field"] = path
+    return d["stress_report"]
 
 
 def drain_current(d, r):
@@ -491,7 +540,7 @@ def run_curve(task):
     from main2d_mosfet_sweep import continuation
     t0 = time.perf_counter()
     d = _context(task["config"], task["top_nm"], task["half_z"], task.get("mesher", "cartesian"),
-                 task.get("quantum"), task.get("tunneling"))
+                 task.get("quantum"), task.get("tunneling"), task.get("stress"))
     Vds = task["Vds"]
     base = d.get("base", {}).get(Vds)
     it0 = 0
@@ -660,13 +709,20 @@ def _octree_vtu_geometry(d):
 
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
              vtk="all", workers=None, log=print, mesher="cartesian", quantum=None, vgs_min=0.0, tunneling=None,
-             vsat=True):
+             vsat=True, stress=None, piezo="saturating", piezo_doping=True, stress_set=None):
     """vsat: the velocity-saturation driving force. True = the fast default
     ("hybrid", solver2d/newton_solver_qf_2d.py); "mqf" = the exact one, the
     gradient of Sentaurus' modified quasi-Fermi potential with n0 1e10
     (DEVELOPMENT_LOG 75: the same Ion, Vt, DIBL; near-threshold and
-    deep-off currents differ, at 2.5-3x the 3D run time)."""
-    from solver2d.mosfet_metrics import mosfet_metrics
+    deep-off currents differ, at 2.5-3x the 3D run time).
+    stress: None (no stress, the default), "solve" (run mechanics.fab_stress
+    first and save the field to <out_dir>/stress_field.npz; stress_set:
+    its stressor overrides) or the path of a saved field: the process stress
+    changes the low-field mobility through piezoresistance (piezo
+    "saturating" or "linear", piezo_doping: the doping factor;
+    docs/piezo_mobility.md). A PMOS (negative vds) gets its metrics mirrored
+    (solver2d/mosfet_metrics.py::mosfet_metrics_signed)."""
+    from solver2d.mosfet_metrics import mosfet_metrics_signed
     # The linear solver is core/linsolve's "auto" (PETSc block ILU at these
     # sizes) unless TCAD_LINSOLVE says otherwise. This used to force direct
     # LU (MUMPS): ILU-GMRES gave Newton bad directions on the rectilinear
@@ -676,8 +732,19 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     t0 = time.perf_counter()
     from core.parallel import performance_cores
     from main2d_mosfet_sweep import continuation
-    key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling)
-    d = _context(config, top_nm, half_z, mesher, quantum, tunneling)        # mesh + equilibrium, once
+    stress_key = None
+    if stress is not None:
+        path = stress
+        if stress == "solve":
+            path = solve_stress(config, os.path.join(out_dir, "stress_field.npz"), stress_set, log=log)
+        stress_key = (os.path.abspath(path), piezo, bool(piezo_doping))
+    key = (config, top_nm, half_z, mesher, _qkey(quantum), tunneling, stress_key)
+    d = _context(config, top_nm, half_z, mesher, quantum, tunneling, stress_key)   # mesh + equilibrium, once
+    if stress_key is not None:
+        r = d["stress_report"]
+        log(f"  stress mobility ({r['mode']}, doping factor {'on' if r['doping_factor'] else 'off'}): "
+            f"{r['n_si_edges']} silicon edges, frame check: {100 * (1 - r['frame_mismatch_exact']):.2f}% on silicon voxels, {100 * (1 - r['frame_mismatch']):.2f}% within one, "
+            f"mu_n x {r['f_n'][0]:.2f}..{r['f_n'][1]:.2f}, mu_p x {r['f_p'][0]:.2f}..{r['f_p'][1]:.2f}")
     d["vsat"] = vsat              # equilibrium carries no current: the same for every force
     if d.get("quantum") is not None:
         q = d["quantum"]
@@ -701,7 +768,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     for v in vds:
         tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
                           vtk_keep=(0.0, min(vgs), max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
-                          quantum=quantum, tunneling=tunneling))
+                          quantum=quantum, tunneling=tunneling, stress=stress_key))
     n_work = workers or performance_cores()
     ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
     # one BLAS / OpenMP thread per worker process (inherited at spawn)
@@ -741,10 +808,12 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
             for a, b in zip(c["Vgs"], c["Id"]):
                 w.writerow([c["Vds"], a, b])
     m = None
-    pos = [dict(c, Vgs=c["Vgs"][c["Vgs"] >= 0], Id=c["Id"][c["Vgs"] >= 0]) for c in curves]   # (GIDL walk aside)
+    # the on-state branch: Vgs >= 0 for an NMOS (the GIDL walk aside), Vgs <= 0 for a PMOS (negative Vds)
+    pos = [dict(c, Vgs=c["Vgs"][c["Vgs"] * np.sign(c["Vds"]) >= 0], Id=c["Id"][c["Vgs"] * np.sign(c["Vds"]) >= 0])
+           for c in curves]
     if len(pos) >= 2 and all(len(c["Vgs"]) > 3 for c in pos):
         try:
-            m = mosfet_metrics(pos[0], pos[-1], (d["L_nm"] or 1e3) * 1e-3)
+            m = mosfet_metrics_signed(pos[0], pos[-1], (d["L_nm"] or 1e3) * 1e-3)
         except Exception as e:                 # (e.g. a PMOS sweep: metrics are NMOS-oriented)
             log(f"  metrics skipped: {e}")
     if m is not None:

@@ -1,0 +1,118 @@
+# 2D planar PMOS (Lg 30 nm) on the geometry of mechanics/planar_flow.py's
+# process cell, for stress -> mobility (piezoresistance, docs/piezo_mobility.md).
+# The PMOS counterpart of configs/input_mosfet_2d_stress_nmos.yaml: the same
+# cell (planar_flow x 20..154 nm is x 0..134 nm here), with the planar_flow
+# SiGe S/D (Si0.5Ge0.5, 44 nm wide, 40 nm deep recess) as SiGe regions of the
+# device, a p+ Si extension under the 8 nm spacers, an n 3e18 body and a
+# p+ poly-like gate. The process stress of the gate-last flow (SiGe S/D,
+# compressive liner, poly pull + RMG) is solved first and sampled on every
+# silicon edge (the stress: block); flow: pmos_gate_first for the gate-first
+# flow. Remove the stress: block for the unstressed device.
+#
+#   python3 main2d_mosfet_sweep.py configs/input_mosfet_2d_stress_pmos.yaml
+
+geometry:
+  width_um: 0.134
+  height_um: 0.1
+
+  substrate:
+    doping_type: n
+    concentration_cm3: 3.0e18
+
+  regions:
+    - name: source_ext
+      doping_type: p
+      concentration_cm3: 1.0e20
+      x_range_um: [0.0, 0.052]
+      y_range_um: [0.0, 0.025]
+    - name: drain_ext
+      doping_type: p
+      concentration_cm3: 1.0e20
+      x_range_um: [0.082, 0.134]
+      y_range_um: [0.0, 0.025]
+    - name: source
+      doping_type: p
+      concentration_cm3: 1.0e20
+      x_range_um: [0.0, 0.044]
+      y_range_um: [0.0, 0.040]
+      material: &sige
+        name: SiGe_x0.5_strained
+        alloy:
+          end_member_a: Silicon
+          end_member_b: Germanium
+          x_a: 0.5
+          bowing_eV: 0.36
+          strain:
+            substrate: Silicon
+            x_substrate_Ge: 0.0
+    - name: drain
+      doping_type: p
+      concentration_cm3: 1.0e20
+      x_range_um: [0.090, 0.134]
+      y_range_um: [0.0, 0.040]
+      material: *sige
+    - name: oxide
+      kind: insulator
+      eps_r: 3.9
+      x_range_um: [0.052, 0.082]
+      y_range_um: [-0.001, 0.0]
+
+  mesas:
+    - x_range_um: [0.052, 0.082]
+      height_um: 0.001
+
+contacts:
+  - name: source
+    surface: top
+    x_range_um: [0.014, 0.030]
+    bias_role: source
+  - name: drain
+    surface: top
+    x_range_um: [0.104, 0.120]
+    bias_role: drain
+  - name: gate
+    surface: top
+    x_range_um: [0.052, 0.082]
+    bias_role: gate
+  - name: body
+    surface: bottom
+    x_range_um: [0.0, 0.134]
+    bias_role: body
+
+physics:
+  velocity_saturation: true
+
+stress:
+  source: planar_flow
+  flow: pmos_gate_last
+  set: {}
+  align: gate
+  piezo: saturating
+  doping_factor: true
+
+gate:
+  workfunction_eV: 5.05     # p+ poly-like: Vt ~ -0.3 V
+
+mesh:
+  style: quadtree
+  h_min_um: 0.0005
+  h_max_um: 0.01
+  growth: 1.3
+  interface_h_um: 0.0005
+  junction_h_um: 0.001
+  refine_boxes:
+    - name: channel
+      x_range_um: [0.04, 0.094]
+      y_range_um: [0.0, 0.008]
+      h_um: 0.001
+
+bias:
+  vgs_start_V: -1.0
+  vgs_stop_V: 0.0
+  vgs_step_V: 0.05
+  vds_transfer_V: [-0.05, -1.0]
+  vgs_for_output_V: []
+
+output:
+  structure_file: null
+  save_bias_points: "last"

@@ -49,7 +49,7 @@ from mesh2d.mesh2d import build_mesh2d
 from mos import mos_analytic as man
 from mos.mos_params import MOSDevice
 from solver2d.current import contact_current
-from solver2d.mosfet_metrics import mosfet_metrics
+from solver2d.mosfet_metrics import mosfet_metrics_signed
 from solver2d.efield2d import electric_field_2d
 from solver2d.newton_solver_qf_2d import newton_solve_2d, vsat_force
 
@@ -216,11 +216,14 @@ def continuation(solve_at, p0, s0, targets, prev=None, log=None, h_init=H_INIT, 
 _CTX = {}
 
 
-def _context(config_path, extrude=None):
+def _context(config_path, extrude=None, stress_file=None):
     """extrude=(width_um, nz): run the SAME device as a 3D mesh extruded in
     z (mesh3d/extrude.py) - the 3D performance testbed and the first rung
-    of the 3D validation ladder (Id per um of width must match 2D)."""
-    key = (config_path, tuple(extrude) if extrude else None)
+    of the 3D validation ladder (Id per um of width must match 2D).
+    A config with a stress: block gets the process stress -> mobility
+    factors (solver2d/stress_mobility.py) on its mesh; stress_file is the
+    field main() solved once and saved (else it is solved here)."""
+    key = (config_path, tuple(extrude) if extrude else None, stress_file)
     if key not in _CTX:
         cfg = load_config(config_path)
         domain, mat, dev, Cs, mesh_opts, bias_cfg, output_cfg = build_from_config(cfg)
@@ -237,6 +240,13 @@ def _context(config_path, extrude=None):
             g = {k: np.tile(eq[k], int(nz)) for k in _FIELDS}   # z-invariant: exact start
             eq = solve_mosfet(mesh, mat, dev, Cs, 0.0, 0.0, psi_init=g["psi"], phin_init=g["phin"],
                               phip_init=g["phip"], velocity_saturation=vsat)
+        if cfg.get("stress") and stress_file != "off":
+            # after equilibrium: it carries no current, so the mobility does not enter it
+            from solver2d.stress_mobility import PiezoModel, apply_stress_mobility, field_from_config
+            st = dict(cfg["stress"], **({"file": stress_file} if stress_file else {}))
+            field = field_from_config(st, domain, log=None)
+            mesh.stress_report = apply_stress_mobility(mesh, mat, field, PiezoModel.from_options(st), log=None)
+            mesh.stress_field = field
         _CTX[key] = (mesh, mat, dev, Cs, eq, vsat)
     return _CTX[key]
 
@@ -253,7 +263,7 @@ def run_curve(task):
     """One Id-Vg (task['kind']=='idvg', fixed task['Vds']) or Id-Vd
     ('idvd', fixed task['Vgs']) curve, from the equilibrium anchor."""
     t0 = time.perf_counter()
-    mesh, mat, dev, Cs, eq, vsat = _context(task["config"], task.get("extrude"))
+    mesh, mat, dev, Cs, eq, vsat = _context(task["config"], task.get("extrude"), task.get("stress_file"))
     log_lines = []
     log = log_lines.append
 
@@ -433,6 +443,35 @@ def plot_output(out_curves, out_path):
     fig.savefig(out_path, dpi=150); plt.close(fig)
 
 
+def _prepare_stress(st, domain, out_dir):
+    """Solve a config's stress: block once (unless it names a file) and
+    save it to <out_dir>/stress_field.npz; returns the file."""
+    if st.get("file"):
+        return st["file"]
+    from solver2d.stress_mobility import field_from_config
+    t0 = time.perf_counter()
+    field = field_from_config(dict(st, align="none"), domain, log=None)
+    os.makedirs(out_dir, exist_ok=True)
+    path = field.save(os.path.join(out_dir, "stress_field.npz"))
+    print(f"process stress ({st.get('source', 'planar_flow')} {st.get('flow', '')}): "
+          f"{time.perf_counter() - t0:.1f} s -> {path}")
+    return path
+
+
+def _report_stress(mesh, domain):
+    from solver2d.stress_mobility import channel_report
+    rep = mesh.stress_report
+    f_n, f_p = mesh.edge_mu0_factor
+    gate = next(c for c in domain.contacts if c.name == "gate")
+    gx = np.array(gate.x_range_cm) * 1e7
+    ch = channel_report(mesh, f_n, f_p, mesh.stress_field, box_nm=((gx[0] + 2, gx[1] - 2), (0.0, 3.0)))
+    print(f"stress mobility ({rep['mode']}, doping factor {'on' if rep['doping_factor'] else 'off'}): "
+          f"{rep['n_si_edges']} silicon edges, frame check {100 * (1 - rep['frame_mismatch_exact']):.1f}% on silicon")
+    if ch:
+        print(f"  channel (top 3 nm under the gate, x edges): sigma xx/yy/zz/yz/xz/xy = {ch['sigma_MPa']} MPa, "
+              f"mu_n x {ch['f_n']:.3f}, mu_p x {ch['f_p']:.3f}")
+
+
 def _grid(start, stop, step):
     return [round(float(v), 6) for v in np.arange(start, stop + 0.5 * step, step)]
 
@@ -449,6 +488,8 @@ def main():
     parser.add_argument("--extrude-um", type=float, default=None,
                         help="run the device as a 3D mesh extruded over this width (um)")
     parser.add_argument("--nz", type=int, default=6, help="number of z layers with --extrude-um")
+    parser.add_argument("--no-stress", action="store_true",
+                        help="ignore the config's stress: block (the unstressed reference run)")
     parser.add_argument("--vtk", nargs="?", const="last", choices=["last", "all"], default=None,
                         help="also write VTK (<out-dir>/vtk/*.vtu + one .pvd per curve, for ParaView): "
                              "'last' (default) = the last point of each curve, 'all' = every bias point "
@@ -478,6 +519,19 @@ def main():
               for v in vgs_output])
     for t in tasks:
         t.update(vtk=args.vtk, vtk_dir=vtk_dir)
+    stress_file = None
+    if cfg.get("stress") and args.no_stress:
+        stress_file = "off"
+        for t in tasks:
+            t["stress_file"] = "off"
+        print("stress: block ignored (--no-stress): unstressed mobility")
+    elif cfg.get("stress"):
+        # the process stress is solved once here and loaded by every worker
+        stress_file = _prepare_stress(cfg["stress"], domain, out_dir)
+        for t in tasks:
+            t["stress_file"] = stress_file
+        mesh_s = _context(args.config, extrude, stress_file)[0]
+        _report_stress(mesh_s, domain)
 
     # One BLAS thread per worker - the workers are the parallelism.
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
@@ -530,7 +584,7 @@ def main():
                 w.writerow([f"{c['Vgs']:.4f}", f"{vd:.4f}", f"{i:.6e}"])
 
     if len(transfer) >= 2:
-        m = mosfet_metrics(transfer[0], transfer[-1], L_um)
+        m = mosfet_metrics_signed(transfer[0], transfer[-1], L_um)
         print(f"  SS (Vds={transfer[0]['Vds']:g}V) = {m['SS_lo']:.1f} mV/dec, "
               f"SS (Vds={transfer[-1]['Vds']:g}V) = {m['SS_hi']:.1f} mV/dec")
         print(f"  Vt,cc = {m['Vt_cc_lo']:.3f} V -> {m['Vt_cc_hi']:.3f} V, DIBL = {m['DIBL_mV_per_V']:.1f} mV/V, "
@@ -546,7 +600,7 @@ def main():
         for res in results:
             entries = res["vtk_entries"]
             if args.vtk == "last" and res["last_state"] is not None:
-                mesh_v, mat_v = _context(args.config, extrude)[:2]
+                mesh_v, mat_v = _context(args.config, extrude, stress_file)[:2]
                 entries = write_states(vtk_dir, curve_stem(res["task"]), mesh_v, mat_v,
                                        [dict(state=res["last_state"], bias=res["last_bias"],
                                              **_vtk_meta(res["task"], res["last_bias"]))])
@@ -558,7 +612,7 @@ def main():
     # Structure+fields JSON: the last point of the low-Vds transfer curve.
     structure_file = output_cfg.get("structure_file")
     if structure_file and not extrude:
-        mesh = _context(args.config)[0]
+        mesh = _context(args.config, None, stress_file)[0]
         res = results[0]
         r = res["last_state"]
         Ex, Ey = electric_field_2d(mesh.points, mesh.triangles, r["psi"])

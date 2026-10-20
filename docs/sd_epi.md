@@ -96,8 +96,14 @@ fast velocity-saturation mode, which under-reads SS (DEVELOPMENT_LOG 75).
 | nanosheet BDI | blob + plug | 0.208 / 0.177 | 61 | 48 | 1076 | 2.1e-8 |
 
 The channel hardly notices the epi shape: Vt, SS and DIBL move by 3 mV at
-most. With the plug, Ion rises about 3%. The PMOS devices pass the mesh
-gate and solve equilibrium, but a PMOS on-state I-V is not supported yet.
+most. With the plug, Ion rises about 3%.
+
+The PMOS devices also run a full on-state I-V. Use negative `--vds` and walk
+the gate down with `--vgs-min -0.8 --vgs-max 0`; the metrics are mirrored.
+The ideal FinFET PMOS gives Vt -0.25 / -0.21 V, DIBL 64 mV/V and Ion 537
+uA/um. Its Schottky S/D contact is now tabulated with the SiGe it touches
+(DEVELOPMENT_LOG 82). The PMOS stays series-resistance limited; see
+[piezo_mobility.md](piezo_mobility.md).
 
 **Runtime.** The FinFET runs as fast as with the box epi (179 vs 194 s).
 The nanosheet costs about 10% more measured in a single process (mesh

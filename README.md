@@ -4,6 +4,49 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Stress -> mobility: piezoresistance in the device solver ([details](docs/piezo_mobility.md))
+
+The process stress now changes the drain current. Every silicon mesh edge
+gets a low-field mobility factor from the full piezoresistance tensor:
+Smith's coefficients, rotated to the (001)/<110> device frame, applied
+along the edge, with the stress sampled at the edge midpoint. There are
+two modes: a saturating one (the default; holes towards 4x, electrons
+towards 1.8x) and Smith's linear law. An optional doping factor (Kanda for
+n, Richter for p) is on by default. The factors are computed once per mesh,
+so the I-V costs the same. Stress is off unless you ask for it
+(`fab simulate --stress`, or a `stress:` block in a 2D config); with it off,
+the currents are unchanged.
+
+PMOS on-state I-V now runs in 3D (`--vds -0.05 -0.7 --vgs-min -0.8 --vgs-max 0`).
+Its S/D Schottky contact used silicon's band gap, which made the hole
+barrier 0.67 eV instead of 0.30 eV; it now uses the SiGe it touches
+(FinFET PMOS Ion 242 -> 537 uA/um).
+
+2D 30 nm planar devices on the `planar_flow` cell:
+
+| device | channel stress (sigma_xx) | channel mobility | Idlin | Ion |
+|---|---|---|---|---|
+| PMOS, gate-last | -2.7 GPa | holes x2.3 | +57% | +24% |
+| NMOS, SMT | +0.7 GPa | electrons x1.34 | +14% | +4.6% |
+
+3D, Ion with stress:
+
+| device | Ion |
+|---|---|
+| FinFET PMOS | +8.2% |
+| nanosheet PMOS | +8.1% |
+| FinFET NMOS | -0.3% |
+| nanosheet NMOS | +1.0% |
+
+The 3D PMOS gains are well below the literature's +50-100% Ion, for three reasons:
+- the 3D PMOS are series-resistance limited;
+- velocity saturation caps the channel;
+- there is no ballistic model yet.
+
+The 3D NMOS flows on main carry almost no stress.
+
+The details are in [docs/piezo_mobility.md](docs/piezo_mobility.md).
+
 ## Process stress through the flow, 2D and 3D ([details](docs/stress.md))
 
 A linear elastic stress solver (`mechanics/`) that follows the process flow
