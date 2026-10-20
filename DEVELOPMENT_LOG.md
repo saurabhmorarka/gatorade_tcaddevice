@@ -6850,3 +6850,90 @@ channel), so they move more; their goldens were re-captured:
 **Lesson.** A continuation whose step halves to nothing at a fixed bias is a
 fold, not a step-size problem: look at WHERE the residual sits (one row
 here) before touching the step control.
+
+## 81. NMOS stressors: SMT dislocations checked against the literature, gate-last SMT, Si:P S/D, dislocations in 3D
+
+Branch `nmos-stress` (from `main` at b173190). The user asked for more NMOS
+stress solves, dislocations first, with literature numbers. They recalled
+a planar NMOS at ~1 GPa: a number to check, not a target. Teaching use: the
+channel stress per component and per stressor, step by step.
+
+**Literature** (sources and URLs in docs/stress.md, "NMOS stressors"):
+- Tensile CESL: films ≥ +1 GPa (UV-cured to ~1.4-1.7); +1 GPa / 100 nm gave +10% NMOS drive at Intel 90 nm; ~400-600 MPa of initial channel tension.
+- SMT with edge dislocations:
+  - Samsung (IEDM 2010): gate-last, ~1% lattice distortion, mobility +40-60%.
+  - Intel (Weber, IEDM 2011): > 1 GPa simulated, growing as the pitch shrinks.
+  - IBM holography: up to 1.1% (1.9 GPa) at the surface; +0.2% after the poly removal.
+  - Intel patent: two missing half planes, ~640 MPa.
+  - Liao (EDL 2013): shallower cores give more channel-edge tension, with an optimal offset.
+  - Where they form: where the vertical and lateral regrowth fronts meet (IBM patent); in fins, {111} at ~55° after a Ge PAI at 25-30 keV (TSMC D-SMT patent).
+- Si:C: 1.65% C gave 615 MPa (VLSI 2007).
+- Si:P: 1.75e21 P ≈ 0.8 at.% C_sub (AMAT, ECS 2014); 2.8e21 ≈ 1.8 at.% C_sub. By Vegard's law, −0.27 to −0.62%.
+- GAA: the superlattice relaxation stretches the sheets, the release relaxes it, the gate adds some back (CEA-LETI/IBM).
+
+Verdict: ~1 GPa for planar NMOS is right, but only with dislocations, and
+more easily in gate-last. Cap and liner alone give a few hundred MPa.
+
+**2D planar** (`mechanics/planar_flow.py`):
+- The dislocation core now defaults to the amorphization depth (`smt_depth`, 25 nm), the pinch-off point. Before, it was a free 20 nm.
+- `disl_angle` (inclined {111} cuts) and n dislocations per side.
+- A new flow, `nmos_smt_gate_last`: SMT, CESL, ILD, poly pull, HfO2/TiN.
+
+Channel σxx (MPa):
+
+| | poly gate | gate-last |
+|---|---|---|
+| STI | −170 | −154 |
+| SMT cap (memorized) | +203 | +162 |
+| dislocations | +539 | +709 |
+| CESL +1.5 GPa | +57 | +352 |
+| TiN gate | – | +117 |
+| W contacts | +23 | +11 |
+| total | **+652** | **+1198** |
+
+- The poly pull adds +398, close to IBM's measured +0.2% (~340 MPa).
+- Without dislocations the totals are +113 / +489.
+- Core-depth sweep (dislocation term): 10 nm +526, 15 nm +612, 20 nm +594, 25 nm +539, 35 nm +428. The optimum is near 15 nm, as Liao finds.
+- Cut angle 90 / 70 / 54.7°: +539 / +535 / +546, the Volterra invariance.
+- 9-15 s per flow.
+
+**3D** (`mechanics/dislocation.py` `edge_dislocation_3d`, `mechanics/fab_stress.py`):
+- A Volterra cut with any line direction and any cut direction: one voxel layer, ε* = sym(b⊗n)/t with t = h·|n|₁, masked to the crystal (Si, SiGe).
+- `sd_dislocations`:
+  - one dislocation per S/D side in the epi column next to the channel, line across the width;
+  - core `disl_depth` (25) below the channel top, or the epi bottom (−1);
+  - b = a/2<110>, missing half plane;
+  - inserted as its own step right after the S/D epi birth. It is just one more right-hand side.
+- Si:P: region `sd_epi` with material Si gets ε* = `sip_strain_pct` (−0.4%), on by default. The PMOS SiGe epi is untouched: FinFET PMOS still −1500.
+- The report also prints σxx per stressor at every solved step.
+- Everything is general: region names and materials, no device-type branches.
+
+Results (MPa, channel σxx):
+- FinFET NMOS default: **+555** (Si:P +365, TiN +205, contacts −16), 46 s `--fast`.
+- With `sd_disl=1`: epi +219, dislocations +1342, poly pull +2304, TiN +2507, final **+2432** (dislocations +1878). 54 s `--fast`, 109-110 s teaching (13 solves).
+- Nanosheet NMOS default: stack etch +34 (σzz +807), S/D recess +842, epi +1028, pull +1175, release +730, final **+874** (superlattice +279, Si:P +432, TiN +184). Sheets +797 / +987 / +991. 171 s `--fast`.
+- Nanosheet with `sd_disl=1`: final +3309, sheets +4410 / +5412 / +1356 (the bottom sheet is below the core). At the epi bottom: +4390 / +5462 / +5594. 184 s `--fast`, 350 s teaching.
+- FinFET core sweep: 10 nm +764, 20 +1495, 25 +1878, 30 +2263, epi bottom +3374. That is the opposite of planar: a fin above the core is a free beam, so a deeper core shortens more of it.
+- The 54.7° cut from 20 nm gives +1184 instead of +1495. It reaches the cell's symmetry wall, so it is not the same dislocation.
+- Runtimes were measured with another agent running heavy jobs (load 5-7). The 109 s teaching rerun was at load 1.2.
+
+**Decision (flagged for the user):** dislocations are ON in the 2D planar
+SMT flows (production at 32/28 nm) and OPT-IN in 3D (`sd_disl=0`).
+- One perfect a/2<110> per side next to a ~27 nm free channel strains it by ~2b/27 nm ≈ 2.8%, so the elastic model gives 1.9-5 GPa.
+- That is above anything measured.
+- There is no public evidence that volume FinFET/GAA NMOS relies on them, and thin fins and sheets would likely let them glide out.
+
+**Tests** (testsuite/test_mechanics.py, 22, all OK in the .venv in 22 s):
+- Volterra cut invariance (2D, vertical vs {111});
+- 3D cut == 2D solver in a z-uniform slab (1e-5), and the same field with the line along x;
+- Si:P epi puts a toy channel in tension;
+- dislocation placement, missing-half-plane sign, and superposition with Si:P;
+- the gate-last SMT poly pull adds tension.
+
+**Bugs found on the way:**
+- The first 3D test used b = −|b|z with n = −z: an inserted half plane, which flipped σzz exactly. For a missing half plane, b = −|b| n always. The sign is now stated in the docstring. fab_stress uses b = −|b|x, which is right because the normal of any upward cut has n_x > 0.
+- The long dislocation step label overflowed the 46-character table column; shortened.
+
+**Lessons:**
+- Shallow is better for a dislocation in bulk; deeper is better in a free fin. The geometry, not the defect, sets the trend.
+- An elastic Volterra field next to a 5 nm free body gives numbers that nothing in the literature reaches. Check the plausibility of a defect stressor against measured channels before switching it on by default.

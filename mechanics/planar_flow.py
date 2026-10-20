@@ -13,6 +13,9 @@ walls are symmetry planes, i.e. a dense array of identical devices):
   nmos_smt        - stress memorization: S/D + poly gate amorphized, a
                     tensile nitride cap, anneal (the amorphized regions
                     recrystallize stress-free in the capped shape), cap strip
+  nmos_smt_gate_last - the same SMT, then the poly is pulled after ILD CMP
+                    and replaced by HfO2 / TiN (RMG): the gate-last SMT of
+                    Samsung (Lim, IEDM 2010) and Intel (Weber, IEDM 2011)
 
 Stressors and their default inputs (rough literature values; every one can
 be changed with --set NAME=VALUE):
@@ -25,10 +28,17 @@ be changed with --set NAME=VALUE):
   gate_GPa     -1.0    TiN metal gate
   contact_GPa  +1.0    W contact fill
   cap_GPa      +1.5    SMT cap nitride (NMOS)
-  smt_disl      1      SMT edge dislocations (0 = none): one per S/D at the
+  smt_disl      1      SMT edge dislocations per S/D (0 = none) at the
                        gate-side edge, b = a/2<110> = 0.384 nm, a half plane
                        missing above the core (mechanics/dislocation.py)
-  disl_depth   20      core depth (nm)
+  disl_depth   -1      core depth (nm); -1 = the amorphization depth
+                       (smt_depth, 25 nm): the pinch-off point where the
+                       vertical and lateral regrowth fronts meet at the mask
+                       edge (n > 1 dislocations: evenly spaced down to it)
+  disl_angle   90      cut angle from the surface (deg; 54.7 = a {111}
+                       plane leaning away from the gate). The field does not
+                       depend on it (Volterra) while the cut ends on a free
+                       surface: a teaching check
 Isotropic films get eps* from their stress (mechanics.elastic.film_eigenstrain);
 SiGe gets the lattice mismatch; Si/SiGe are anisotropic, (001) wafer,
 <110> channel.
@@ -49,7 +59,8 @@ from mechanics.fe2d import Grid2D, StressHistory2D
 GEOM = dict(h=1.0, Lg=30, tox=2, gate_h=40, spacer=8, sd=44, sti=20, sti_depth=80,
             recess=40, raise_=6, liner=10, contact_w=16, hk=2, y_top=-80, y_bot=160, smt_depth=25)
 DEFAULTS = dict(sige_x=0.5, seed_nm=5.0, seed_x=0.2, sti_GPa=-0.3, liner_pmos_GPa=-2.5, liner_nmos_GPa=1.5,
-                gate_GPa=-1.0, contact_GPa=1.0, cap_GPa=1.5, smt_disl=1.0, disl_depth=20.0)
+                gate_GPa=-1.0, contact_GPa=1.0, cap_GPa=1.5, smt_disl=1.0, disl_depth=-1.0,
+                disl_angle=90.0)
 
 MATS = {1: "Si", 2: "SiGe", 3: "SiO2", 4: "SiO2", 5: "Poly", 6: "Si3N4", 7: "Si3N4",
         8: "SiO2", 9: "HfO2", 10: "TiN", 11: "W", 12: "Si3N4", 13: "SiGe"}
@@ -119,7 +130,8 @@ def run_flow(flow, geom=GEOM, par=DEFAULTS):
     b = Builder(geom, par)
     p, v, Y, X = b.p, b.v, b.Y, b.X
     pmos = flow.startswith("pmos")
-    gate_last = flow == "pmos_gate_last"
+    gate_last = flow.endswith("gate_last")
+    smt = flow.startswith("nmos_smt")
     b.lab[Y > 0] = 1
     b.step("substrate")
     b.lab[b.sti_x & (Y > 0) & (Y < p["sti_depth"])] = 0
@@ -128,9 +140,9 @@ def run_flow(flow, geom=GEOM, par=DEFAULTS):
     b.step("STI fill + CMP", {"STI": (3, b.film(3, v["sti_GPa"]))})
     stack = b.gate & (Y < 0) & (Y > -p["gate_h"])
     b.lab[b.gate & (Y < 0) & (Y > -p["tox"])] = 4
-    if gate_last or flow == "nmos_smt":
+    if gate_last or smt:
         b.lab[stack & (Y < -p["tox"])] = 5
-        b.step("gate oxide + poly gate" if flow == "nmos_smt" else "gate oxide + dummy poly")
+        b.step("gate oxide + dummy poly" if gate_last else "gate oxide + poly gate")
     else:
         b.lab[b.gate & (Y <= -p["tox"]) & (Y > -p["tox"] - p["hk"])] = 9
         b.lab[stack & (Y <= -p["tox"] - p["hk"])] = 10
@@ -163,15 +175,21 @@ def run_flow(flow, geom=GEOM, par=DEFAULTS):
             # SMT edge dislocations: one per S/D at the gate-side edge, core at
             # disl_depth, a half plane (a/2<110>) missing between core and surface
             from mechanics.dislocation import B_SI, edge_dislocation
+            depth = v["disl_depth"] if v["disl_depth"] >= 0 else p["smt_depth"]
+            n_per = int(round(v["smt_disl"]))
+            th = np.radians(v["disl_angle"])
             msk = np.zeros(b.lab.shape, bool)
             eps = np.zeros((b.lab.size, 6))
             for side in (-1, 1):
                 x_d = b.xc + side * (p["Lg"] / 2 + p["spacer"]) + side * 0.5 * p["h"]
-                m, e = edge_dislocation(b.g, (x_d, v["disl_depth"]), (0.0, -1.0), (-B_SI, 0.0),
-                                        solid=(b.lab == 1))
-                msk |= m
-                eps += e
-            b.step(f"SMT dislocations (b = a/2<110>, core {v['disl_depth']:.0f} nm)",
+                for k in range(n_per):
+                    # up to the surface, leaning away from the gate; the cut
+                    # normal has n_x > 0, so b = -|b| x removes a half plane
+                    m, e = edge_dislocation(b.g, (x_d, (k + 1) * depth / n_per),
+                                            (side * np.cos(th), -np.sin(th)), (-B_SI, 0.0), solid=(b.lab == 1))
+                    msk |= m
+                    eps += e
+            b.step(f"SMT dislocations ({n_per}/side, core {depth:.0f} nm)",
                    {"dislocations": (msk, eps)})
         b.lab[cap] = 0
         b.step("SMT cap strip")
@@ -262,7 +280,7 @@ def plot(b, flow, out):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--flow", nargs="*", default=["pmos_gate_first", "pmos_gate_last", "nmos_smt"])
+    ap.add_argument("--flow", nargs="*", default=["pmos_gate_first", "pmos_gate_last", "nmos_smt", "nmos_smt_gate_last"])
     ap.add_argument("--out", default="out/stress")
     ap.add_argument("--set", nargs="*", default=[], help="override a stressor input, e.g. sige_x=0.3")
     a = ap.parse_args()

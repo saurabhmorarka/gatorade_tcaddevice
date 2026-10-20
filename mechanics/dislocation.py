@@ -67,3 +67,43 @@ def edge_dislocation_infinite(x, y, b, E, nu):
     syy = D * y * (x ** 2 - y ** 2) / r4
     sxy = D * x * (x ** 2 - y ** 2) / r4
     return sxx, syy, sxy
+
+
+def edge_dislocation_3d(grid, core, line, cut_dir, b, solid=None):
+    """(mask (nx, ny, nz), eps* (n_vox, 6)) of a straight dislocation in
+    3D as a Volterra cut, the 3D form of edge_dislocation().
+
+    core: a point (x, y, z nm) on the dislocation line; line: its direction
+    (unit vector; the line runs through the whole solid along it); cut_dir:
+    the direction, normal to `line`, in which the cut half plane runs from
+    the line to the free surface. The cut's unit normal is n = line x cut_dir
+    (for line = z this is the 2D normal (-d_y, d_x)), and one voxel layer
+    of thickness t = h (|n_x| + |n_y| + |n_z|) carries eps* = sym(b (x) n)/t.
+    Only voxels where solid (bool, grid shape) is True get it: the cut ends
+    where the crystal ends (a free surface, or an interface that is then not
+    exactly Volterra).
+
+    b = -|b| n removes a half plane of thickness |b| between the line and
+    the surface (the SMT / vacancy-type edge dislocation); b along `line`
+    would be a screw dislocation."""
+    X, Y, Z = grid.centres()
+    h = grid.h
+    t_ = np.asarray(line, float)
+    t_ /= np.linalg.norm(t_)
+    d = np.asarray(cut_dir, float)
+    d = d - d.dot(t_) * t_
+    d /= np.linalg.norm(d)
+    n = np.cross(t_, d)
+    r = np.stack([X - core[0], Y - core[1], Z - core[2]], axis=-1)
+    along = r @ d
+    across = r @ n
+    thick = h * np.abs(n).sum()
+    mask = (along >= 0) & (across >= -thick / 2) & (across < thick / 2)
+    if solid is not None:
+        mask &= np.asarray(solid, bool)
+    bb = np.asarray(b, float)
+    E = (np.outer(bb, n) + np.outer(n, bb)) / (2 * thick)           # tensor strain
+    e = np.array([E[0, 0], E[1, 1], E[2, 2], 2 * E[1, 2], 2 * E[0, 2], 2 * E[0, 1]])
+    eps = np.zeros((mask.size, 6))
+    eps[mask.ravel()] = e
+    return mask, eps, n

@@ -20,6 +20,15 @@ Stressors, from the fab's region names (rough defaults; --set overrides):
                     compressed (mismatch eps*); relaxes sideways at the stack
                     etch, released at channel release. sige_sl_strain=0 grows
                     it stress-free instead (what-if, for teaching)
+  sd_epi (Si, NMOS) Si:P: heavy P (~2e21 cm-3) shrinks the lattice; eps* =
+                    sip_strain_pct (-0.4 %, i.e. born tensile; 0 = off).
+                    Literature: 1.75e21 P ~ 0.8 at.% C_sub, 2.8e21 ~ 1.8 at.%
+                    C_sub (-0.27 .. -0.62 %); Si:C 1.65 % C ~ -0.57 %
+  S/D dislocations  opt-in (sd_disl=1: one per S/D side; -1 = NMOS only):
+                    edge dislocations, b = a/2<110> along the channel, a
+                    missing half plane above a core disl_depth (25 nm) below
+                    the channel top, in the epi next to the channel
+                    (sd_dislocations, mechanics.dislocation)
   gate (metal)      intrinsic stress gate_GPa (-1.0, TiN)
   *_contact         intrinsic stress contact_GPa (-1.0, TiN fill; W would be +1)
   sti               sti_GPa (0 = off; e.g. -0.3 HDP oxide)
@@ -40,11 +49,14 @@ import numpy as np
 from scipy import ndimage
 
 from mechanics import elastic as el
+from mechanics.dislocation import B_SI, edge_dislocation_3d
 from mechanics.fe3d import Grid3D, StressHistory3D
 from mechanics.piezo import mobility_change
 
 DEFAULTS = dict(epi_x=0.5, sige_sl_x=0.30, sige_sl_strain=1.0, gate_GPa=-1.0, contact_GPa=-1.0, sti_GPa=0.0,
-                spacer_GPa=0.0)
+                spacer_GPa=0.0, sip_strain_pct=-0.4, sd_disl=0.0, disl_depth=25.0, disl_offset=0.5,
+                disl_b=B_SI, disl_angle=90.0)
+CRYSTAL = ("Si", "SiGe")          # materials a dislocation cut runs through (Si, SiGe, SiGe0.2, ...)
 SI_LIKE = {"Si"}
 
 
@@ -156,6 +168,9 @@ def _stressor_of(name, mat, par, m):
         f = el.sige_mismatch(_ge_fraction(name, mat, par))
         sname = {"sige": "SiGe superlattice", "sd_epi_seed": "SiGe S/D seed"}.get(name, "SiGe S/D")
         return sname, np.array([f, f, f, 0, 0, 0])
+    if name.startswith("sd_epi") and mat == "Si" and par["sip_strain_pct"]:
+        f = par["sip_strain_pct"] / 100.0        # Si:P (NMOS S/D): a smaller lattice than Si, born tensile
+        return "Si:P S/D", np.array([f, f, f, 0, 0, 0])
     if name == "gate" and par["gate_GPa"]:
         return "gate metal", el.film_eigenstrain(m, par["gate_GPa"])
     if name.endswith("_contact") and par["contact_GPa"]:
@@ -165,6 +180,65 @@ def _stressor_of(name, mat, par, m):
     if name in ("spacer", "inner_spacer") and par["spacer_GPa"]:
         return "spacers", el.film_eigenstrain(m, par["spacer_GPa"])
     return None
+
+
+def sd_dislocations(labels, regions, grid, channel, par):
+    """(mask, eps*, description) of the S/D edge dislocations (Volterra
+    cuts, mechanics.dislocation.edge_dislocation_3d), or None.
+
+    sd_disl dislocations per S/D side, at the gate-side face of the S/D epi:
+      * the line runs across the width (z) through all the crystal (Si,
+        SiGe) at that x and depth;
+      * the core sits disl_offset inside the epi from its channel-side face,
+        disl_depth nm below the channel top (the top of the final channel).
+        The default, 25 nm, is the amorphization depth of a Ge PAI at
+        25-30 keV (the dislocation-SMT of TSMC's FinFET patent, US9570587),
+        the same pinch-off depth as the 2D planar flow. disl_depth < 0 puts
+        it at the bottom of the epi there instead (the recess corner, where
+        stacking faults in a recessed S/D epi start);
+      * b = a/2<110> along the channel (disl_b nm), with the half plane
+        between the core and the surface MISSING (the SMT / SPER type): it
+        pulls the S/D together and stretches the channel;
+      * the cut runs up from the core to the surface, vertical (disl_angle
+        90) or inclined (54.7: a {111} plane), leaning away from the channel.
+        The field does not depend on the cut (Volterra) as long as it ends
+        on a free surface;
+      * sd_disl = n > 1 puts n dislocations on a side, their cores evenly
+        spaced in depth down to the core depth above.
+    Inserted right after the S/D epi is born, while nothing sits on the
+    epi top (the dummy gate and spacer are beside the cut, not above it)."""
+    n_per = int(round(par["sd_disl"]))
+    epi = np.isin(labels, [g for g, (n, m) in regions.items() if n.startswith("sd_epi")])
+    if n_per <= 0 or not epi.any():
+        return None
+    cryst = np.isin(labels, [g for g, (n, m) in regions.items() if m.startswith(CRYSTAL)])
+    X, Y, Z = grid.centres()
+    h = grid.h
+    xc = X[channel].mean()
+    y_top = Y[channel].min() - h / 2
+    th = np.radians(par["disl_angle"])
+    mask = np.zeros(grid.shape, bool)
+    eps = np.zeros((mask.size, 6))
+    for side in (-1, 1):
+        ex = X[epi & (np.sign(X - xc) == side)]
+        if not len(ex):
+            continue
+        face = ex.max() + h / 2 if side < 0 else ex.min() - h / 2
+        x_d = face + side * par["disl_offset"]
+        if par["disl_depth"] < 0:
+            col = epi & (np.abs(X - x_d) < h / 2)
+            depth = Y[col].max() + h / 2 - y_top
+        else:
+            depth = par["disl_depth"]
+        for k in range(n_per):
+            core = (x_d, y_top + (k + 1) * depth / n_per, 0.0)
+            cut = (side * np.cos(th), -np.sin(th), 0.0)            # up, leaning away from the channel
+            # the cut normal has n_x > 0 for any upward cut, so b = -|b| x removes material
+            m, e, _ = edge_dislocation_3d(grid, core, (0, 0, 1), cut, (-par["disl_b"], 0.0, 0.0), solid=cryst)
+            mask |= m
+            eps += e
+    desc = f"S/D dislocations ({n_per}/side, core {depth:.0f} nm)"
+    return mask, eps, desc
 
 
 def channel_masks(labels, regions, grid):
@@ -206,6 +280,9 @@ def run(config, par=DEFAULTS, factor=2, fast=False, log=print, fab_set=None):
     final = snaps[-1][1]
     probes = channel_masks(final, regions, grid)
     carrier = "p" if any(m == "SiGe" for n, m in regions.values() if n == "sd_epi") else "n"
+    n_disl = par["sd_disl"] if par["sd_disl"] >= 0 else (1 if carrier == "n" else 0)   # -1: NMOS 1, PMOS 0
+    par = dict(par, sd_disl=n_disl)
+    disl_done = False
     rows = []
     prev = np.zeros(grid.shape, np.int32)
     for label, lab in snaps:
@@ -220,9 +297,16 @@ def run(config, par=DEFAULTS, factor=2, fast=False, log=print, fab_set=None):
                 if sname in stressors:
                     m = m | stressors[sname][0]
                 stressors[sname] = (m, eps)
-        solved = sh.step(label, lab, stressors=stressors, flush=not fast)
-        if solved:              # fast mode solves before this step's births: the state before it
-            rows.append(("before: " + label if fast else label, {k: sh.probe(m) for k, m in probes.items()}))
+        steps = [(label, stressors)]
+        if n_disl > 0 and not disl_done and any(regions[g][0].startswith("sd_epi") for g in np.unique(lab[born])):
+            d = sd_dislocations(lab, regions, grid, probes["channel"], par)
+            if d is not None:                 # its own step right after the epi birth (no birth in it)
+                steps.append((d[2], {"S/D dislocations": (d[0], d[1])}))
+                disl_done = True
+        for lbl, stt in steps:
+            solved = sh.step(lbl, lab, stressors=stt, flush=not fast)
+            if solved:          # fast mode solves before this step's births: the state before it
+                rows.append(("before: " + lbl if fast else lbl, {k: sh.probe(m) for k, m in probes.items()}))
         prev = lab
     if sh.flush():
         rows.append(("(final)", {k: sh.probe(m) for k, m in probes.items()}))
@@ -237,6 +321,12 @@ def report(res, name):
     for label, pr in rows:
         t = pr["channel"][0] * 1e3
         out.append(f"{label[:46]:46s} {t[0]:7.0f} {t[1]:7.0f} {t[2]:7.0f}")
+    names = list(rows[-1][1]["channel"][1])
+    if names:                   # the same steps, sigma_xx split by stressor (superposition)
+        out.append(f"{'sigma_xx by stressor':46s} " + " ".join(f"{s[:12]:>12s}" for s in names))
+        for label, pr in rows:
+            per = pr["channel"][1]
+            out.append(f"{label[:46]:46s} " + " ".join(f"{per[s][0] * 1e3 if s in per else 0.0:12.0f}" for s in names))
     pr = rows[-1][1]
     out.append(f"final, by stressor (channel){'':12s} {'sxx':>7s} {'syy':>7s} {'szz':>7s}   dmu/mu ({carrier}, linear piezo)")
     tot, per = pr["channel"]

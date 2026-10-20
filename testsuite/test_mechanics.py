@@ -177,10 +177,149 @@ class TestDislocation(unittest.TestCase):
 
     def test_smt_dislocation_tension(self):
         """Missing half planes at the S/D edges put the NMOS channel in
-        tension (the SMT dislocation boost)."""
+        tension (the SMT dislocation boost), and in the gate-last SMT flow
+        the poly pull adds tension (the measured ~+0.2% strain after the
+        poly removal, IBM holography)."""
         from mechanics.planar_flow import DEFAULTS, run_flow
-        with_d = run_flow("nmos_smt", par=dict(DEFAULTS, smt_disl=1.0)).rows[-1][2]
-        self.assertGreater(with_d["dislocations"][0], 200.0)    # MPa
+        rows = run_flow("nmos_smt_gate_last", par=dict(DEFAULTS, smt_disl=1.0)).rows
+        self.assertGreater(rows[-1][2]["dislocations"][0], 200.0)    # MPa
+        k = [r[0] for r in rows].index("dummy poly pull")
+        self.assertGreater(rows[k][1][0] - rows[k - 1][1][0], 100.0)
+
+    def test_volterra_cut_does_not_matter(self):
+        """The stress of a dislocation depends on its core and b only, not on
+        the cut, as long as the cut ends on a free surface: a vertical and a
+        {111}-inclined cut give the same field away from both cuts."""
+        from mechanics.dislocation import edge_dislocation
+        out = []
+        for ang in (90.0, 54.7):
+            n = 80
+            g = Grid2D(n, n, 1.0, -n / 2, -10.0)
+            sh = StressHistory2D(g, {1: el.material("Si")})
+            X, Y = g.coords()
+            lab = np.where(Y > 0, 1, 0).astype(np.int32)              # top surface y = 0, free
+            sh.step("bulk", lab)
+            th = np.radians(ang)
+            mask, eps = edge_dislocation(g, (0.0, 20.0), (np.cos(th), -np.sin(th)), (-0.384, 0.0), labels=lab)
+            sh.step("disl", lab, stressors={"d": (mask, eps)})
+            probe = (X < -6) & (X > -16) & (Y > 0) & (Y < 4)           # the "channel" beside the cuts
+            out.append(sh.probe(probe)[0])
+        self.assertGreater(out[0][0], 0.05)                             # tension, GPa
+        np.testing.assert_allclose(out[1], out[0], rtol=0.05, atol=2e-3)
+
+    def test_3d_dislocation_equals_2d(self):
+        """The 3D Volterra cut in a z-uniform slab (rollers on the z walls:
+        plane strain) gives the 2D solver's field, and turning the line from
+        z to x gives the same field rotated (any line direction works)."""
+        from mechanics.dislocation import edge_dislocation, edge_dislocation_3d
+        from mechanics.fe3d import Grid3D, StressHistory3D
+        n, b = 40, 0.384
+        mats = {1: el.ElasticMaterial("iso", el.isotropic_C(130.0, 0.28))}
+        g2 = Grid2D(n, n, 1.0, -n / 2, -n / 2)
+        sh2 = StressHistory2D(g2, mats)
+        lab2 = np.ones((n, n), np.int32)
+        sh2.step("bulk", lab2)
+        m2, e2 = edge_dislocation(g2, (0.0, 0.0), (0.0, -1.0), (-b, 0.0), labels=lab2)
+        sh2.step("d", lab2, stressors={"d": (m2, e2)})
+        s2 = sh2.total().reshape(n, n, 6)                                 # (y, x)
+        g3 = Grid3D((n, n, 1), 1.0, (-n / 2, -n / 2, 0))
+        sh3 = StressHistory3D(g3, mats)
+        lab3 = np.ones(g3.shape, np.int32)
+        sh3.step("bulk", lab3)
+        m3, e3, nrm = edge_dislocation_3d(g3, (0, 0, 0.5), (0, 0, 1), (0, -1, 0), (-b, 0, 0))
+        np.testing.assert_allclose(nrm, [1, 0, 0], atol=1e-12)
+        sh3.step("d", lab3, stressors={"d": (m3, e3)})
+        s3 = sh3.element_stress().reshape(g3.shape + (6,))[:, :, 0]       # (x, y)
+        for c in (0, 1, 5):                                               # xx, yy, xy
+            np.testing.assert_allclose(s3[..., c].T, s2[..., c], rtol=1e-5, atol=1e-6)
+        # the same dislocation with its line along x (cut up, n = -z, so the
+        # missing half plane is b = -|b| n = +|b| z): yz plane strain
+        g4 = Grid3D((1, n, n), 1.0, (0, -n / 2, -n / 2))
+        sh4 = StressHistory3D(g4, mats)
+        sh4.step("bulk", np.ones(g4.shape, np.int32))
+        m4, e4, nrm4 = edge_dislocation_3d(g4, (0.5, 0, 0), (1, 0, 0), (0, -1, 0), (0, 0, b))
+        np.testing.assert_allclose(nrm4, [0, 0, -1], atol=1e-12)
+        sh4.step("d", np.ones(g4.shape, np.int32), stressors={"d": (m4, e4)})
+        s4 = sh4.element_stress().reshape(g4.shape + (6,))[0]             # (y, z)
+        # z here plays x of the first case, mirrored: zz <-> xx, yz <-> -xy
+        np.testing.assert_allclose(s4[:, ::-1, 2], s3[..., 0].T, rtol=1e-6, atol=1e-8)
+        np.testing.assert_allclose(s4[:, ::-1, 3], -s3[..., 5].T, rtol=1e-6, atol=1e-8)
+
+
+class TestNmosStressors3D(unittest.TestCase):
+    """The NMOS stressors of mechanics/fab_stress.py on small synthetic
+    structures (no fab build, direct solves)."""
+
+    def _device(self):
+        from mechanics.fe3d import Grid3D
+        g = Grid3D((40, 40, 4), 1.0, (0, -6, 0))
+        X, Y, Z = g.centres()
+        regions = {1: ("substrate", "Si"), 2: ("dummy_gate", "Poly"), 3: ("sd_epi", "Si")}
+        lab = np.where(Y > 0, 1, 0)
+        lab[(Y < 0) & (Y > -5) & (np.abs(X - 20) < 6)] = 2                         # a gate, Lg 12
+        recess = lab.copy()
+        recess[(Y > 0) & (Y < 15) & (np.abs(X - 20) > 8)] = 0                       # S/D recess, 15 nm
+        epi = recess.copy()
+        epi[(Y > -2) & (Y < 15) & (np.abs(X - 20) > 8)] = 3                         # Si:P epi, 2 nm raised
+        channel = (np.abs(X - 20) < 4) & (Y > 0) & (Y < 2)
+        return g, regions, [lab, recess, epi], channel, X, Y
+
+    def _solve(self, stressors_at_epi):
+        from mechanics import fab_stress as fs
+        from mechanics.fe3d import StressHistory3D
+        g, regions, labs, channel, X, Y = self._device()
+        sh = StressHistory3D(g, fs._materials(regions, fs.DEFAULTS))
+        for k, lab in enumerate(labs):
+            sh.step(str(k), lab, stressors=stressors_at_epi(g, regions, lab, channel) if k == 2 else None)
+        return sh.probe(channel)
+
+    def test_sip_epi_pulls_the_channel_into_tension(self):
+        from mechanics import fab_stress as fs
+        par = fs.DEFAULTS
+
+        def st(g, regions, lab, channel):
+            name, eps = fs._stressor_of("sd_epi", "Si", par, el.material("Si"))
+            self.assertEqual(name, "Si:P S/D")
+            np.testing.assert_allclose(eps[:3], par["sip_strain_pct"] / 100)
+            return {name: (lab == 3, eps)}
+        tot, per = self._solve(st)
+        self.assertGreater(tot[0], 0.05)                       # GPa, tension along the channel
+        self.assertIsNone(fs._stressor_of("sd_epi", "Si", dict(par, sip_strain_pct=0.0), el.material("Si")))
+
+    def test_sd_dislocations_placement_and_sign(self):
+        """One cut per S/D in the epi column next to the channel, from the
+        epi bottom (the default core) up to the epi top, missing half plane
+        (eps_xx = -b/h); the channel goes into tension; the dislocation and
+        Si:P fields superpose exactly."""
+        from mechanics import fab_stress as fs
+        par = dict(fs.DEFAULTS, sd_disl=1, disl_depth=-1)                 # core at the epi bottom
+        g, regions, labs, channel, X, Y = self._device()
+        m25, _, _ = fs.sd_dislocations(labs[2], regions, g, channel, dict(par, disl_depth=25))
+        self.assertAlmostEqual(Y[m25].max(), 24.5)                      # 25 nm: on through the Si under the epi
+        mask, eps, desc = fs.sd_dislocations(labs[2], regions, g, channel, par)
+        xs = np.unique(X[mask])
+        np.testing.assert_allclose(xs, [11.5, 28.5])                     # the epi faces at 12 / 28
+        self.assertAlmostEqual(Y[mask].max(), 14.5)                     # core at the epi bottom (15 nm)
+        self.assertAlmostEqual(Y[mask].min(), -1.5)                     # up to the raised epi top
+        self.assertTrue((labs[2][mask] == 3).all())
+        np.testing.assert_allclose(eps[mask.ravel()][:, 0], -par["disl_b"] / g.h)
+        self.assertIsNone(fs.sd_dislocations(labs[2], regions, g, channel, dict(par, sd_disl=0)))
+
+        def st(which):
+            def f(g, regions, lab, channel):
+                out = {}
+                if "d" in which:
+                    out["S/D dislocations"] = (mask, eps)
+                if "p" in which:
+                    out["Si:P S/D"] = (lab == 3, fs._stressor_of("sd_epi", "Si", par, el.material("Si"))[1])
+                return out
+            return f
+        d, _ = self._solve(st("d"))
+        p, _ = self._solve(st("p"))
+        both, per = self._solve(st("dp"))
+        self.assertGreater(d[0], 0.1)                                   # GPa
+        np.testing.assert_allclose(both, d + p, atol=1e-9)
+        np.testing.assert_allclose(per["S/D dislocations"], d, atol=1e-9)
 
 
 class TestPiezo(unittest.TestCase):
