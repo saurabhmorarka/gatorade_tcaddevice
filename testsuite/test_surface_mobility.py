@@ -45,6 +45,29 @@ def fin_mesh(h=0.5):
                                 face_contacts={"body": (1, "max")})
 
 
+def wrapped_fin_mesh(h=0.5):
+    """A 3D fin with a wrap-around gate over STI: Si fin z 3..7 nm from
+    y 2 nm down into the substrate (y > 10), a 1 nm gate oxide on its top
+    and sidewalls down to the STI top (y 6), the gate metal around it, STI
+    oxide below y 6 beside the sub-fin. The gate electrode on the STI top
+    sits 4 nm above the substrate surface (y 10)."""
+    from mesh3d.cartesian import CONDUCTOR, INSULATOR, SEMI, build_cartesian_mesh
+    x = np.arange(0.0, 4.0 + 1e-9, 1.0)
+    y = np.arange(0.0, 14.0 + 1e-9, h)
+    z = np.arange(0.0, 10.0 + 1e-9, h)
+    xc, yc, zc = (0.5 * (a[:-1] + a[1:]) for a in (x, y, z))
+    Y, Z = np.meshgrid(yc, zc, indexing="ij")
+    si = ((Y > 2.0) & (Z > 3.0) & (Z < 7.0)) | (Y > 10.0)
+    ox = (Y > 6.0) | ((Y > 1.0) & (Z > 2.0) & (Z < 8.0))
+    lab2 = np.where(si, 0, np.where(ox, 1, 2))
+    lab = np.broadcast_to(lab2, (len(xc),) + lab2.shape).copy()
+    mats = [dict(name="si", kind=SEMI, material=MAT), dict(name="ox", kind=INSULATOR, eps_r=3.9),
+            dict(name="gate", kind=CONDUCTOR, contact="gate")]
+    net = np.full((len(x), len(y), len(z)), -1e16)
+    return build_cartesian_mesh([a * 1e-7 for a in (x, y, z)], lab, mats, net, MAT,
+                                face_contacts={"body": (1, "max")})
+
+
 def mosfet_2d(mode="fast"):
     import main2d_mosfet_sweep as m
     with warnings.catch_warnings():
@@ -151,6 +174,44 @@ class TestGeometry(unittest.TestCase):
         k = np.argmin(np.linalg.norm(P - [3.0, 6.0, 3.5], axis=1))
         self.assertAlmostEqual(g["dist"][k] * 1e7, 1.5, places=6)
         self.assertAlmostEqual(self.fin_sm.D[k], np.exp(-1.5e-7 / 1e-6), places=9)
+
+    def test_interface_charge_gate_only(self):
+        """interface_charge_where: gate (the default) charges the fin top and
+        the sidewalls under the gate oxide, not the sub-fin / STI sidewalls
+        nor the substrate under the STI (the gate electrode 4 nm above it);
+        all charges every interface node. The Coulomb term follows the
+        charge (an active node takes its nearest interface node's)."""
+        mesh = wrapped_fin_mesh()
+        P = mesh.points * 1e7
+        gate = sm.SurfaceMobility(mesh, MAT, sm.MobilityModel(mode="fast"))
+        g = gate.geo
+        ifn = g["is_interface"]
+        top = ifn & (np.abs(P[:, 1] - 2.0) < 1e-6) & (P[:, 2] > 3.4) & (P[:, 2] < 6.6)
+        side = ifn & (np.abs(P[:, 2] - 3.0) < 1e-6) & (P[:, 1] > 2.4) & (P[:, 1] < 5.6)
+        subfin = ifn & (np.abs(P[:, 2] - 3.0) < 1e-6) & (P[:, 1] > 6.9) & (P[:, 1] < 9.6)
+        sub_top = ifn & (np.abs(P[:, 1] - 10.0) < 1e-6) & ((P[:, 2] < 2.6) | (P[:, 2] > 7.4))
+        for m in (top, side, subfin, sub_top):
+            self.assertTrue(m.any())
+        self.assertTrue(gate.charged[top].all() and gate.charged[side].all())
+        self.assertFalse(gate.charged[subfin].any() or gate.charged[sub_top].any())
+        self.assertAlmostEqual(np.percentile(gate.gate_hit[np.isfinite(gate.gate_hit)], 5) * 1e7, 1.0, delta=0.3)
+        allm = sm.SurfaceMobility(mesh, MAT, sm.MobilityModel.from_options(
+            dict(mode="fast", interface_charge_where="all")))
+        np.testing.assert_array_equal(allm.charged, ifn)
+        try:
+            sm.attach_mobility(mesh, MAT, dict(mode="fast"))
+            fc = mesh.fixed_charge
+            np.testing.assert_allclose(fc, 3e11 * g["area"] * gate.charged)
+            self.assertTrue(np.all(fc[subfin | sub_top] == 0) and np.all(fc[top | side] > 0))
+        finally:
+            sm.attach_mobility(mesh, MAT, "off")
+        # Coulomb: on near the gated sidewall, off near the sub-fin
+        a = gate.act
+        near = g["nearest"][a]
+        self.assertTrue(np.all(gate.ic_mask[gate.charged[near]] == 1.0))
+        self.assertTrue(np.all(gate.ic_mask[subfin[near]] == 0.0))
+        with self.assertRaises(ValueError):
+            sm.MobilityModel.from_options(dict(mode="fast", interface_charge_where="sti"))
 
     def test_lsq_gradient_exact_for_linear_psi(self):
         """F = |grad psi . n| exactly for a linear psi, at every active node

@@ -73,12 +73,13 @@ def main(argv=None):
     m.add_argument("--mobility", choices=("fast", "exact", "off"), default="fast",
                    help="inversion-layer mobility (docs/mobility.md): fast (default; Lombardi phonon + surface "
                         "roughness, Masetti bulk on the total doping, interface charge 3e11 cm^-2 + its "
-                        "Coulomb scattering), exact (Darwish + Klaassen, carrier screening), off (bulk only)")
+                        "Coulomb scattering on the gate-dielectric interfaces), exact (Darwish + Klaassen, carrier screening), off (bulk only)")
     m.add_argument("--orientation", choices=("auto", "100"), default="auto",
                    help="surface-orientation parameter sets: auto (per interface: (100) tops, (110) fin "
                         "sidewalls) or 100 (one set)")
     m.add_argument("--mobility-set", nargs="*", default=[], metavar="K=V",
-                   help="mobility options, e.g. interface_charge=0 (no fixed charge / Coulomb; default 3e11) highk=1 "
+                   help="mobility options, e.g. interface_charge=0 (no fixed charge / Coulomb; default 3e11) "
+                        "interface_charge_where=all (also STI / spacers / BOX; default gate) highk=1 "
                         "surface_scale_n=1.1 "
                         "(solver2d/surface_mobility.MobilityModel)")
     args = ap.parse_args(argv)

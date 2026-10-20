@@ -758,8 +758,9 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     (solver2d/mosfet_metrics.py::mosfet_metrics_signed).
     mobility: the inversion-layer mobility (docs/mobility.md): "fast" (the
     default: Lombardi + Masetti on the total doping, per-interface
-    orientation, interface charge 3e11 cm^-2 with its Coulomb scattering;
-    interface_charge=0 removes it), "exact" (Darwish + Klaassen), "off" (bulk only, the
+    orientation, interface charge 3e11 cm^-2 with its Coulomb scattering on
+    the gate-dielectric interfaces; interface_charge=0 removes it,
+    interface_charge_where=all puts it on STI / spacers / BOX too), "exact" (Darwish + Klaassen), "off" (bulk only, the
     behaviour before DEVELOPMENT_LOG 83), or an options dict
     (solver2d/surface_mobility.MobilityModel)."""
     from solver2d.mosfet_metrics import mosfet_metrics_signed
@@ -786,7 +787,8 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     log("  inversion-layer mobility: off (bulk only)" if r is None else
         f"  inversion-layer mobility ({r['mode']}, orientation {r['orientation']}): {r['n_interface']} interface "
         f"nodes, families " + ", ".join(f"({k}) {v}" for k, v in r["families_interface"].items())
-        + (f", interface charge {r['interface_charge']:g} cm^-2" if r["interface_charge"] else "")
+        + (f", interface charge {r['interface_charge']:g} cm^-2 on {r['charged_nodes']} "
+           f"({r['interface_charge_where']}) interface nodes" if r["interface_charge"] else "")
         + (", remote high-k" if r["highk"] else ""))
     if stress_key is not None:
         r = d["stress_report"]

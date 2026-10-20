@@ -6,13 +6,13 @@
 #   scripts/mobility/device_runs.sh <code dir> <tag> [extra fab simulate args...]
 #
 # <code dir>: the checkout to run (a copy of the baseline for "before");
-# results go to <this worktree>/out/mob_runs/<tag>/<device>. The extra
+# results go to $OUTROOT (default: the main checkout's out/mob_runs)/<tag>/<device>. The extra
 # arguments go to every fab simulate call (e.g. --mobility exact); the 2D
 # runs take MOB2D=<config suffix> from the environment (see below).
 set -u
 CODE=$1; TAG=$2; shift 2
 PY=/Users/saurabhmorarka/miniconda3/envs/tcad/bin/python
-OUT=/Users/saurabhmorarka/Desktop/Gatorade/tcad1d/.claude/worktrees/mobility-stack/out/mob_runs/$TAG
+OUT=${OUTROOT:-/Users/saurabhmorarka/Desktop/Gatorade/tcad1d/out/mob_runs}/$TAG
 mkdir -p "$OUT"
 cd "$CODE" || exit 1
 ONLY=${ONLY:-}
