@@ -173,10 +173,37 @@ def _tabulate_one(mat, contact, carrier, N):
     return gi, J_s
 
 
+def _node_material(mesh, mat, k):
+    """The Material of node-material index k (the base object when it is the
+    base semiconductor)."""
+    mats = mesh.node_materials
+    m = mats[k] if k > 0 else mat
+    if k > 0 and _material_key(m) == _material_key(mat):
+        return mat                            # the same semiconductor as the base: keep the base object
+    return m
+
+
+def contact_groups(mesh, mat, nodes):
+    """[(Material, positions into `nodes`)] for every distinct semiconductor a
+    contact touches (one group, the base `mat`, on a single-material mesh).
+    A contact that straddles two materials (a PMOS plug touching the SiGe
+    epi and its lower-Ge seed layer) is tabulated per material: one table for
+    the whole contact, chosen by the node-count majority, made the contact
+    resistance flip by 3x with the mesh (the two materials split the area
+    ~55:45, DEVELOPMENT_LOG 87)."""
+    mats = getattr(mesh, "node_materials", None)
+    idx = getattr(mesh, "node_material_index", None)
+    if mats is None or idx is None:
+        return [(mat, np.arange(len(nodes)))]
+    k = np.asarray(idx)[nodes]
+    return [(_node_material(mesh, mat, g), np.flatnonzero(k == g)) for g in np.unique(k)]
+
+
 def contact_material(mesh, mat, nodes):
     """The semiconductor Material a contact touches: the per-node material
     (mesh.node_materials / node_material_index) most of its nodes carry,
-    else the base `mat`. A p+ SiGe S/D contact must be tabulated with
+    else the base `mat`. (The dominant one only: the contact's tables are per
+    material, see contact_groups.) A p+ SiGe S/D contact must be tabulated with
     SiGe's gap and band densities: with the base silicon its hole barrier
     read Eg(Si) - Phi_Bn = 0.67 eV instead of Eg(SiGe) - Phi_Bn = 0.30 eV
     (DEVELOPMENT_LOG 82). A single-material mesh is unchanged."""
@@ -221,9 +248,14 @@ class SubgridContacts:
             Nd = mesh.Cdop[semi]
             carrier = "n" if np.median(Nd) >= 0 else "p"
             Nabs = np.abs(Nd)
-            cmat = contact_material(mesh, mat, semi)
-            table = SchottkyTable.build(cmat, c, carrier, max(Nabs.min(), 1e15), Nabs.max(), cache=cache, log=log)
-            specs[name] = dict(table=table, nodes=semi, carrier=carrier, contact=c, mat=cmat)
+            groups = []
+            for gmat, pos in contact_groups(mesh, mat, semi):
+                table = SchottkyTable.build(gmat, c, carrier, max(Nabs[pos].min(), 1e15), Nabs[pos].max(),
+                                            cache=cache, log=log)
+                groups.append(dict(table=table, mat=gmat, nodes=semi[pos], pos=pos, area=float(area[semi[pos]].sum())))
+            main = max(groups, key=lambda g: g["area"])      # (the dominant group, for single-table readers)
+            specs[name] = dict(table=main["table"], nodes=semi, carrier=carrier, contact=c, mat=main["mat"],
+                               groups=groups)
         return cls(mesh, mat, specs, area)
 
     def metal_psi0(self, name):
@@ -297,39 +329,41 @@ class SubgridContacts:
         rows_n, cols_n, vals_n, rows_p, cols_p, vals_p = [], [], [], [], [], []
         I_node = {}
         for name, s in self.specs.items():
-            i = s["nodes"]
             V = bias.get(name, 0.0)
-            A, cv = self.area[i], self.cv[i]
-            k = A / cv
-            n = ni[i] * np.exp((psi[i] - phin[i] + dEi[i]) / Vt)
-            p = ni[i] * np.exp((phip[i] - psi[i] - dEi[i]) / Vt)
             c = s["contact"]
-            cm = s.get("mat", mat)
-            vn = te_velocity(c.richardson_n, cm.T, cm.Nc)
-            vp = te_velocity(c.richardson_p, cm.T, cm.Nv)
-            if s["carrier"] == "n":
-                J, dJ = s["table"](np.abs(self.mesh.Cdop[i]), V - phin[i])
-                # J > 0: conventional current metal -> semiconductor = electrons leaving.
-                Gn[i] += -J / Q * k
-                # minority holes: flux into the metal vp (p - p(phip = V))
-                pV = ni[i] * np.exp((V - psi[i] - dEi[i]) / Vt)
-                Gp[i] += -vp * (p - pV) * k
-                I = (J - Q * vp * (p - pV)) * A
-                if jacobian:
-                    rows_n += [i]; cols_n += [N + i]; vals_n += [dJ / Q * k]          # du/dphin = -1
-                    rows_p += [i, i]; cols_p += [i, 2 * N + i]
-                    vals_p += [-vp * k * (-p + pV) / Vt, -vp * k * p / Vt]
-            else:
-                J, dJ = s["table"](np.abs(self.mesh.Cdop[i]), V - phip[i])
-                # J > 0: holes flow metal -> semiconductor.
-                Gp[i] += J / Q * k
-                nV = ni[i] * np.exp((psi[i] - V + dEi[i]) / Vt)
-                Gn[i] += -vn * (n - nV) * k
-                I = (J + Q * vn * (n - nV)) * A
-                if jacobian:
-                    rows_p += [i]; cols_p += [2 * N + i]; vals_p += [-dJ / Q * k]
-                    rows_n += [i, i]; cols_n += [i, N + i]
-                    vals_n += [-vn * k * (n - nV) / Vt, -vn * k * (-n / Vt)]
+            I = np.zeros(len(s["nodes"]))        # per node, in s["nodes"] order
+            for g in s["groups"]:
+                i = g["nodes"]
+                A, cv = self.area[i], self.cv[i]
+                k = A / cv
+                n = ni[i] * np.exp((psi[i] - phin[i] + dEi[i]) / Vt)
+                p = ni[i] * np.exp((phip[i] - psi[i] - dEi[i]) / Vt)
+                cm = g["mat"]
+                vn = te_velocity(c.richardson_n, cm.T, cm.Nc)
+                vp = te_velocity(c.richardson_p, cm.T, cm.Nv)
+                if s["carrier"] == "n":
+                    J, dJ = g["table"](np.abs(self.mesh.Cdop[i]), V - phin[i])
+                    # J > 0: conventional current metal -> semiconductor = electrons leaving.
+                    Gn[i] += -J / Q * k
+                    # minority holes: flux into the metal vp (p - p(phip = V))
+                    pV = ni[i] * np.exp((V - psi[i] - dEi[i]) / Vt)
+                    Gp[i] += -vp * (p - pV) * k
+                    I[g["pos"]] = (J - Q * vp * (p - pV)) * A
+                    if jacobian:
+                        rows_n += [i]; cols_n += [N + i]; vals_n += [dJ / Q * k]          # du/dphin = -1
+                        rows_p += [i, i]; cols_p += [i, 2 * N + i]
+                        vals_p += [-vp * k * (-p + pV) / Vt, -vp * k * p / Vt]
+                else:
+                    J, dJ = g["table"](np.abs(self.mesh.Cdop[i]), V - phip[i])
+                    # J > 0: holes flow metal -> semiconductor.
+                    Gp[i] += J / Q * k
+                    nV = ni[i] * np.exp((psi[i] - V + dEi[i]) / Vt)
+                    Gn[i] += -vn * (n - nV) * k
+                    I[g["pos"]] = (J + Q * vn * (n - nV)) * A
+                    if jacobian:
+                        rows_p += [i]; cols_p += [2 * N + i]; vals_p += [-dJ / Q * k]
+                        rows_n += [i, i]; cols_n += [i, N + i]
+                        vals_n += [-vn * k * (n - nV) / Vt, -vn * k * (-n / Vt)]
             I_node[name] = I
         if not jacobian:
             return Gn, Gp, None, None, I_node

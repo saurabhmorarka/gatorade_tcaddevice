@@ -23,10 +23,14 @@ PLANAR_DEFAULTS = {
     # degenerate epi; plans/schottky_plan.md): thermionic emission + tunneling,
     # as a sub-grid boundary condition (contacts/subgrid.py). "ohmic" = ideal.
     "contact_type": "schottky",
-    # The metal's electron barrier (eV). 0.45: what the measured rho_c of
-    # Ti(Si)/TiN on Si:P implies in this model (README, Study A). A p+
-    # contact gets Eg - Phi_Bn of its own semiconductor (pinned to Ec).
-    "contact_barrier_n_eV": 0.45,
+    # The metal's effective barrier (eV) to the S/D majority carrier, set so
+    # the specific contact resistivity at the S/D doping matches modern
+    # silicided contacts, rho_c ~ 1.5e-9 Ohm cm^2 (Ti/TiSix on Si:P 7e20:
+    # 0.20 eV; was 0.45 eV, rho_c 3.6e-9, DEVELOPMENT_LOG 88). A p contact
+    # uses contact_barrier_p_eV (Ti/SiGe:B, pinned near the valence band) and
+    # a hole tunneling mass of contact_m_tunnel_p (None: the default 0.39);
+    # contact_barrier_p_eV None: Eg - Phi_Bn of its own semiconductor.
+    "contact_barrier_n_eV": 0.20, "contact_barrier_p_eV": 0.10, "contact_m_tunnel_p": 0.25,
     # Low-resistance contact engineering (real flows; plans/schottky_plan.md 9):
     # the contact trench is etched this far into the S/D silicon so the metal
     # also contacts the recess sidewalls (nm; 0 = a top contact only) ...
@@ -158,7 +162,7 @@ def planar(params):
     # the source/drain) or "ohmic"
     sd = {"type": p["contact_type"]}
     if p["contact_type"] == "schottky":
-        sd["barrier_n_eV"] = "contact_barrier_n_eV"
+        _sd_barrier(p, sd)
     device = {"contacts": [
         {"name": "source", "region": "source_contact", **sd},
         {"name": "drain", "region": "drain_contact", **sd},
@@ -184,7 +188,7 @@ FINFET_DEFAULTS = {
     "gate_wf": None,          # eV; None: 4.40 (nmos) / 4.80 (pmos) (undoped channel: Vt set by the metal)
     "contact_material": "TiN",
     "contact_type": "schottky",
-    "contact_barrier_n_eV": 0.45,
+    "contact_barrier_n_eV": 0.20, "contact_barrier_p_eV": 0.10, "contact_m_tunnel_p": 0.25,
     "contact_recess": 5,      # contact trench into the epi (nm)
     "cpp": 48,                # contacted poly pitch = the x domain
     "Lg": 15,
@@ -342,10 +346,24 @@ def _replacement_gate(p, process, gm, hk, hk_label, metal_label, release=None):
     process[k_cmp + 1:k_cmp + 1] = rmg
 
 
+def _sd_barrier(p, sd):
+    """The S/D Schottky contact's barrier entries: a p contact takes its own
+    hole barrier (contact_barrier_p_eV: Fermi-level pinning near the valence
+    band, the same on every SiGe composition) and hole tunneling mass; an n
+    contact (or a p one with contact_barrier_p_eV None: Eg - Phi_Bn of its own
+    semiconductor) the electron barrier."""
+    if p.get("type") == "pmos" and p.get("contact_barrier_p_eV") is not None:
+        sd["barrier_p_eV"] = "contact_barrier_p_eV"
+        if p.get("contact_m_tunnel_p") is not None:
+            sd["m_tunnel_p"] = "contact_m_tunnel_p"
+    else:
+        sd["barrier_n_eV"] = "contact_barrier_n_eV"
+
+
 def _device_layer(p):
     sd = {"type": p["contact_type"]}
     if p["contact_type"] == "schottky":
-        sd["barrier_n_eV"] = "contact_barrier_n_eV"
+        _sd_barrier(p, sd)
     return {"contacts": [
         {"name": "source", "region": "source_contact", **sd},
         {"name": "drain", "region": "drain_contact", **sd},
@@ -472,7 +490,7 @@ NANOSHEET_DEFAULTS = {
     "gate_wf": None,
     "contact_material": "TiN",
     "contact_type": "schottky",
-    "contact_barrier_n_eV": 0.45,
+    "contact_barrier_n_eV": 0.20, "contact_barrier_p_eV": 0.10, "contact_m_tunnel_p": 0.25,
     "contact_recess": 5,
     "cpp": 48,
     "Lg": 15,

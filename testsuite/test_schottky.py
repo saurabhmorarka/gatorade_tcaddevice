@@ -284,7 +284,10 @@ class TestSchottky3D(unittest.TestCase):
         from fab.simulate import build_device, schottky_contacts
         cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs",
                            "fab_planar_tiny.yaml")
-        d = build_device(flow.load(cfg), mesher="octree", log=lambda *a: None)
+        cfg = flow.load(cfg)
+        # the golden currents predate the recalibrated contact (0.20 eV, DEVELOPMENT_LOG 88): pinned to 0.45 eV
+        cfg["params"] = {**(cfg.get("params") or {}), "contact_barrier_n_eV": 0.45}
+        d = build_device(cfg, mesher="octree", log=lambda *a: None)
         d["schottky"] = schottky_contacts(d, log=lambda *a: None)
         cls.d = d
         cls.res = {kind: cls.solve(d, d["schottky"] if kind == "schottky" else None)

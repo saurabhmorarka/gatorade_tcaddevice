@@ -82,9 +82,9 @@ def main(argv=None):
                         "interface_charge_where=all (also STI / spacers / BOX; default gate) highk=1 "
                         "surface_scale_n=1.1 "
                         "(solver2d/surface_mobility.MobilityModel)")
-    m.add_argument("--ballistic", nargs="?", const="on", choices=("on", "off"), default="off",
+    m.add_argument("--ballistic", nargs="?", const="on", choices=("on", "off"), default="on",
                    help="ballistic mobility 1/mu = 1/mu_low + 1/mu_bal in the gated channel (docs/ballistic.md; "
-                        "default off)")
+                        "default on)")
     m.add_argument("--ballistic-k", type=float, default=None, metavar="K",
                    help="with --ballistic: mu_bal/L_ch in cm2/(V s nm) for both carriers (default: from the "
                         "masses, 23.9 n / 16.4 p; Sentaurus 20; Monte Carlo 8.4)")

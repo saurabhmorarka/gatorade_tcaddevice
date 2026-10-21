@@ -7358,3 +7358,76 @@ size of the gap is uncertain.
 - the FinFET PMOS Idlin is not monotonic in Lg (39 / 68 / 38 / 62 uA/um,
   the same with the term off), unexplained;
 - the 2D stand-in device has a low μ_ch (45-85).
+
+## 86. Ballistic mobility on by default; FinFET PMOS Idlin non-monotonicity explained
+
+- Default flipped to ON on user decision (it decays as 1/Lg and matters as Lg shrinks);
+  `--ballistic off` / `ballistic: false` disables. k unchanged (theory 23.9 / 16.4).
+- PMOS Lg-sweep acceptance: user accepts the current PMOS behaviour (some gain with Lg).
+- 3D dislocations stay opt-in; PMOS series-resistance calibration deferred.
+- FinFET PMOS Idlin (39/68/38/62 uA/um at Lg 12/15/20/30) is an octree-mesh artifact: voxel
+  geometry and Schottky area are identical (222/223 nm2), but the drain-contact node count
+  varies (520/630/457/590) and Idlin follows it; hole drop is mostly at the contacts. The
+  Cartesian mesh gives smooth 17.5/17.2/17.0/16.5 uA/um at Vgs -0.7 V. Open: make the
+  octree contact refinement independent of cpp (NMOS is less sensitive).
+
+
+## 87. Series-resistance partition; FinFET PMOS octree contact resistance fixed
+
+- `scripts/resistance/partition.py` (docs/resistance_partition.md): linear-regime
+  (|Vds| 0.05, |Vgs| 0.7 V) partition of Vds/Id into channel / spacer / epi /
+  contact, source and drain, from the quasi-Fermi dissipation per edge and per
+  Schottky node (R = P/Id^2); the sum closes to Id*Vds (1.0000, all 8 cases).
+  Result table in the doc: contact is 52-79% of R_tot; ballistic (Lg 15) raises
+  only the channel part.
+- FinFET PMOS Idlin(Lg) wobble (log 86) found: the drain-contact R alternated
+  8.2/2.6/8.1/2.6 kOhm. The plug touches SiGe0.5 and the SiGe0.2 seed (~55:45 area);
+  `contact_material` took ONE table by node-count majority and the octree node
+  count flips the vote. Fix: tables per material (`contact_groups`, per-group
+  `_rates`). Contact R 7.4/7.3/7.3/7.3 kOhm, Idlin 52.4/51.9/50.3/47.9 uA/um
+  (Lg 12/15/20/30, ballistic off).
+- `contact_current` ignored Dirichlet semiconductor nodes of a Schottky contact
+  (zero interface area, 2 per contact on the nanosheet): Id under-reported 5.5% NMOS
+  / 11% PMOS (nanosheet Idlin 161.3 -> 170.6, 47.3 -> 52.5 uA/um). Fixed in
+  solver2d/current.py. Open: those nodes are ideal-ohmic shorts (3-6% of the current
+  each); releasing them stalled the nanosheet solves.
+- Test: `test_schottky_contact_groups_per_material` (test_piezo_mobility).
+
+
+## 88. Resistance partition as a default run output; contact recalibration; test fixes
+
+- `fab/partition.py`: the log-87 partition is now computed by `fab simulate` for every Vds
+  curve from a state the walk already solved (nearest |Vgs| 0.7 V, on-state side): zero extra
+  solves. Writes `partition_Vds*.json` and a figure (region map of the cut nodes coloured
+  channel / spacer / epi + contact nodes, dissipation per nm with regions shaded, R bars
+  source / drain) and logs one summary line. `scripts/resistance/partition.py` imports it.
+- User asked: contact R is too large a share, rho_c should be ~1-1.5e-9. Literature (imec,
+  patents) agrees (SiGe:B / Ti 5.7e-10 to 1.5e-9 at ~1e21 B). Recalibrated: NMOS effective
+  barrier 0.45 -> 0.20 eV (rho_c 3.6 -> 1.6e-9), PMOS own hole barrier 0.10 eV on every SiGe
+  (was Eg - 0.45: 0.30 on SiGe0.5, 0.52 on the SiGe0.2 seed) and hole tunneling mass 0.25
+  (rho_c 1.5e-8 -> 3.6e-9; the 1D model cannot reach 1.5e-9 at 5e20 B, floor ~2.5e-9 at 1.5e21).
+  New template params contact_barrier_p_eV, contact_m_tunnel_p (templates._sd_barrier).
+- New 8-case table (docs/resistance_partition.md): contact 32-46% (was 52-79%), channel 26-52%,
+  spacer 10-17%, epi 5-18%; closure 1.000; Id,lin NMOS FinFET 211 / 184 (ballistic off / on),
+  PMOS 130 / 112, nanosheet NMOS 261 / 222, PMOS 129 / 111 uA/um.
+- Source/drain asymmetry: spacer / epi / channel agree within 3%; the contact term differed 10-14%
+  (mesh). With the new contact rho_c agree within 5%.
+- Spacer doping checked: the lateral profile is already ~erfc (2.7 nm/decade); not changed.
+- The runs that stalled near Vt were the project .venv (no PETSc), not the code: use
+  ~/miniconda3/envs/tcad/bin/python.
+- Tests: test_schottky 3D golden pinned to the old 0.45 eV barrier; test_mosfet_2d golden run with
+  --ballistic off (bulk-mobility golden; ballistic has its own tests); test_surface_mobility
+  Matthiessen-order test builds its 2D device with ballistic off. 236 tests.
+
+Next steps (waiting for user decisions):
+1. PMOS contact still ~2.5x above the best measured rho_c: needs light-hole / non-parabolic
+   tunneling in contacts/newton_schottky_1d.py, or a higher active B (1e21) in the epi (user's
+   stack says 5e20) - user decision.
+2. Zero-area pinned contact nodes (nanosheet) are ideal-ohmic shorts, so the nanosheet contact R
+   is understated; release them without stalling the solve.
+3. Cartesian-mesh partition closure is 1.5-1.7 (octree only is trusted); investigate or warn.
+4. Spacer R: if a lighter / steeper extension is intended, set epi_sx / ext_* and recalibrate; the
+   fixed Gaussian tails are already ~ a 2 nm diffusion length. No anneal / diffusion step exists
+   in the fab flow (planned, with stress).
+5. Ballistic default ON changed short-channel Id by 4-9%: goldens other than mosfet_2d untouched.
+6. Octree source/drain node-count asymmetry remains (contact refinement independent of cpp).
