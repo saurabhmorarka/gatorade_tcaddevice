@@ -72,7 +72,7 @@ def mosfet_2d(mode="fast"):
     import main2d_mosfet_sweep as m
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return m._context(m.DEFAULT_PATH, None, None, mode)
+        return m._context(m.DEFAULT_PATH, None, None, mode, ballistic="off")      # (ballistic: test_ballistic_mobility.py)
 
 
 class TestFormulas(unittest.TestCase):

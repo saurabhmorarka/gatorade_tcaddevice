@@ -234,13 +234,13 @@ def mobility_options(cfg, override=None):
 
 def ballistic_options(cfg, override=None):
     """The ballistic-mobility options of a config (a ballistic: block,
-    docs/ballistic.md; default off) or None when off. override: None (the
+    docs/ballistic.md; default ON, `ballistic: false` or override "off" turns it off) or None when off. override: None (the
     config decides), "on" (the config's block, or the defaults) or "off"."""
     b = cfg.get("ballistic")
     if isinstance(b, bool):
         b = {"enabled": b}
     b = dict(b or {})
-    on = bool(b.get("enabled", bool(b))) if override is None else override == "on"
+    on = bool(b.get("enabled", True)) if override is None else override == "on"
     return b if on else None
 
 
@@ -550,7 +550,7 @@ def main():
                         help="ignore the config's stress: block (the unstressed reference run)")
     parser.add_argument("--ballistic", choices=("on", "off"), default=None,
                         help="ballistic mobility (docs/ballistic.md): override the config's ballistic: block "
-                             "(default: the config decides; off without a block)")
+                             "(default: the config decides; on without a block)")
     parser.add_argument("--vtk", nargs="?", const="last", choices=["last", "all"], default=None,
                         help="also write VTK (<out-dir>/vtk/*.vtu + one .pvd per curve, for ParaView): "
                              "'last' (default) = the last point of each curve, 'all' = every bias point "

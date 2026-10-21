@@ -245,6 +245,27 @@ class TestPlumbing(unittest.TestCase):
         self.assertIs(contact_material(mesh, si, np.array([0, 1])), si)       # Si nodes: the base object
         self.assertIs(contact_material(SimpleNamespace(), si, np.array([0])), si)
 
+    def test_schottky_contact_groups_per_material(self):
+        """A contact straddling two semiconductors gets one group per material
+        (DEVELOPMENT_LOG 87): the node-count majority vote used to pick one
+        table for both, flipping the FinFET PMOS contact resistance 3x with
+        the mesh."""
+        from contacts.subgrid import contact_groups
+        from core.config import _resolve_material_block
+        from fab.simulate import semiconductor_material
+        si = _resolve_material_block({})
+        sige = semiconductor_material("SiGe")
+        seed = semiconductor_material("SiGe0.2")
+        mesh = SimpleNamespace(node_materials=[si, sige, seed], node_material_index=np.array([1, 2, 2, 1, 2, 1]))
+        g = contact_groups(mesh, si, np.array([0, 1, 2, 3, 4, 5]))
+        self.assertEqual(len(g), 2)
+        self.assertIs(g[0][0], sige)
+        self.assertEqual(g[0][1].tolist(), [0, 3, 5])
+        self.assertIs(g[1][0], seed)
+        self.assertEqual(g[1][1].tolist(), [1, 2, 4])
+        g = contact_groups(SimpleNamespace(), si, np.array([7, 8]))
+        self.assertEqual([(m is si, p.tolist()) for m, p in g], [(True, [0, 1])])
+
 
 if __name__ == "__main__":
     unittest.main()

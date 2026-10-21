@@ -14,6 +14,30 @@ to compare against a 1D solve's own current density.
 from core.params import Q
 
 
+def _pinned_node_current(mesh, mat, result, contact_name, released):
+    """Current (A) the metal injects at the contact's semiconductor nodes that
+    stay Dirichlet next to a sub-grid Schottky contact - nodes on the contact
+    boundary with no metal interface area (a voxel corner / edge touching the
+    metal), which the Schottky model does not release: net outflow of their
+    edges. Zero where there are none."""
+    import numpy as np
+    bc = np.array(mesh.boundary_bc_type)
+    pts = mesh.boundary_point_index[bc == f"contact:{contact_name}"]
+    is_ins = mesh.is_insulator if mesh.is_insulator is not None else np.zeros(len(mesh.points), bool)
+    pinned = np.zeros(len(mesh.points), bool)
+    pinned[pts[~is_ins[pts]]] = True
+    pinned[released] = False
+    if not pinned.any():
+        return 0.0
+    from solver2d.newton_solver_qf_2d import edge_currents
+    In_e, Ip_e = edge_currents(mesh, mat, result["psi"], result["n"], result["p"], result["phin"],
+                               result["phip"], result.get("velocity_saturation", False),
+                               qs=result.get("qshift"))
+    I_e = In_e + Ip_e
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    return float(np.sum(I_e[pinned[ii]]) - np.sum(I_e[pinned[jj]]))
+
+
 def contact_current(mesh, mat, result, contact_name):
     """Total current (A/cm) flowing OUT of the named contact into the
     device, summed over every mesh edge connecting a contact point to a
@@ -28,7 +52,8 @@ def contact_current(mesh, mat, result, contact_name):
         # Sub-grid Schottky contact: the current crosses the barrier at the
         # released semiconductor nodes (contacts/subgrid.py); the metal's
         # remaining (insulator-side) nodes carry none.
-        return sk.terminal_current(result, contact_name, result["bias"])
+        I_sk = sk.terminal_current(result, contact_name, result["bias"])
+        return I_sk + _pinned_node_current(mesh, mat, result, contact_name, sk.specs[contact_name]["nodes"])
 
     boundary_bc_type = np.array(mesh.boundary_bc_type)
     is_contact_boundary = boundary_bc_type == f"contact:{contact_name}"

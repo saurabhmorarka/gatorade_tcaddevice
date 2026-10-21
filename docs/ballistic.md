@@ -4,8 +4,8 @@ In a channel a few mean free paths long, part of the carriers cross it
 without scattering, and drift-diffusion with the long-channel mobility no
 longer holds. The quasi-ballistic correction used by Sentaurus (BalMob) and
 by Shur adds a channel-length "ballistic mobility" by Matthiessen's rule.
-It is **OFF by default**: nothing changes unless it is asked for
-(DEVELOPMENT_LOG 85).
+It is **ON by default** since DEVELOPMENT_LOG 86 (`--ballistic off` or
+`ballistic: false` turns it off). It fades as 1/Lg, so long channels are unchanged.
 
 ## The model
 
@@ -380,10 +380,14 @@ against the paper before being quoted elsewhere.
   ballistic term's own Lg trend is small.
 - **k default.** The theory value (23.9 / 16.4) is an upper bound on
   μ_bal. Monte Carlo suggests 8-13. Which to make the default is a user
-  decision. The term stays OFF by default either way.
+  decision. The term is ON by default (DEVELOPMENT_LOG 86) with the theory k; k is still open.
 - **FinFET PMOS Idlin is not monotonic in Lg** (39 / 68 / 38 / 62 uA/um at
   12 / 15 / 20 / 30 nm, the same with the term off; Ion is smooth). It is
   independent of the ballistic term. The suspect is the Schottky contact
-  or the octree mesh at cpp 45 / 53 nm. Not investigated.
+  or the octree mesh at cpp 45 / 53 nm. **Explained (DEVELOPMENT_LOG 86): an
+  octree-mesh artifact.** The Schottky drain-contact node count varies with
+  cpp (520/630/457/590 nodes at 12/15/20/30 nm, same 223 nm² area) and Idlin
+  follows it (39/68/38/62); the Cartesian mesh gives a smooth
+  17.5/17.2/17.0/16.5 uA/um at Vgs -0.7 V.
 - The 2D planar stand-in (1 nm oxide, body 6e18) has μ_ch ≈ 45-85
   cm²/Vs. A higher-mobility 2D cell would show the term more clearly.

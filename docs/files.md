@@ -38,6 +38,8 @@
 | `contacts/schottky.py` | Schottky contact physics kernel: barrier models (direct, Schottky-Mott, pinned), thermionic-emission boundary quantities, image-force lowering, exact piecewise-linear WKB integral with analytic derivatives, Tsu-Esaki supply, depletion-model rho_c reference |
 | `contacts/newton_schottky_1d.py` | 1D quasi-Fermi Newton solve with Schottky ends (TE Robin rows + tunneling sink at the turning points), bias sweep, contact-resistivity extraction, energy-resolved current (`spectrum`) |
 | `contacts/study_ti_barriers.py` | Study A: Ti/TiN/NiSi barriers (Schottky-Mott vs pinned vs measured) and rho_c on NMOS Si:P and PMOS Si0.5Ge0.5:B |
+| `fab/partition.py` | The resistance partition written by every `fab simulate` run (quasi-Fermi dissipation, region map figure); docs/resistance_partition.md |
+| `scripts/resistance/partition.py` | Linear-regime series-resistance partition (channel / spacer / epi / contact, source and drain) from the quasi-Fermi dissipation; docs/resistance_partition.md |
 | `contacts/plot_schottky_current.py` | Barrier, tunneling paths and tunneling vs over-the-barrier current, NMOS and PMOS, vs doping |
 | `contacts/subgrid.py` | Sub-grid Schottky contact for 2D/3D meshes: J(N, u) table from the 1D model (disk cache), nodal source term + Jacobian for `newton_solve_2d(schottky=...)`, terminal current, metal interface area per node from voxel faces |
 

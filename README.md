@@ -4,10 +4,19 @@ TCAD device simulators built from scratch in Python/NumPy/SciPy (hot loops
 in Rust): 1D, then 2D, now 3D. Newest work first; each section links to
 its details.
 
+## Series-resistance partition ([details](docs/resistance_partition.md))
+
+Every `fab simulate` run now writes `partition_Vds*.json/.png`: the solved state nearest |Vgs| 0.7 V split into
+channel / spacer / epi / contact (quasi-Fermi dissipation, closes to Id*Vds) with a region map, at no extra
+solve. At |Vds| 0.05 V, |Vgs| 0.7 V the Schottky contact is 32-46% of R_tot (it was 52-79% before the contact
+recalibration: rho_c Si:P 1.6e-9, SiGe:B 3.6e-9 Ohm cm2), and ballistic mobility only raises the channel part.
+The FinFET PMOS octree contact-resistance wobble was a node-count vote between two SiGe contact materials; the
+contact is now tabulated per material.
+
 ## Ballistic mobility: short-channel Lg sweep and the mobility stack ([details](docs/ballistic.md))
 
-An opt-in quasi-ballistic correction (`fab simulate --ballistic`, or a
-2D `ballistic:` block; default OFF). Per channel edge it uses Matthiessen:
+A quasi-ballistic correction, ON by default (`--ballistic off` or `ballistic: false` turns it off; a
+2D `ballistic:` block sets k). Per channel edge it uses Matthiessen:
 1/μ = 1/μ_low + 1/(γ^0.5 μ_bal), with μ_bal = q v_T L_ch/(2kT) (Shur /
 Sentaurus BalMob; exactly Lundstrom's linear-regime backscattering). The
 term comes after the stress factor γ and before velocity saturation. It
@@ -135,7 +144,7 @@ barrier 0.67 eV instead of 0.30 eV; it now uses the SiGe it touches
 The 3D PMOS gains are well below the literature's +50-100% Ion, for three reasons:
 - the 3D PMOS are series-resistance limited;
 - velocity saturation caps the channel;
-- the ballistic mobility ([docs/ballistic.md](docs/ballistic.md)) is off by default, and it only lowers μ.
+- the ballistic mobility ([docs/ballistic.md](docs/ballistic.md)) is on by default (it fades as 1/Lg at long channel, so long devices are unchanged), and it only lowers μ.
 
 These 3D NMOS numbers predate the NMOS stressors above (Si:P, on by
 default), when the 3D NMOS flows carried almost no stress. Open (user

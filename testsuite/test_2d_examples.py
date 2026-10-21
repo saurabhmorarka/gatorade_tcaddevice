@@ -60,7 +60,7 @@ EXAMPLES_2D = {
                    keys=["VG_V"], values=["Qs_C_cm2", "C_lf_F_cm2"], rtol=1e-3, floor=1e-14),
     # the golden is the bulk-mobility solver: the inversion-layer mobility (default fast since
     # DEVELOPMENT_LOG 83) has its own tests (test_surface_mobility.py)
-    "mosfet_2d": dict(cmd=["main2d_mosfet_sweep.py"], args=["--mobility", "off"],
+    "mosfet_2d": dict(cmd=["main2d_mosfet_sweep.py"], args=["--mobility", "off", "--ballistic", "off"],      # (ballistic: its own tests, default ON since log 86)
                       csvs=["ids_vgs.csv", "ids_vds.csv"],
                       keys=["Vds_V", "Vgs_V"], values=["Id_A_per_um"], rtol=1e-3, floor=1e-13,
                       quick=dict(config="configs/input_mosfet_2d.yaml",

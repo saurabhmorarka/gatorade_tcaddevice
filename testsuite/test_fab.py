@@ -752,3 +752,18 @@ class TestNanosheetBDI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResistancePartitionPlumbing(unittest.TestCase):
+    def test_region_of_x(self):
+        from fab.partition import region_of_x
+        got = region_of_x([0.0, 11.0, 14.0, 20.0, 24.0, 36.0, 40.0], 16.5, 31.5, 5.0)
+        self.assertEqual(list(got), ["epi", "epi", "spacer", "channel", "channel", "spacer", "epi"])
+
+    def test_contact_barrier_entries(self):
+        from fab.templates import _sd_barrier
+        n, p = {}, {}
+        _sd_barrier({"type": "nmos", "contact_barrier_n_eV": 0.2, "contact_barrier_p_eV": 0.1}, n)
+        _sd_barrier({"type": "pmos", "contact_barrier_n_eV": 0.2, "contact_barrier_p_eV": 0.1, "contact_m_tunnel_p": 0.25}, p)
+        self.assertEqual(n, {"barrier_n_eV": "contact_barrier_n_eV"})
+        self.assertEqual(p, {"barrier_p_eV": "contact_barrier_p_eV", "m_tunnel_p": "contact_m_tunnel_p"})

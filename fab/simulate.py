@@ -292,8 +292,8 @@ def schottky_contacts(d, log=print):
     for c in st.contacts:
         if c.get("type") != "schottky":
             continue
-        kw = {k: evaluate(c[k], p) for k in ("barrier_n_eV", "barrier_p_eV") if c.get(k) is not None}
-        if not kw:
+        kw = {k: evaluate(c[k], p) for k in ("barrier_n_eV", "barrier_p_eV", "m_tunnel_n", "m_tunnel_p") if c.get(k) is not None}
+        if not any(k.startswith("barrier") for k in kw):
             region = next(r for r in st.regions if r.name == c["region"])
             kw["metal"] = region.material
         by_name[c["name"]] = SchottkyContact(**kw)
@@ -622,8 +622,17 @@ def run_curve(task):
         if task.get("include_zero", True):
             states = {0.0: base, **states}
         pts = {v: drain_current(d, r) for v, r in states.items()}
+        part = None
+        if task.get("partition_dir"):                 # the default resistance partition of a state already solved
+            try:
+                from fab.partition import report, summary_line
+                part = report(d, states, Vds, task["partition_dir"], label=task.get("label", ""))
+                part = None if part is None else dict(Vgs=part["Vgs"], line=summary_line(part))
+            except Exception as e:                    # (a report must never fail the run)
+                part = dict(error=f"{type(e).__name__}: {e}")
         entries = sorted((e for e in (f.result() for f in pending) if e), key=lambda e: e["timestep"])
-    return dict(task=task, points=pts, entries=entries, iters=it0 + it1, time_s=time.perf_counter() - t0)
+    return dict(task=task, points=pts, entries=entries, iters=it0 + it1, time_s=time.perf_counter() - t0,
+                partition=part)
 
 
 # --- output ---------------------------------------------------------------------------------
@@ -762,7 +771,7 @@ def _octree_vtu_geometry(d):
 def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm=None, half_z=True,
              vtk="all", workers=None, log=print, mesher="cartesian", quantum=None, vgs_min=0.0, tunneling=None,
              vsat=True, stress=None, piezo="saturating", piezo_doping=True, stress_set=None, mobility="fast",
-             ballistic=None):
+             ballistic=None, partition=True):
     """vsat: the velocity-saturation driving force. True = the fast default
     ("hybrid", solver2d/newton_solver_qf_2d.py); "mqf" = the exact one, the
     gradient of Sentaurus' modified quasi-Fermi potential with n0 1e10
@@ -845,6 +854,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     for v in vds:
         tasks.append(dict(config=config, Vds=v, vgs=vgs, top_nm=top_nm, half_z=half_z, vtk=vtk,
                           vtk_keep=(0.0, min(vgs), max(vgs)), mesher=mesher, vtk_dir=os.path.join(out_dir, "vtk"),
+                          partition_dir=out_dir if partition else None, label=os.path.basename(str(config)),
                           quantum=quantum, tunneling=tunneling, stress=stress_key, mobility=mob, ballistic=bal_key))
     n_work = workers or performance_cores()
     ctx = {k: v for k, v in d.items() if k != "st"}               # no level sets to the workers
@@ -876,6 +886,11 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
         curves.append(dict(Vds=r["task"]["Vds"], Vgs=np.array(v), Id=np.array(ids)))
         log(f"  Vds={r['task']['Vds']:g} V: {len(v)} points, {r['iters']} Newton iterations, "
             f"{r['time_s']:.0f} s")
+        for part in (x.get("partition") for x in curve_results if x["task"]["Vds"] == r["task"]["Vds"]):
+            if part and "line" in part:
+                log(f"    resistance partition at Vgs {part['Vgs']:+.2f} V: {part['line']} -> partition_Vds{r['task']['Vds']:g}.png")
+            elif part:
+                log(f"    resistance partition skipped: {part['error']}")
         if r.get("entries"):
             vtk_io.write_pvd(os.path.join(out_dir, "vtk", f"idvg_Vds{r['task']['Vds']:g}.pvd"), r["entries"])
     with open(os.path.join(out_dir, "ids_vgs.csv"), "w", newline="") as f:
