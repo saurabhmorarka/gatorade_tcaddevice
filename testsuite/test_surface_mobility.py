@@ -76,6 +76,18 @@ def mosfet_2d(mode="fast"):
 
 
 class TestFormulas(unittest.TestCase):
+    def test_channel_direction_sets_the_sidewall_family(self):
+        """(001) wafer: a <110> channel puts the FinFET side walls (device z) on (110) and the
+        fin top (device y) on (100); a <100> channel (45 degrees rotated) makes the side walls (100)."""
+        from mechanics.elastic import channel_frame
+        n = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]])
+        w110 = sm.orientation_weights(n, 0.0, channel_frame(110))
+        w100 = sm.orientation_weights(n, 0.0, channel_frame(100))
+        np.testing.assert_array_equal(w110, [[0, 1, 0], [1, 0, 0]])
+        np.testing.assert_array_equal(w100, [[1, 0, 0], [1, 0, 0]])
+        with self.assertRaises(ValueError):
+            channel_frame(111)
+
     def test_lombardi_hand_numbers(self):
         """Plan 1.2: electrons N 1e17, F 1 MV/cm: mu_ac ~ 47.5 + 580*1e17^0.125/100
         = 821, mu_sr = 582; holes 0.5 MV/cm: mu_ac ~ 20 + 2947*1e17^0.0317/79.4."""

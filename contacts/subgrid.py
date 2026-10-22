@@ -52,6 +52,7 @@ V_SWEEP = tuple(np.round(np.r_[0.01, np.arange(0.025, 0.401, 0.025), 0.5, 0.6, 0
 # cm^-3: a contact's doped island for coarse_space (1e18 and 1e19 measured
 # the same on the planar device; 1e20 cuts the island to the contact implant)
 COARSE_DOPING = 1e18
+AREA_FLOOR = 0.02            # token interface area of a zero-area contact-boundary node, x the median node area
 
 
 def _material_key(mat):
@@ -240,8 +241,19 @@ class SubgridContacts:
         bc = np.array(mesh.boundary_bc_type)
         is_ins = mesh.is_insulator if mesh.is_insulator is not None else np.zeros(len(mesh.points), bool)
         specs = {}
+        area_geom = area
+        area = np.array(area, float)
         for name, c in contacts.items():
             pts = mesh.boundary_point_index[bc == f"contact:{name}"]
+            # A contact-boundary node that meets the metal only along an edge or at a corner has no
+            # interface area (the nanosheet: 2 per contact). Left Dirichlet it would be an ideal ohmic
+            # short carrying 3-6% of the current each, and the lower the contact's rho_c the larger its
+            # share (it hid 3x of the source contact's resistance at rho_c 1e-9). It becomes a Schottky
+            # node with a token patch (AREA_FLOOR x the median node area), i.e. carries almost nothing.
+            semi_all = pts[~is_ins[pts]]
+            pos_a = area[semi_all] > 0
+            if pos_a.any() and (~pos_a).any():
+                area[semi_all[~pos_a]] = AREA_FLOOR * float(np.median(area[semi_all[pos_a]]))
             semi = pts[~is_ins[pts] & (area[pts] > 0)]
             if not len(semi):
                 raise ValueError(f"Schottky contact {name!r} touches no semiconductor node with an interface area")
@@ -250,13 +262,17 @@ class SubgridContacts:
             Nabs = np.abs(Nd)
             groups = []
             for gmat, pos in contact_groups(mesh, mat, semi):
-                table = SchottkyTable.build(gmat, c, carrier, max(Nabs[pos].min(), 1e15), Nabs[pos].max(),
+                cg = c.for_material(gmat)                  # (the TiSiGe interlayer: this material's barrier)
+                table = SchottkyTable.build(gmat, cg, carrier, max(Nabs[pos].min(), 1e15), Nabs[pos].max(),
                                             cache=cache, log=log)
-                groups.append(dict(table=table, mat=gmat, nodes=semi[pos], pos=pos, area=float(area[semi[pos]].sum())))
+                groups.append(dict(table=table, mat=gmat, contact=cg, nodes=semi[pos], pos=pos,
+                                   area=float(area[semi[pos]].sum())))
             main = max(groups, key=lambda g: g["area"])      # (the dominant group, for single-table readers)
-            specs[name] = dict(table=main["table"], nodes=semi, carrier=carrier, contact=c, mat=main["mat"],
+            specs[name] = dict(table=main["table"], nodes=semi, carrier=carrier, contact=main["contact"], mat=main["mat"],
                                groups=groups)
-        return cls(mesh, mat, specs, area)
+        sk = cls(mesh, mat, specs, area)
+        sk.area_geom = area_geom                   # the true metal interface area per node (no token patches)
+        return sk
 
     def metal_psi0(self, name):
         """The metal's electrostatic potential at zero bias in the solver's
@@ -270,8 +286,11 @@ class SubgridContacts:
         ec_off = np.full(self.N, mat.Vt * np.log(mat.Nc / mat.ni)) if ec_off is None else ec_off
         dEi = getattr(self.mesh, "dEi_arr", None)
         dEi = np.zeros(self.N) if dEi is None else dEi
-        phi_bn = s["contact"].barriers(mat.chi_eV, mat.Eg_eV)[0]
-        return float(np.median(ec_off[i] - dEi[i])) - phi_bn
+        phi_bn = np.zeros(len(i))                    # per node: its own material's barrier (the groups of the contact)
+        for g in s["groups"]:
+            gm = g["mat"]
+            phi_bn[g["pos"]] = g["contact"].barriers(gm.chi_eV, gm.Eg_eV)[0]
+        return float(np.median(ec_off[i] - dEi[i] - phi_bn))
 
     def released(self):
         """Mesh node indices the solver must NOT treat as Dirichlet."""

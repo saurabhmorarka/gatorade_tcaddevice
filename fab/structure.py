@@ -614,6 +614,25 @@ class Structure:
         cut_off = semi & ~np.isin(comp, ids[ids > 0])           # semiconductor the epi does not reach
         self._add_doping(species, np.where(cut_off, 0.0, peak * np.exp(-0.5 * d ** 2)))
 
+    def contact_doping(self, species, peak, depth, regions):
+        """Heavy doping at the contact surface: at least `peak` (cm^-3) at the
+        interface with the `regions` (the contact metal), falling as a Gaussian
+        of the distance d into the semiconductor, peak exp(-d^2 / 2 depth^2)
+        (nm; what a contact-surface cap / laser anneal gives). Only what the
+        existing doping lacks is added (max, not sum), so `peak` is the cap."""
+        g = self.grid
+        # the nodes LABELLED as the metal (not its level set: a fill's phi runs on down the whole column
+        # under the trench, which doped a continuous n+ path to the body contact)
+        lab = self.node_labels()
+        inside = np.isin(lab, [self.region_index(n) for n in regions])
+        if not inside.any():
+            raise ValueError(f"contact_doping: no region among {regions}")
+        d = ndimage.distance_transform_edt(~inside, sampling=tuple(g.h))
+        d = np.maximum(d - g.h.min(), 0.0)               # the semiconductor node next to the metal is on the interface
+        want = np.where(d <= 6.0 * depth, peak * np.exp(-0.5 * (d / depth) ** 2), 0.0)    # (cut at 6 sigma: exact zero far away)
+        have = self.donors if species in DONORS else self.acceptors
+        self._add_doping(species, np.maximum(want - have, 0.0))
+
     def dope(self, species, conc, regions=None, materials=None):
         """Uniform doping inside the given regions/materials (all if none)."""
         rs = self.regions_of(materials=materials, names=regions)

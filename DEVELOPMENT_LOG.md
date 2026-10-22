@@ -7431,3 +7431,35 @@ Next steps (waiting for user decisions):
    in the fab flow (planned, with stress).
 5. Ballistic default ON changed short-channel Id by 4-9%: goldens other than mosfet_2d untouched.
 6. Octree source/drain node-count asymmetry remains (contact refinement independent of cpp).
+
+
+## 89. Contact rho_c ~ 1e-9 (surface doping, TiSiGe), channel direction, per-node area floor
+
+- User: bring NMOS and PMOS contacts to ~1e-9 Ohm cm2 (1e21 P / B right at the surface, a TiGeSi
+  material that lowers the barrier, more Ge allowed); include substrate / surface orientation in
+  mobility and stress.
+- New process step `contact_doping` (fab/structure.py): max(epi, 1e21 Gaussian, 2 nm) at the
+  contact metal. First version used the metal's level set and doped the whole column under the
+  trench down to the body contact (7 uA = 41% of Id into the body, source contact 3x lower than
+  the drain): found from the Kirchhoff sums; now the labelled metal nodes + a test.
+- `SchottkyContact(interlayer="TiSiGe")`: hole barrier max(0.40 - 0.8 x_Ge, 0.02) eV per
+  semiconductor (`for_material`, resolved per contact group; `metal_psi0` now per group too);
+  Material gets `x_Ge`. PMOS contact: richardson_p 90 (full hh+lh supply; 32 floors rho_c at
+  2.5e-9 at any barrier), m_tunnel_p 0.25, seed SiGe0.3 (was 0.2). NMOS barrier 0.10 eV at
+  1e21. rho_c in 3D: 0.94-1.09e-9 all 8 cases, S/D within 7%.
+- Zero-area contact-boundary nodes (nanosheet) get a token area (0.02 x median) instead of being
+  Dirichlet shorts (no effect on the results here; they were 3-6% of the current each).
+- 8-case table (docs/resistance_partition.md): contact 12-31%, channel 31-69%, spacer 14-19%,
+  epi 6-20%. Id,lin FinFET NMOS 251 / 213 (ballistic off / on), PMOS 188 / 152, nanosheet NMOS
+  305 / 254, PMOS 169 / 140 uA/um.
+- Orientation: template param `channel_dir` (110 | 100, (001) wafer) -> mechanics.elastic.channel_frame
+  -> surface-mobility families, elastic stiffness (fab_stress) and PiezoModel together. FinFET
+  PMOS <100> channel: R_channel +31% (side walls (100)); NMOS unchanged (110 = 100 electrons).
+  Surface-specific piezoresistance (confinement, (110) sidewall) is not modelled: no published
+  coefficient set found.
+- Tests: contact barrier entries / TiSiGe barrier / contact_doping cap; channel_dir families;
+  seed test updated to SiGe0.3.
+
+Next steps: PMOS A*_p = 90 is a calibration, replace by a light/heavy-hole non-parabolic
+tunneling model; confinement-aware piezo coefficients per surface; anneal / diffusion step for the
+S/D and extension profiles; pinned-node token area made a proper release; Cartesian partition.

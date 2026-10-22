@@ -55,7 +55,7 @@ from mechanics.piezo import mobility_change
 
 DEFAULTS = dict(epi_x=0.5, sige_sl_x=0.30, sige_sl_strain=1.0, gate_GPa=-1.0, contact_GPa=-1.0, sti_GPa=0.0,
                 spacer_GPa=0.0, sip_strain_pct=-0.4, sd_disl=0.0, disl_depth=25.0, disl_offset=0.5,
-                disl_b=B_SI, disl_angle=90.0)
+                disl_b=B_SI, disl_angle=90.0, channel_dir=110)
 CRYSTAL = ("Si", "SiGe")          # materials a dislocation cut runs through (Si, SiGe, SiGe0.2, ...)
 SI_LIKE = {"Si"}
 
@@ -152,11 +152,12 @@ def _ge_fraction(name, mat, par):
 
 def _materials(regions, par):
     mats = {}
+    R = el.channel_frame(par.get("channel_dir", 110))
     for gid, (name, mat) in regions.items():
         if mat.startswith("SiGe"):
-            mats[gid] = el.material("SiGe", x_ge=_ge_fraction(name, mat, par))
+            mats[gid] = el.material("SiGe", R=R, x_ge=_ge_fraction(name, mat, par))
         else:
-            mats[gid] = el.material(mat)
+            mats[gid] = el.material(mat, R=R)
     return mats
 
 

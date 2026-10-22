@@ -436,4 +436,4 @@ class TestFabStressSnapshots(unittest.TestCase):
         self.assertTrue(any("S/D epitaxy" in l and "epi seed" in l for l in labels))
         self.assertFalse(any(l.startswith("S/D epi seed") for l in labels))
         x = {n: fs._ge_fraction(n, m, fs.DEFAULTS) for n, m in regions.values() if m.startswith("SiGe")}
-        self.assertEqual(x, {"sd_epi": 0.5, "sd_epi_seed": 0.2})
+        self.assertEqual(x, {"sd_epi": 0.5, "sd_epi_seed": 0.3})

@@ -53,7 +53,7 @@ WKB integral is done exactly on each linear piece, so the transmission
 needs no sub-sampling and its derivatives with respect to the nodal U are
 analytic and finite (also at the turning point).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -99,6 +99,25 @@ class SchottkyContact:
     m_tunnel_p: float = 0.39
     barrier_lowering: bool = False
     tunneling: bool = True
+    # Ti germanosilicide interlayer (Ti + SiGe react to Ti(Si,Ge)x): the hole
+    # barrier falls with the contacted SiGe's Ge fraction x,
+    # Phi_Bp = max(tisige_phi_p0 - tisige_slope x, tisige_floor) (eV; Si 0.40,
+    # 0.24 at x = 0.2, 0.16 at 0.3, the 0.02 floor from x = 0.475: Ge pins the Fermi level near the valence band); `for_material`
+    # resolves it per semiconductor into an explicit barrier_p_eV.
+    interlayer: str = None
+    tisige_phi_p0: float = 0.40
+    tisige_slope: float = 0.80
+    tisige_floor: float = 0.02
+
+    def for_material(self, mat):
+        """This contact as seen by semiconductor `mat`: with the TiSiGe
+        interlayer, the hole barrier of its Ge fraction (mat.x_Ge, 0 = Si) as an
+        explicit barrier_p_eV; otherwise the contact itself."""
+        if self.interlayer != "TiSiGe":
+            return self
+        x = float(getattr(mat, "x_Ge", 0.0) or 0.0)
+        return replace(self, barrier_p_eV=max(self.tisige_phi_p0 - self.tisige_slope * x, self.tisige_floor),
+                       barrier_n_eV=None, interlayer=None)
 
     def metal_workfunction(self):
         if self.workfunction_eV is not None:
