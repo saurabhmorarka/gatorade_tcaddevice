@@ -15,3 +15,17 @@ out/.cache/
 
 # VTK exports of the 2D drivers (--vtk): regenerable, ~0.5 MB per bias point
 out/**/vtk/
+
+# Simulation output is regenerable data (49 GB locally): never track it by default.
+# Already-tracked report figures/summaries stay tracked; to publish a new report
+# either copy the figure to docs/img/ or `git add -f out/<path>`.
+out/*
+!out/.gitkeep
+native/target/
+.venv/
+*.npz
+*.vtk
+*.vtu
+*.pkl
+*.npy
+*_structure.json

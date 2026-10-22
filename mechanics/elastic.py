@@ -29,6 +29,18 @@ FRAME_001_110 = np.array([[1.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 1.0, 0.0]])
 FRAME_001_100 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
 
 
+def channel_frame(channel_dir=110):
+    """Device frame of a (001) wafer with the channel along <channel_dir>
+    (110: the standard, FinFET side walls (110); 100: a 45-degree rotated
+    layout, side walls (100))."""
+    d = int(round(float(channel_dir)))
+    if d == 110:
+        return FRAME_001_110
+    if d == 100:
+        return FRAME_001_100
+    raise ValueError(f"channel_dir must be 110 or 100 (a (001) wafer), not {channel_dir!r}")
+
+
 def frame(rows):
     """Orthonormal rotation matrix whose rows are the device x, y, z axes
     given in crystal coordinates (any lengths)."""

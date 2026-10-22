@@ -154,6 +154,7 @@ def semiconductor_material(name):
                           "bowing_eV": 0.36, "strain": {"substrate": "Silicon", "x_substrate_Ge": 0.0}}})
         else:
             raise NotImplementedError(f"device semiconductor {name!r}: only Si and SiGe are wired into 3D")
+        _SEMI_MATS[name].x_Ge = float(name[4:] or SIGE_DEFAULT_X) if name.startswith("SiGe") else 0.0   # (the TiSiGe interlayer reads it)
     return _SEMI_MATS[name]
 
 
@@ -292,8 +293,11 @@ def schottky_contacts(d, log=print):
     for c in st.contacts:
         if c.get("type") != "schottky":
             continue
-        kw = {k: evaluate(c[k], p) for k in ("barrier_n_eV", "barrier_p_eV", "m_tunnel_n", "m_tunnel_p") if c.get(k) is not None}
-        if not any(k.startswith("barrier") for k in kw):
+        kw = {k: evaluate(c[k], p) for k in ("barrier_n_eV", "barrier_p_eV", "m_tunnel_n", "m_tunnel_p",
+                                             "richardson_n", "richardson_p") if c.get(k) is not None}
+        if c.get("interlayer") is not None:           # a string: the value of the named template parameter, or itself
+            kw["interlayer"] = p.get(c["interlayer"], c["interlayer"])
+        if not any(k.startswith("barrier") for k in kw) and not kw.get("interlayer"):
             region = next(r for r in st.regions if r.name == c["region"])
             kw["metal"] = region.material
         by_name[c["name"]] = SchottkyContact(**kw)
@@ -311,7 +315,7 @@ def schottky_contacts(d, log=print):
     area = voxel_interface_areas(lab, kinds, contact_of, axes_cm, mesh, list(by_name))
     sk = SubgridContacts.setup(mesh, d["mat"], by_name, area, log=log)
     log("Schottky contacts: " + ", ".join(
-        f"{nm} ({s['carrier']}, Phi_Bn {by_name[nm].barriers(d['mat'].chi_eV, d['mat'].Eg_eV)[0]:.2f} eV, "
+        f"{nm} ({s['carrier']}, Phi_Bn {by_name[nm].for_material(d['mat']).barriers(d['mat'].chi_eV, d['mat'].Eg_eV)[0]:.2f} eV, "
         f"{len(s['nodes'])} nodes, {area[s['nodes']].sum() * 1e14:.0f} nm^2)" for nm, s in sk.specs.items()))
     return sk
 
@@ -354,7 +358,9 @@ def _context(cfg_path, top_nm, half_z, mesher="cartesian", quantum=None, tunneli
             apply_stress(d, *stress, log=None)
         if mobility is not None:
             from solver2d.surface_mobility import attach_mobility
-            d["mobility_report"] = attach_mobility(d["mesh"], d["mat"], dict(_mkey(mobility)), log=None)
+            from mechanics.elastic import channel_frame
+            d["mobility_report"] = attach_mobility(
+                d["mesh"], d["mat"], dict(_mkey(mobility), frame=channel_frame(d["params"].get("channel_dir", 110))), log=None)
         if ballistic is not None:
             apply_ballistic(d, dict(ballistic), log=None)
         d["dev"] = MOSDevice(gate_workfunction_eV=d["wf"])
@@ -450,10 +456,10 @@ def solve_stress(config, path, par=None, log=print):
     from mechanics import fab_stress
     from mechanics.stress_field import StressField
     t0 = time.perf_counter()
-    pr = dict(fab_stress.DEFAULTS, **(par or {}))
-    res = fab_stress.run(config, pr, fast=True, log=lambda *a: None)
     fl = flow.expand(flow.load(config))
     p = resolve_params({k: v for k, v in fl["params"].items() if v is not None})
+    pr = dict(fab_stress.DEFAULTS, channel_dir=p.get("channel_dir", 110), **(par or {}))
+    res = fab_stress.run(config, pr, fast=True, log=lambda *a: None)
     field = StressField.from_fab_stress(res, config=os.path.abspath(config), par=pr)
     field.meta["fab_params"] = _fab_params_key(p)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -476,7 +482,8 @@ def apply_stress(d, path, mode="saturating", doping_factor=True, log=print):
     if fp is not None and fp != _fab_params_key(d["params"]):
         raise ValueError(f"stress field {path} was solved for different fab parameters than this device "
                          f"({field.meta.get('config')})")
-    model = PiezoModel(mode=mode, doping_factor=doping_factor)
+    from mechanics.elastic import channel_frame
+    model = PiezoModel(mode=mode, doping_factor=doping_factor, frame=channel_frame(d["params"].get("channel_dir", 110)))
     d["stress_report"] = apply_stress_mobility(d["mesh"], d["mat"], field, model, log=log)
     d["stress_field"] = path
     return d["stress_report"]
@@ -817,7 +824,7 @@ def simulate(config, out_dir, vds=(0.05, 1.0), vgs_max=1.2, vgs_step=0.1, top_nm
     d = _context(config, top_nm, half_z, mesher, quantum, tunneling, stress_key, mob, bal_key)   # mesh + equilibrium, once
     r = d.get("mobility_report")
     log("  inversion-layer mobility: off (bulk only)" if r is None else
-        f"  inversion-layer mobility ({r['mode']}, orientation {r['orientation']}): {r['n_interface']} interface "
+        f"  inversion-layer mobility ({r['mode']}, (001) wafer <{int(d['params'].get('channel_dir', 110))}> channel, orientation {r['orientation']}): {r['n_interface']} interface "
         f"nodes, families " + ", ".join(f"({k}) {v}" for k, v in r["families_interface"].items())
         + (f", interface charge {r['interface_charge']:g} cm^-2 on {r['charged_nodes']} "
            f"({r['interface_charge_where']}) interface nodes" if r["interface_charge"] else "")

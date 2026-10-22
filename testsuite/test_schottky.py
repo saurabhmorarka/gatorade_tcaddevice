@@ -326,7 +326,7 @@ class TestSchottky3D(unittest.TestCase):
                 lo[a], hi[a] = slice(0, -1), slice(1, None)
                 n = ((semi[L[tuple(lo)]] & metal[L[tuple(hi)]]) | (metal[L[tuple(lo)]] & semi[L[tuple(hi)]])).sum()
                 A += n * np.prod([h[b] for b in range(3) if b != a])
-            got = sk_.area[sk_.specs[name]["nodes"]].sum() * 1e14
+            got = sk_.area_geom[sk_.specs[name]["nodes"]].sum() * 1e14
             self.assertGreater(A, 0)
             self.assertAlmostEqual(got / A, 1.0, places=9)
 

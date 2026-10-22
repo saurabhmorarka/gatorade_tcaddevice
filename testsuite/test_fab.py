@@ -762,8 +762,44 @@ class TestResistancePartitionPlumbing(unittest.TestCase):
 
     def test_contact_barrier_entries(self):
         from fab.templates import _sd_barrier
-        n, p = {}, {}
-        _sd_barrier({"type": "nmos", "contact_barrier_n_eV": 0.2, "contact_barrier_p_eV": 0.1}, n)
-        _sd_barrier({"type": "pmos", "contact_barrier_n_eV": 0.2, "contact_barrier_p_eV": 0.1, "contact_m_tunnel_p": 0.25}, p)
+        n, p, p2 = {}, {}, {}
+        _sd_barrier({"type": "nmos", "contact_barrier_n_eV": 0.1, "contact_barrier_p_eV": None}, n)
+        _sd_barrier({"type": "pmos", "contact_barrier_n_eV": 0.1, "contact_barrier_p_eV": None,
+                     "contact_interlayer": "TiSiGe", "contact_m_tunnel_p": 0.25, "contact_richardson_p": 90.0}, p)
+        _sd_barrier({"type": "pmos", "contact_barrier_p_eV": 0.15}, p2)
         self.assertEqual(n, {"barrier_n_eV": "contact_barrier_n_eV"})
-        self.assertEqual(p, {"barrier_p_eV": "contact_barrier_p_eV", "m_tunnel_p": "contact_m_tunnel_p"})
+        self.assertEqual(p, {"interlayer": "contact_interlayer", "m_tunnel_p": "contact_m_tunnel_p",
+                             "richardson_p": "contact_richardson_p"})
+        self.assertEqual(p2, {"barrier_p_eV": "contact_barrier_p_eV"})
+
+    def test_tisige_barrier_follows_ge(self):
+        """The Ti(Si,Ge) interlayer: hole barrier 0.40 - 0.8 x (eV), floored at 0.02."""
+        from types import SimpleNamespace as NS
+        from contacts.schottky import SchottkyContact
+        c = SchottkyContact(interlayer="TiSiGe")
+        got = {x: c.for_material(NS(x_Ge=x)).barriers(4.05, 1.0)[1] for x in (0.0, 0.2, 0.3, 0.5)}
+        for x, want in {0.0: 0.40, 0.2: 0.24, 0.3: 0.16, 0.5: 0.02}.items():
+            self.assertAlmostEqual(got[x], want, places=9)
+        self.assertIs(SchottkyContact(barrier_n_eV=0.2).for_material(NS(x_Ge=0.5)).barrier_n_eV, 0.2)
+
+    def test_contact_doping_is_a_cap_at_the_metal_only(self):
+        """Contact-surface doping: ~1e21 at the semiconductor next to the contact metal, a max (not a sum)
+        with the epi doping, nothing far below. (A level-set 'inside' ran down the whole column under the
+        trench and doped a continuous n+ path to the body contact: 7 uA of body current.)"""
+        from fab import flow
+        cfg = flow.load(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs",
+                                     "fab_finfet.yaml"))
+        cfg["params"] = {**cfg["params"], "voxel": [1.0, 1.0, 1.0]}
+        st, _ = flow.build(cfg, log=lambda *a: None)
+        nd, na, net = st.net_doping()
+        lab = st.node_labels()
+        names = [r.name for r in st.regions]
+        metal = np.isin(lab, [names.index("source_contact"), names.index("drain_contact")])
+        semi = st.semiconductor_nodes()
+        from scipy import ndimage
+        near = semi & ndimage.binary_dilation(metal, structure=np.ones((3, 3, 3), bool))
+        self.assertGreater(nd[near].max(), 0.95e21)
+        self.assertLessEqual(nd[near].max(), 1.0001e21)                 # a cap: not epi 7e20 + 1e21
+        y = st.grid.axes[1]
+        deep = semi & (st.grid.y > y[-1] - 25.0)                       # the bottom 25 nm (substrate, body contact)
+        self.assertLess(nd[deep].max(), 1e12)

@@ -30,7 +30,13 @@ PLANAR_DEFAULTS = {
     # uses contact_barrier_p_eV (Ti/SiGe:B, pinned near the valence band) and
     # a hole tunneling mass of contact_m_tunnel_p (None: the default 0.39);
     # contact_barrier_p_eV None: Eg - Phi_Bn of its own semiconductor.
-    "contact_barrier_n_eV": 0.20, "contact_barrier_p_eV": 0.10, "contact_m_tunnel_p": 0.25,
+    "contact_barrier_n_eV": 0.10, "contact_barrier_p_eV": None, "contact_m_tunnel_p": 0.25,
+    "contact_interlayer": "TiSiGe", "contact_richardson_p": 90.0,
+    # crystal: a (001) wafer, the channel along <channel_dir> (110: standard, FinFET side walls (110), nanosheet
+    # faces (100); 100: 45-degree rotated, side walls (100)): the mobility orientation sets and the stress
+    # (stiffness, piezoresistance) follow it
+    "channel_dir": 110,
+    "ct_surface_peak": 0, "ct_surface_depth": 2.0,
     # Low-resistance contact engineering (real flows; plans/schottky_plan.md 9):
     # the contact trench is etched this far into the S/D silicon so the metal
     # also contacts the recess sidewalls (nm; 0 = a top contact only) ...
@@ -188,7 +194,13 @@ FINFET_DEFAULTS = {
     "gate_wf": None,          # eV; None: 4.40 (nmos) / 4.80 (pmos) (undoped channel: Vt set by the metal)
     "contact_material": "TiN",
     "contact_type": "schottky",
-    "contact_barrier_n_eV": 0.20, "contact_barrier_p_eV": 0.10, "contact_m_tunnel_p": 0.25,
+    "contact_barrier_n_eV": 0.10, "contact_barrier_p_eV": None, "contact_m_tunnel_p": 0.25,
+    "contact_interlayer": "TiSiGe", "contact_richardson_p": 90.0,
+    # crystal: a (001) wafer, the channel along <channel_dir> (110: standard, FinFET side walls (110), nanosheet
+    # faces (100); 100: 45-degree rotated, side walls (100)): the mobility orientation sets and the stress
+    # (stiffness, piezoresistance) follow it
+    "channel_dir": 110,
+    "ct_surface_peak": 1e21, "ct_surface_depth": 2.0,
     "contact_recess": 5,      # contact trench into the epi (nm)
     "cpp": 48,                # contacted poly pitch = the x domain
     "Lg": 15,
@@ -241,7 +253,7 @@ FINFET_DEFAULTS = {
     # PMOS bilayer S/D epi: a low-Ge seed grown first on the recessed silicon
     # (epi_seed_thickness nm of Si(1-x)Ge(x), x = epi_seed_x), then the
     # Si0.5Ge0.5 fill; 0 = a single-layer epi. NMOS Si:P is single-layer
-    "epi_seed_thickness": 5, "epi_seed_x": 0.2,
+    "epi_seed_thickness": 5, "epi_seed_x": 0.3,
     # process profile: "ideal" (vertical fin and S/D recess walls, sharp
     # corners) or "realistic": a tapered fin (fin_w_top at the fin top,
     # fin_w_gate_bottom at the STI top, fin_w_base at the fin etch floor)
@@ -321,6 +333,11 @@ def _sd_epi_and_contacts(p, process, n, x_open_l, x_open_r):
         {"step": "deposit", "label": "drain contact fill", "mode": "fill", "material": cmat, "name": "drain_contact",
          "to_height": "ild_top", "mask": "drain_ct"},
     ]
+    if p.get("ct_surface_peak"):
+        # the contact surface is capped heavily (Si:P / SiGe:B 1e21 right at the metal, a Gaussian below)
+        process.append({"step": "contact_doping", "label": "contact surface doping", "species": sd_sp,
+                        "peak": "ct_surface_peak", "depth": "ct_surface_depth",
+                        "regions": ["source_contact", "drain_contact"]})
 
 
 def _replacement_gate(p, process, gm, hk, hk_label, metal_label, release=None):
@@ -352,10 +369,14 @@ def _sd_barrier(p, sd):
     band, the same on every SiGe composition) and hole tunneling mass; an n
     contact (or a p one with contact_barrier_p_eV None: Eg - Phi_Bn of its own
     semiconductor) the electron barrier."""
-    if p.get("type") == "pmos" and p.get("contact_barrier_p_eV") is not None:
-        sd["barrier_p_eV"] = "contact_barrier_p_eV"
-        if p.get("contact_m_tunnel_p") is not None:
-            sd["m_tunnel_p"] = "contact_m_tunnel_p"
+    if p.get("type") == "pmos" and (p.get("contact_barrier_p_eV") is not None or p.get("contact_interlayer")):
+        if p.get("contact_barrier_p_eV") is not None:
+            sd["barrier_p_eV"] = "contact_barrier_p_eV"
+        elif p.get("contact_interlayer"):
+            sd["interlayer"] = "contact_interlayer"      # TiSiGe: the hole barrier follows the SiGe's Ge fraction
+        for k in ("m_tunnel_p", "richardson_p"):
+            if p.get("contact_" + k) is not None:
+                sd[k] = "contact_" + k
     else:
         sd["barrier_n_eV"] = "contact_barrier_n_eV"
 
@@ -490,7 +511,13 @@ NANOSHEET_DEFAULTS = {
     "gate_wf": None,
     "contact_material": "TiN",
     "contact_type": "schottky",
-    "contact_barrier_n_eV": 0.20, "contact_barrier_p_eV": 0.10, "contact_m_tunnel_p": 0.25,
+    "contact_barrier_n_eV": 0.10, "contact_barrier_p_eV": None, "contact_m_tunnel_p": 0.25,
+    "contact_interlayer": "TiSiGe", "contact_richardson_p": 90.0,
+    # crystal: a (001) wafer, the channel along <channel_dir> (110: standard, FinFET side walls (110), nanosheet
+    # faces (100); 100: 45-degree rotated, side walls (100)): the mobility orientation sets and the stress
+    # (stiffness, piezoresistance) follow it
+    "channel_dir": 110,
+    "ct_surface_peak": 1e21, "ct_surface_depth": 2.0,
     "contact_recess": 5,
     "cpp": 48,
     "Lg": 15,
@@ -538,7 +565,7 @@ NANOSHEET_DEFAULTS = {
     "epi_shape": None, "epi_lateral": None, "epi_lateral_n": 5, "epi_lateral_p": 7,
     "contact_plug_depth": 12, "contact_plug_shell": 2,      # (see the FinFET)
     "epi_lattice": 1.0,
-    "epi_seed_thickness": 5, "epi_seed_x": 0.2,     # PMOS bilayer epi (see the FinFET)
+    "epi_seed_thickness": 5, "epi_seed_x": 0.3,     # PMOS bilayer epi (see the FinFET)
     # "realistic": the S/D recess wall leans recess_angle degrees from
     # vertical (the bottom sheet's channel is longer: 2.2 deg -> about
     # +2.5 nm on the bottom sheet), its floor corner rounded (see the FinFET)

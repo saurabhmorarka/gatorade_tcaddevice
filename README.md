@@ -8,10 +8,10 @@ its details.
 
 Every `fab simulate` run now writes `partition_Vds*.json/.png`: the solved state nearest |Vgs| 0.7 V split into
 channel / spacer / epi / contact (quasi-Fermi dissipation, closes to Id*Vds) with a region map, at no extra
-solve. At |Vds| 0.05 V, |Vgs| 0.7 V the Schottky contact is 32-46% of R_tot (it was 52-79% before the contact
-recalibration: rho_c Si:P 1.6e-9, SiGe:B 3.6e-9 Ohm cm2), and ballistic mobility only raises the channel part.
-The FinFET PMOS octree contact-resistance wobble was a node-count vote between two SiGe contact materials; the
-contact is now tabulated per material.
+solve. The S/D contacts are calibrated to rho_c ~ 1e-9 Ohm cm2 (1e21 surface doping, Ti(Si,Ge)x interlayer whose
+hole barrier falls with the Ge fraction): at |Vds| 0.05 V, |Vgs| 0.7 V the contact is 12-31% of R_tot, the channel
+31-69%, and ballistic mobility only raises the channel part. `channel_dir` (110 / 100) sets the crystal frame of
+the mobility sets and the stress together.
 
 ## Ballistic mobility: short-channel Lg sweep and the mobility stack ([details](docs/ballistic.md))
 

@@ -66,9 +66,9 @@ def partition(d, r, vds, bins_nm=2.0):
             phi = r["phin"][i] if s["carrier"] == "n" else r["phip"][i]
             u = bias[nm] - phi
             P[(nm, "contact")] = float(np.sum(I_node[nm] * u))
-            ncon[nm] = dict(nodes=int(len(i)), area_nm2=float(sk.area[i].sum() * 1e14),
+            ncon[nm] = dict(nodes=int(len(i)), area_nm2=float(getattr(sk, "area_geom", sk.area)[i].sum() * 1e14),
                             u_mean_mV=float(np.average(u, weights=np.abs(I_node[nm]) + 1e-30) * 1e3),
-                            N_mean=float(np.average(np.abs(mesh.Cdop[i]), weights=sk.area[i])))
+                            N_mean=float(np.average(np.abs(mesh.Cdop[i]), weights=getattr(sk, "area_geom", sk.area)[i])))
     I = abs(contact_current(mesh, mat, r, "drain"))            # A, solved half
     half = 2.0 if d["half_z"] else 1.0
     tot = sum(P.values())
